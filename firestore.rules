@@ -1,0 +1,293 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net: Default-Deny Catch-All
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Reusable Hardened Primitives
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isVerifiedUser() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidCharId(charId) {
+      return charId is string && charId in ['lucia', 'mateo', 'kairo'];
+    }
+
+    // Validation Blueprints
+    function isValidUserSaveProfile(data, userId) {
+      return data.keys().hasAll(['uid', 'displayName', 'activeCharacterId', 'cash', 'totalEliminations', 'policeEscapes', 'stuntJumps', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'displayName', 'activeCharacterId', 'cash', 'totalEliminations', 'policeEscapes', 'stuntJumps', 'createdAt', 'updatedAt'])
+        && data.uid is string
+        && data.uid == userId
+        && isValidId(data.uid)
+        && data.displayName is string
+        && data.displayName.size() >= 1
+        && data.displayName.size() <= 80
+        && isValidCharId(data.activeCharacterId)
+        && data.cash is number
+        && data.cash >= 0
+        && data.cash <= 999999999
+        && data.totalEliminations is number
+        && data.totalEliminations >= 0
+        && data.totalEliminations <= 1000000
+        && data.policeEscapes is number
+        && data.policeEscapes >= 0
+        && data.policeEscapes <= 1000000
+        && data.stuntJumps is number
+        && data.stuntJumps >= 0
+        && data.stuntJumps <= 1000000
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidCharacterSave(data, userId, charId) {
+      return data.keys().hasAll(['id', 'ownerId', 'health', 'armor', 'posX', 'posY', 'posZ', 'heading', 'appearance', 'customOutfits', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'ownerId', 'health', 'armor', 'posX', 'posY', 'posZ', 'heading', 'appearance', 'customOutfits', 'updatedAt'])
+        && data.id == charId
+        && isValidCharId(data.id)
+        && data.ownerId is string
+        && data.ownerId == userId
+        && data.health is number
+        && data.health >= 0
+        && data.health <= 200
+        && data.armor is number
+        && data.armor >= 0
+        && data.armor <= 200
+        && data.posX is number
+        && data.posX >= -1000
+        && data.posX <= 1000
+        && data.posY is number
+        && data.posY >= -50
+        && data.posY <= 500
+        && data.posZ is number
+        && data.posZ >= -1000
+        && data.posZ <= 1000
+        && data.heading is number
+        && data.appearance is map
+        && data.appearance.keys().size() <= 16
+        && data.customOutfits is list
+        && data.customOutfits.size() <= 12
+        && (data.customOutfits.size() == 0 || data.customOutfits[0] is map)
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidInventorySave(data, userId) {
+      return data.keys().hasAll(['ownerId', 'equippedWeapon', 'weapons', 'consumables', 'contraband', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'equippedWeapon', 'weapons', 'consumables', 'contraband', 'updatedAt'])
+        && data.ownerId is string
+        && data.ownerId == userId
+        && data.equippedWeapon is string
+        && data.equippedWeapon.size() >= 1
+        && data.equippedWeapon.size() <= 32
+        && data.weapons is list
+        && data.weapons.size() <= 16
+        && (data.weapons.size() == 0 || data.weapons[0] is map)
+        && data.consumables is list
+        && data.consumables.size() <= 24
+        && (data.consumables.size() == 0 || data.consumables[0] is map)
+        && data.contraband is list
+        && data.contraband.size() <= 32
+        && (data.contraband.size() == 0 || data.contraband[0] is map)
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidSettingsSave(data, userId) {
+      return data.keys().hasAll(['ownerId', 'graphics', 'audio', 'controls', 'hudMod', 'gameplayMods', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'graphics', 'audio', 'controls', 'hudMod', 'gameplayMods', 'updatedAt'])
+        && data.ownerId is string
+        && data.ownerId == userId
+        && data.graphics is map
+        && data.graphics.keys().size() <= 16
+        && data.audio is map
+        && data.audio.keys().size() <= 12
+        && data.controls is map
+        && data.controls.keys().size() <= 16
+        && data.hudMod is map
+        && data.hudMod.keys().size() <= 16
+        && data.gameplayMods is map
+        && data.gameplayMods.keys().size() <= 16
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidMissionSave(data, userId, missionId) {
+      return data.keys().hasAll(['id', 'ownerId', 'status', 'completedCount', 'bestTimeSec', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'ownerId', 'status', 'completedCount', 'bestTimeSec', 'updatedAt'])
+        && data.id == missionId
+        && isValidId(data.id)
+        && data.ownerId is string
+        && data.ownerId == userId
+        && data.status is string
+        && data.status in ['available', 'active', 'completed']
+        && data.completedCount is number
+        && data.completedCount >= 0
+        && data.completedCount <= 10000
+        && data.bestTimeSec is number
+        && data.bestTimeSec >= 0
+        && data.bestTimeSec <= 86400
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidGarageSave(data, userId) {
+      return data.keys().hasAll(['ownerId', 'hangarVehicles', 'safehouseVehicles', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'hangarVehicles', 'safehouseVehicles', 'updatedAt'])
+        && data.ownerId is string
+        && data.ownerId == userId
+        && data.hangarVehicles is list
+        && data.hangarVehicles.size() <= 6
+        && (data.hangarVehicles.size() == 0 || data.hangarVehicles[0] is map)
+        && data.safehouseVehicles is list
+        && data.safehouseVehicles.size() <= 6
+        && (data.safehouseVehicles.size() == 0 || data.safehouseVehicles[0] is map)
+        && data.updatedAt is timestamp;
+    }
+
+    // Master Gate Helper: Parent user document must exist (or be created in same batch)
+    function userProfileExistsAfter(userId) {
+      return existsAfter(/databases/$(database)/documents/users/$(userId));
+    }
+
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isOwner(userId);
+      allow list: if false;
+      allow create: if isValidId(userId)
+        && isOwner(userId)
+        && isValidUserSaveProfile(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(userId)
+        && isOwner(userId)
+        && isValidUserSaveProfile(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'activeCharacterId', 'cash', 'totalEliminations', 'policeEscapes', 'stuntJumps', 'updatedAt']);
+      allow delete: if isValidId(userId) && isOwner(userId);
+
+      match /characters/{characterId} {
+        allow get: if isValidId(userId) && isValidCharId(characterId) && isOwner(userId);
+        allow list: if isValidId(userId) && isOwner(userId) && resource.data.ownerId == request.auth.uid;
+        allow create: if isValidId(userId)
+          && isValidCharId(characterId)
+          && isOwner(userId)
+          && isValidCharacterSave(incoming(), userId, characterId)
+          && incoming().updatedAt == request.time
+          && userProfileExistsAfter(userId);
+        allow update: if isValidId(userId)
+          && isValidCharId(characterId)
+          && isOwner(userId)
+          && isValidCharacterSave(incoming(), userId, characterId)
+          && incoming().id == existing().id
+          && incoming().ownerId == existing().ownerId
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['health', 'armor', 'posX', 'posY', 'posZ', 'heading', 'appearance', 'customOutfits', 'updatedAt']);
+        allow delete: if isValidId(userId) && isValidCharId(characterId) && isOwner(userId);
+      }
+
+      match /inventory/{slotId} {
+        allow get: if isValidId(userId) && isValidId(slotId) && slotId == 'loadout' && isOwner(userId);
+        allow list: if isValidId(userId) && isOwner(userId) && resource.data.ownerId == request.auth.uid;
+        allow create: if isValidId(userId)
+          && isValidId(slotId)
+          && slotId == 'loadout'
+          && isOwner(userId)
+          && isValidInventorySave(incoming(), userId)
+          && incoming().updatedAt == request.time
+          && userProfileExistsAfter(userId);
+        allow update: if isValidId(userId)
+          && isValidId(slotId)
+          && slotId == 'loadout'
+          && isOwner(userId)
+          && isValidInventorySave(incoming(), userId)
+          && incoming().ownerId == existing().ownerId
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['equippedWeapon', 'weapons', 'consumables', 'contraband', 'updatedAt']);
+        allow delete: if isValidId(userId) && isValidId(slotId) && slotId == 'loadout' && isOwner(userId);
+      }
+
+      match /settings/{profileId} {
+        allow get: if isValidId(userId) && isValidId(profileId) && profileId == 'preferences' && isOwner(userId);
+        allow list: if isValidId(userId) && isOwner(userId) && resource.data.ownerId == request.auth.uid;
+        allow create: if isValidId(userId)
+          && isValidId(profileId)
+          && profileId == 'preferences'
+          && isOwner(userId)
+          && isValidSettingsSave(incoming(), userId)
+          && incoming().updatedAt == request.time
+          && userProfileExistsAfter(userId);
+        allow update: if isValidId(userId)
+          && isValidId(profileId)
+          && profileId == 'preferences'
+          && isOwner(userId)
+          && isValidSettingsSave(incoming(), userId)
+          && incoming().ownerId == existing().ownerId
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['graphics', 'audio', 'controls', 'hudMod', 'gameplayMods', 'updatedAt']);
+        allow delete: if isValidId(userId) && isValidId(profileId) && profileId == 'preferences' && isOwner(userId);
+      }
+
+      match /missions/{missionId} {
+        allow get: if isValidId(userId) && isValidId(missionId) && isOwner(userId);
+        allow list: if isValidId(userId) && isOwner(userId) && resource.data.ownerId == request.auth.uid;
+        allow create: if isValidId(userId)
+          && isValidId(missionId)
+          && isOwner(userId)
+          && isValidMissionSave(incoming(), userId, missionId)
+          && incoming().updatedAt == request.time
+          && userProfileExistsAfter(userId);
+        allow update: if isValidId(userId)
+          && isValidId(missionId)
+          && isOwner(userId)
+          && isValidMissionSave(incoming(), userId, missionId)
+          && incoming().id == existing().id
+          && incoming().ownerId == existing().ownerId
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'completedCount', 'bestTimeSec', 'updatedAt']);
+        allow delete: if isValidId(userId) && isValidId(missionId) && isOwner(userId);
+      }
+
+      match /garage/{slotId} {
+        allow get: if isValidId(userId) && isValidId(slotId) && slotId == 'stored' && isOwner(userId);
+        allow list: if isValidId(userId) && isOwner(userId) && resource.data.ownerId == request.auth.uid;
+        allow create: if isValidId(userId)
+          && isValidId(slotId)
+          && slotId == 'stored'
+          && isOwner(userId)
+          && isValidGarageSave(incoming(), userId)
+          && incoming().updatedAt == request.time
+          && userProfileExistsAfter(userId);
+        allow update: if isValidId(userId)
+          && isValidId(slotId)
+          && slotId == 'stored'
+          && isOwner(userId)
+          && isValidGarageSave(incoming(), userId)
+          && incoming().ownerId == existing().ownerId
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['hangarVehicles', 'safehouseVehicles', 'updatedAt']);
+        allow delete: if isValidId(userId) && isValidId(slotId) && slotId == 'stored' && isOwner(userId);
+      }
+    }
+  }
+}

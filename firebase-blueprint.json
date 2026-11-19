@@ -1,0 +1,241 @@
+{
+  "entities": {
+    "UserSaveProfile": {
+      "title": "UserSaveProfile",
+      "description": "Top-level player save metadata and global progression for Vice Horizon.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "activeCharacterId": {
+          "type": "string",
+          "enum": ["lucia", "mateo", "kairo"]
+        },
+        "cash": {
+          "type": "number"
+        },
+        "totalEliminations": {
+          "type": "number"
+        },
+        "policeEscapes": {
+          "type": "number"
+        },
+        "stuntJumps": {
+          "type": "number"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "displayName", "activeCharacterId", "cash", "totalEliminations", "policeEscapes", "stuntJumps", "createdAt", "updatedAt"]
+    },
+    "CharacterSave": {
+      "title": "CharacterSave",
+      "description": "Per-character state, 3D coordinates, appearance, and saved custom outfits.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "enum": ["lucia", "mateo", "kairo"]
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "health": {
+          "type": "number"
+        },
+        "armor": {
+          "type": "number"
+        },
+        "posX": {
+          "type": "number"
+        },
+        "posY": {
+          "type": "number"
+        },
+        "posZ": {
+          "type": "number"
+        },
+        "heading": {
+          "type": "number"
+        },
+        "appearance": {
+          "type": "object"
+        },
+        "customOutfits": {
+          "type": "array"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "ownerId", "health", "armor", "posX", "posY", "posZ", "heading", "appearance", "customOutfits", "updatedAt"]
+    },
+    "InventorySave": {
+      "title": "InventorySave",
+      "description": "Player weapons, consumables, contraband, and equipped loadout.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "equippedWeapon": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "weapons": {
+          "type": "array"
+        },
+        "consumables": {
+          "type": "array"
+        },
+        "contraband": {
+          "type": "array"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "equippedWeapon", "weapons", "consumables", "contraband", "updatedAt"]
+    },
+    "SettingsSave": {
+      "title": "SettingsSave",
+      "description": "Graphics, audio, key/controller remapping, HUD mod theme, and gameplay mutators.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "graphics": {
+          "type": "object"
+        },
+        "audio": {
+          "type": "object"
+        },
+        "controls": {
+          "type": "object"
+        },
+        "hudMod": {
+          "type": "object"
+        },
+        "gameplayMods": {
+          "type": "object"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "graphics", "audio", "controls", "hudMod", "gameplayMods", "updatedAt"]
+    },
+    "MissionSave": {
+      "title": "MissionSave",
+      "description": "Mission completion state and records.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["available", "active", "completed"]
+        },
+        "completedCount": {
+          "type": "number"
+        },
+        "bestTimeSec": {
+          "type": "number"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "ownerId", "status", "completedCount", "bestTimeSec", "updatedAt"]
+    },
+    "GarageSave": {
+      "title": "GarageSave",
+      "description": "Persisted aircraft inside Bayshore Hangar and ground vehicles inside Safehouse Garage.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "hangarVehicles": {
+          "type": "array"
+        },
+        "safehouseVehicles": {
+          "type": "array"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "hangarVehicles", "safehouseVehicles", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserSaveProfile" },
+      "description": "Primary player save document owned exclusively by userId."
+    },
+    "/users/{userId}/characters/{characterId}": {
+      "schema": { "$ref": "#/entities/CharacterSave" },
+      "description": "Per-character appearance, custom outfits, health/armor, and world coordinates."
+    },
+    "/users/{userId}/inventory/{slotId}": {
+      "schema": { "$ref": "#/entities/InventorySave" },
+      "description": "Player inventory and equipped weapon state."
+    },
+    "/users/{userId}/settings/{profileId}": {
+      "schema": { "$ref": "#/entities/SettingsSave" },
+      "description": "Persisted graphics, audio, keybindings, controller mappings, and HUD mods."
+    },
+    "/users/{userId}/missions/{missionId}": {
+      "schema": { "$ref": "#/entities/MissionSave" },
+      "description": "Per-mission progress and completion statistics."
+    },
+    "/users/{userId}/garage/{slotId}": {
+      "schema": { "$ref": "#/entities/GarageSave" },
+      "description": "Persisted hangar aircraft and safehouse garage vehicles."
+    }
+  }
+}

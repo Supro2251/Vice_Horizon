@@ -1,0 +1,407 @@
+export type CharacterId = 'lucia' | 'mateo' | 'kairo';
+
+export type CameraMode = 'first_person' | 'third_person' | 'third_person_far';
+
+export type WeaponId =
+  | 'pistol'
+  | 'smg'
+  | 'shotgun'
+  | 'carbine'
+  | 'sniper'
+  | 'minigun'
+  | 'rpg';
+
+export type VehicleKind =
+  | 'sedan'
+  | 'suv'
+  | 'muscle'
+  | 'coupe'
+  | 'supercar'
+  | 'taxi'
+  | 'police'
+  | 'ambulance'
+  | 'firetruck'
+  | 'motorcycle'
+  | 'boat'
+  | 'plane'
+  | 'helicopter'
+  | 'fighter_jet';
+
+export interface StoredVehicleRecord {
+  id: string;
+  brand: string;
+  name: string;
+  kind: VehicleKind;
+  color: string;
+  x: number;
+  z: number;
+  heading: number;
+}
+
+export interface SavedGarageState {
+  hangarVehicles: StoredVehicleRecord[];
+  safehouseVehicles: StoredVehicleRecord[];
+}
+
+export type ShopId =
+  | 'ammu_nation'
+  | 'boutique'
+  | 'market_247'
+  | 'safehouse'
+  | 'customs_garage'
+  | 'hospital'
+  | 'police_station'
+  | 'fire_station'
+  | 'barbershop'
+  | 'tattoo_parlor';
+
+export interface ShopDef {
+  id: ShopId;
+  name: string;
+  subtitle: string;
+  category:
+    | 'weapons'
+    | 'wardrobe'
+    | 'supplies'
+    | 'safehouse'
+    | 'garage'
+    | 'hospital'
+    | 'police_station'
+    | 'fire_station'
+    | 'barber'
+    | 'tattoo';
+  x: number;
+  z: number;
+  doorX: number;
+  doorZ: number;
+  color: string;
+}
+
+export type HairStyle = 'bun' | 'waves' | 'fade' | 'buzz' | 'ponytail' | 'pompadour';
+
+export type FacialHairType = 'none' | 'stubble' | 'beard' | 'goatee';
+
+export type GlassesType = 'none' | 'aviators' | 'wayfarer' | 'round' | 'visor';
+
+export type TattooType = 'none' | 'sleeve' | 'tribal' | 'neon_dragon' | 'skull_chest';
+
+export type AccessoryType = 'none' | 'cap' | 'gold_chain' | 'tactical_vest' | 'watch';
+
+export type JacketStyle = 'bomber' | 'cuban' | 'tech' | 'suit' | 'tank';
+
+export interface CharacterAppearance {
+  skinTone: string;
+  hairStyle: HairStyle;
+  hairColor: string;
+  facialHair: FacialHairType;
+  glasses: GlassesType;
+  tattoo: TattooType;
+  jacketStyle: JacketStyle;
+  jacketColor: string;
+  shirtColor: string;
+  pantsColor: string;
+  shoesColor: string;
+  accessory: AccessoryType;
+}
+
+export interface CustomOutfit {
+  id: string;
+  name: string;
+  appearance: CharacterAppearance;
+}
+
+export interface CharacterState {
+  id: CharacterId;
+  name: string;
+  role: string;
+  perkLabel: string;
+  portraitUrl: string;
+  district: string;
+  health: number;
+  maxHealth: number;
+  armor: number;
+  maxArmor: number;
+  posX: number;
+  posY: number;
+  posZ: number;
+  heading: number;
+  appearance: CharacterAppearance;
+  customOutfits: CustomOutfit[];
+}
+
+export interface WeaponDef {
+  id: WeaponId;
+  name: string;
+  category: string;
+  damage: number;
+  fireRateMs: number;
+  clipSize: number;
+  pellets: number;
+  spread: number;
+  range: number;
+  price: number;
+  description: string;
+}
+
+export interface OwnedWeapon {
+  id: WeaponId;
+  unlocked: boolean;
+  ammoInClip: number;
+  reserveAmmo: number;
+  skinColor: string;
+}
+
+export interface ConsumableItem {
+  id: string;
+  name: string;
+  description: string;
+  effectType: 'heal' | 'armor' | 'stamina';
+  amount: number;
+  quantity: number;
+  price: number;
+}
+
+export interface ContrabandItem {
+  id: string;
+  name: string;
+  value: number;
+  quantity: number;
+}
+
+export interface InventoryState {
+  equippedWeapon: WeaponId;
+  weapons: OwnedWeapon[];
+  consumables: ConsumableItem[];
+  contraband: ContrabandItem[];
+}
+
+export type GraphicsPreset = 'low' | 'balanced' | 'high' | 'ultra';
+
+export interface GraphicsSettings {
+  preset: GraphicsPreset;
+  renderScale: number;
+  shadowQuality: 'off' | 'low' | 'medium' | 'high';
+  trafficDensity: 'low' | 'medium' | 'high';
+  viewDistance: number;
+  fov: number;
+  envReflections: boolean;
+  showFps: boolean;
+}
+
+export interface AudioSettings {
+  muted: boolean;
+  master: number;
+  sfx: number;
+  engine: number;
+  siren: number;
+  ui: number;
+}
+
+export type KeyAction =
+  | 'moveForward'
+  | 'moveBackward'
+  | 'moveLeft'
+  | 'moveRight'
+  | 'sprint'
+  | 'jump'
+  | 'shoot'
+  | 'aim'
+  | 'reload'
+  | 'enterVehicle'
+  | 'switchCamera'
+  | 'characterWheel'
+  | 'inventory'
+  | 'wardrobe'
+  | 'missions'
+  | 'openMap'
+  | 'horn'
+  | 'toggleDock';
+
+export type GamepadButtonAction =
+  | 'shoot'
+  | 'aim'
+  | 'jump'
+  | 'reload'
+  | 'enterVehicle'
+  | 'sprint'
+  | 'switchCamera'
+  | 'inventory'
+  | 'characterWheel'
+  | 'openMap'
+  | 'pause'
+  | 'toggleDock';
+
+export interface ControlSettings {
+  keyBindings: Record<KeyAction, string>;
+  gamepadBindings: Record<GamepadButtonAction, number>;
+  mouseSensitivity: number;
+  gamepadSensitivity: number;
+  deadzone: number;
+  invertY: boolean;
+  vibration: boolean;
+  glyphMode: 'auto' | 'playstation' | 'xbox' | 'keyboard';
+}
+
+export type HudThemeId = 'vice_sunset' | 'neon_noir' | 'tactical_minimal' | 'retro_80s';
+
+export interface HudModSettings {
+  theme: HudThemeId;
+  accentColor: string;
+  showMinimap: boolean;
+  showSpeedometer: boolean;
+  showMissionTracker: boolean;
+  showControlsHint: boolean;
+  crosshairStyle: 'tactical' | 'dot' | 'circle';
+  hudScale: number;
+  hudOpacity: number;
+}
+
+export interface GameplayModSettings {
+  lowGravity: boolean;
+  infiniteAmmo: boolean;
+  rapidFire: boolean;
+  turboVehicles: boolean;
+  noPolice: boolean;
+  timeOfDay: 'sunset' | 'noon' | 'night';
+}
+
+export interface GameSettings {
+  graphics: GraphicsSettings;
+  audio: AudioSettings;
+  controls: ControlSettings;
+  hudMod: HudModSettings;
+  gameplayMods: GameplayModSettings;
+}
+
+export interface MissionStage {
+  id: string;
+  type: 'goto' | 'eliminate' | 'collect' | 'escape_police';
+  label: string;
+  targetX: number;
+  targetZ: number;
+  radius: number;
+  enemyCount?: number;
+  vehicleRequired?: boolean;
+}
+
+export interface MissionDef {
+  id: string;
+  storyOrder: number;
+  title: string;
+  subtitle: string;
+  giver: string;
+  rewardCash: number;
+  startX: number;
+  startZ: number;
+  wantedOnStart?: number;
+  timeLimitSec?: number;
+  stages: MissionStage[];
+}
+
+export interface MissionProgressRecord {
+  id: string;
+  status: 'available' | 'active' | 'completed';
+  completedCount: number;
+  bestTimeSec: number;
+}
+
+export interface GpsPoint {
+  x: number;
+  z: number;
+}
+
+export interface GpsWaypoint {
+  x: number;
+  z: number;
+  label: string;
+}
+
+export interface MinimapBlip {
+  x: number;
+  z: number;
+  type:
+    | 'police'
+    | 'enemy'
+    | 'vehicle'
+    | 'taxi'
+    | 'boat'
+    | 'plane'
+    | 'helicopter'
+    | 'fighter_jet'
+    | 'motorcycle'
+    | 'mission'
+    | 'shop'
+    | 'pickup'
+    | 'passenger'
+    | 'player';
+  heading?: number;
+  label?: string;
+  shopCategory?: ShopDef['category'];
+  color?: string;
+}
+
+export interface HudTelemetry {
+  fps: number;
+  health: number;
+  maxHealth: number;
+  armor: number;
+  maxArmor: number;
+  stamina: number;
+  cash: number;
+  wantedStars: number;
+  wantedEvading: boolean;
+  evasionProgress: number;
+  policeDispatchTimer: number;
+  policeDispatchReason: string | null;
+  autoAimLocked: boolean;
+  inVehicle: boolean;
+  vehicleKind: VehicleKind | null;
+  vehicleBrand: string;
+  vehicleName: string;
+  speedKmh: number;
+  altitudeM: number;
+  inWater: boolean;
+  handbrake: boolean;
+  isDrifting: boolean;
+  taxiMode: 'none' | 'passenger' | 'driver_waiting' | 'driver_active';
+  taxiFareCash: number;
+  taxiDestinationLabel: string | null;
+  hangarCount: number;
+  garageCount: number;
+  parkedFacilityNotice: string | null;
+  equippedWeapon: WeaponId;
+  ammoInClip: number;
+  reserveAmmo: number;
+  isReloading: boolean;
+  isAiming: boolean;
+  cameraMode: CameraMode;
+  district: string;
+  nearbyPrompt: string | null;
+  activeMissionTitle: string | null;
+  activeObjectiveLabel: string | null;
+  missionTimerRemaining: number | null;
+  missionNotification: { title: string; subtitle: string; reward?: number } | null;
+  controllerConnected: boolean;
+  controllerType: 'playstation' | 'xbox' | 'none';
+  controllerName: string;
+  hitMarkerActive: boolean;
+  damageFlashActive: boolean;
+  stuntMessage: string | null;
+  playerX: number;
+  playerZ: number;
+  playerHeading: number;
+  minimapBlips: MinimapBlip[];
+  gpsWaypoint: GpsWaypoint | null;
+  gpsRoute: GpsPoint[];
+  gpsDistanceM: number;
+  pointerLocked: boolean;
+  isWasted: boolean;
+  wastedReason: string | null;
+  isBusted: boolean;
+}
+
+export interface GameStats {
+  totalEliminations: number;
+  policeEscapes: number;
+  stuntJumps: number;
+}
