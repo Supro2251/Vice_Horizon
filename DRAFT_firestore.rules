@@ -39,13 +39,14 @@ service cloud.firestore {
     // Validation Blueprints
     function isValidUserSaveProfile(data, userId) {
       return data.keys().hasAll(['uid', 'displayName', 'activeCharacterId', 'cash', 'totalEliminations', 'policeEscapes', 'stuntJumps', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['uid', 'displayName', 'activeCharacterId', 'cash', 'totalEliminations', 'policeEscapes', 'stuntJumps', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'displayName', 'nickname', 'activeCharacterId', 'cash', 'totalEliminations', 'policeEscapes', 'stuntJumps', 'shootingRangeScore', 'createdAt', 'updatedAt'])
         && data.uid is string
         && data.uid == userId
         && isValidId(data.uid)
         && data.displayName is string
         && data.displayName.size() >= 1
         && data.displayName.size() <= 80
+        && (!('nickname' in data) || (data.nickname is string && data.nickname.size() >= 2 && data.nickname.size() <= 32))
         && isValidCharId(data.activeCharacterId)
         && data.cash is number
         && data.cash >= 0
@@ -59,17 +60,20 @@ service cloud.firestore {
         && data.stuntJumps is number
         && data.stuntJumps >= 0
         && data.stuntJumps <= 1000000
+        && (!('shootingRangeScore' in data) || (data.shootingRangeScore is number && data.shootingRangeScore >= 0 && data.shootingRangeScore <= 10000000))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
 
     function isValidCharacterSave(data, userId, charId) {
       return data.keys().hasAll(['id', 'ownerId', 'health', 'armor', 'posX', 'posY', 'posZ', 'heading', 'appearance', 'customOutfits', 'updatedAt'])
-        && data.keys().hasOnly(['id', 'ownerId', 'health', 'armor', 'posX', 'posY', 'posZ', 'heading', 'appearance', 'customOutfits', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'ownerId', 'cash', 'skills', 'health', 'armor', 'posX', 'posY', 'posZ', 'heading', 'appearance', 'customOutfits', 'updatedAt'])
         && data.id == charId
         && isValidCharId(data.id)
         && data.ownerId is string
         && data.ownerId == userId
+        && (!('cash' in data) || (data.cash is number && data.cash >= 0 && data.cash <= 999999999))
+        && (!('skills' in data) || (data.skills is map && data.skills.keys().size() <= 8))
         && data.health is number
         && data.health >= 0
         && data.health <= 200
@@ -77,14 +81,14 @@ service cloud.firestore {
         && data.armor >= 0
         && data.armor <= 200
         && data.posX is number
-        && data.posX >= -1000
-        && data.posX <= 1000
+        && data.posX >= -2500
+        && data.posX <= 2500
         && data.posY is number
-        && data.posY >= -50
-        && data.posY <= 500
+        && data.posY >= -80
+        && data.posY <= 1200
         && data.posZ is number
-        && data.posZ >= -1000
-        && data.posZ <= 1000
+        && data.posZ >= -2500
+        && data.posZ <= 2500
         && data.heading is number
         && data.appearance is map
         && data.appearance.keys().size() <= 16
@@ -96,12 +100,13 @@ service cloud.firestore {
 
     function isValidInventorySave(data, userId) {
       return data.keys().hasAll(['ownerId', 'equippedWeapon', 'weapons', 'consumables', 'contraband', 'updatedAt'])
-        && data.keys().hasOnly(['ownerId', 'equippedWeapon', 'weapons', 'consumables', 'contraband', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'equippedWeapon', 'hasParachute', 'weapons', 'consumables', 'contraband', 'updatedAt'])
         && data.ownerId is string
         && data.ownerId == userId
         && data.equippedWeapon is string
         && data.equippedWeapon.size() >= 1
         && data.equippedWeapon.size() <= 32
+        && (!('hasParachute' in data) || data.hasParachute is bool)
         && data.weapons is list
         && data.weapons.size() <= 16
         && (data.weapons.size() == 0 || data.weapons[0] is map)
@@ -124,7 +129,7 @@ service cloud.firestore {
         && data.audio is map
         && data.audio.keys().size() <= 12
         && data.controls is map
-        && data.controls.keys().size() <= 16
+        && data.controls.keys().size() <= 20
         && data.hudMod is map
         && data.hudMod.keys().size() <= 16
         && data.gameplayMods is map
@@ -140,7 +145,7 @@ service cloud.firestore {
         && data.ownerId is string
         && data.ownerId == userId
         && data.status is string
-        && data.status in ['available', 'active', 'completed']
+        && data.status in ['available', 'active', 'completed', 'discovered']
         && data.completedCount is number
         && data.completedCount >= 0
         && data.completedCount <= 10000
@@ -150,9 +155,75 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
-    // Master Gate Helper: Parent user document must exist (or be created in same batch)
+    function isValidGarageSave(data, userId) {
+      return data.keys().hasAll(['ownerId', 'hangarVehicles', 'safehouseVehicles', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'hangarVehicles', 'safehouseVehicles', 'updatedAt'])
+        && data.ownerId is string
+        && data.ownerId == userId
+        && data.hangarVehicles is list
+        && data.hangarVehicles.size() <= 6
+        && (data.hangarVehicles.size() == 0 || data.hangarVehicles[0] is map)
+        && data.safehouseVehicles is list
+        && data.safehouseVehicles.size() <= 6
+        && (data.safehouseVehicles.size() == 0 || data.safehouseVehicles[0] is map)
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPublicUserCard(data, userId) {
+      return data.keys().hasAll(['uid', 'displayName', 'friendCode', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'displayName', 'nickname', 'nicknameLower', 'emailLower', 'friendCode', 'updatedAt'])
+        && data.uid is string
+        && data.uid == userId
+        && isValidId(data.uid)
+        && data.displayName is string
+        && data.displayName.size() >= 1
+        && data.displayName.size() <= 80
+        && (!('nickname' in data) || (data.nickname is string && data.nickname.size() >= 2 && data.nickname.size() <= 32))
+        && (!('nicknameLower' in data) || (data.nicknameLower is string && data.nicknameLower.size() >= 2 && data.nicknameLower.size() <= 32))
+        && (!('emailLower' in data) || (data.emailLower is string && data.emailLower.size() <= 160))
+        && data.friendCode is string
+        && data.friendCode.size() >= 4
+        && data.friendCode.size() <= 24
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidFriendSave(data, userId, friendId) {
+      return data.keys().hasAll(['uid', 'ownerId', 'displayName', 'friendCode', 'addedAt'])
+        && data.keys().hasOnly(['uid', 'ownerId', 'displayName', 'nickname', 'email', 'friendCode', 'addedAt'])
+        && data.uid is string
+        && data.uid == friendId
+        && isValidId(data.uid)
+        && data.ownerId is string
+        && data.ownerId == userId
+        && data.displayName is string
+        && data.displayName.size() >= 1
+        && data.displayName.size() <= 80
+        && (!('nickname' in data) || (data.nickname is string && data.nickname.size() >= 2 && data.nickname.size() <= 32))
+        && (!('email' in data) || (data.email is string && data.email.size() <= 160))
+        && data.friendCode is string
+        && data.friendCode.size() >= 4
+        && data.friendCode.size() <= 24
+        && data.addedAt is string
+        && data.addedAt.size() <= 64;
+    }
+
     function userProfileExistsAfter(userId) {
       return existsAfter(/databases/$(database)/documents/users/$(userId));
+    }
+
+    // Public friend lookup cards (verified signed-in players only)
+    match /publicUsers/{userId} {
+      allow get, list: if isVerifiedUser();
+      allow create: if isValidId(userId)
+        && isOwner(userId)
+        && isValidPublicUserCard(incoming(), userId)
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(userId)
+        && isOwner(userId)
+        && isValidPublicUserCard(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().updatedAt == request.time;
+      allow delete: if isValidId(userId) && isOwner(userId);
     }
 
     match /users/{userId} {
@@ -169,7 +240,7 @@ service cloud.firestore {
         && incoming().uid == existing().uid
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
-        && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'activeCharacterId', 'cash', 'totalEliminations', 'policeEscapes', 'stuntJumps', 'updatedAt']);
+        && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'nickname', 'activeCharacterId', 'cash', 'totalEliminations', 'policeEscapes', 'stuntJumps', 'shootingRangeScore', 'updatedAt']);
       allow delete: if isValidId(userId) && isOwner(userId);
 
       match /characters/{characterId} {
@@ -188,7 +259,7 @@ service cloud.firestore {
           && incoming().id == existing().id
           && incoming().ownerId == existing().ownerId
           && incoming().updatedAt == request.time
-          && incoming().diff(existing()).affectedKeys().hasOnly(['health', 'armor', 'posX', 'posY', 'posZ', 'heading', 'appearance', 'customOutfits', 'updatedAt']);
+          && incoming().diff(existing()).affectedKeys().hasOnly(['cash', 'skills', 'health', 'armor', 'posX', 'posY', 'posZ', 'heading', 'appearance', 'customOutfits', 'updatedAt']);
         allow delete: if isValidId(userId) && isValidCharId(characterId) && isOwner(userId);
       }
 
@@ -209,7 +280,7 @@ service cloud.firestore {
           && isValidInventorySave(incoming(), userId)
           && incoming().ownerId == existing().ownerId
           && incoming().updatedAt == request.time
-          && incoming().diff(existing()).affectedKeys().hasOnly(['equippedWeapon', 'weapons', 'consumables', 'contraband', 'updatedAt']);
+          && incoming().diff(existing()).affectedKeys().hasOnly(['equippedWeapon', 'hasParachute', 'weapons', 'consumables', 'contraband', 'updatedAt']);
         allow delete: if isValidId(userId) && isValidId(slotId) && slotId == 'loadout' && isOwner(userId);
       }
 
@@ -252,6 +323,43 @@ service cloud.firestore {
           && incoming().updatedAt == request.time
           && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'completedCount', 'bestTimeSec', 'updatedAt']);
         allow delete: if isValidId(userId) && isValidId(missionId) && isOwner(userId);
+      }
+
+      match /garage/{slotId} {
+        allow get: if isValidId(userId) && isValidId(slotId) && slotId == 'stored' && isOwner(userId);
+        allow list: if isValidId(userId) && isOwner(userId) && resource.data.ownerId == request.auth.uid;
+        allow create: if isValidId(userId)
+          && isValidId(slotId)
+          && slotId == 'stored'
+          && isOwner(userId)
+          && isValidGarageSave(incoming(), userId)
+          && incoming().updatedAt == request.time
+          && userProfileExistsAfter(userId);
+        allow update: if isValidId(userId)
+          && isValidId(slotId)
+          && slotId == 'stored'
+          && isOwner(userId)
+          && isValidGarageSave(incoming(), userId)
+          && incoming().ownerId == existing().ownerId
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['hangarVehicles', 'safehouseVehicles', 'updatedAt']);
+        allow delete: if isValidId(userId) && isValidId(slotId) && slotId == 'stored' && isOwner(userId);
+      }
+
+      match /friends/{friendId} {
+        allow get: if isValidId(userId) && isValidId(friendId) && isOwner(userId);
+        allow list: if isValidId(userId) && isOwner(userId) && resource.data.ownerId == request.auth.uid;
+        allow create: if isValidId(userId)
+          && isValidId(friendId)
+          && isOwner(userId)
+          && isValidFriendSave(incoming(), userId, friendId);
+        allow update: if isValidId(userId)
+          && isValidId(friendId)
+          && isOwner(userId)
+          && isValidFriendSave(incoming(), userId, friendId)
+          && incoming().uid == existing().uid
+          && incoming().ownerId == existing().ownerId;
+        allow delete: if isValidId(userId) && isValidId(friendId) && isOwner(userId);
       }
     }
   }

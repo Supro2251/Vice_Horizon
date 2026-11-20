@@ -305,6 +305,14 @@ export interface HudModSettings {
   hudOpacity: number;
 }
 
+export type WeatherType =
+  | 'clear'
+  | 'partly_cloudy'
+  | 'overcast'
+  | 'rain'
+  | 'storm'
+  | 'foggy';
+
 export interface GameplayModSettings {
   lowGravity: boolean;
   infiniteAmmo: boolean;
@@ -312,6 +320,7 @@ export interface GameplayModSettings {
   turboVehicles: boolean;
   noPolice: boolean;
   timeOfDay: 'auto' | 'sunset' | 'noon' | 'night';
+  weatherOverride?: 'auto' | WeatherType;
 }
 
 export interface GameSettings {
@@ -415,9 +424,16 @@ export interface ActiveCutsceneState {
 export interface FriendRecord {
   uid: string;
   displayName: string;
+  nickname?: string;
   email?: string;
   friendCode: string;
   addedAt: string;
+}
+
+export interface OnlinePlayerInfo {
+  uid: string;
+  displayName: string;
+  friendCode?: string;
 }
 
 export interface RemotePlayerState {
@@ -483,9 +499,15 @@ export interface HudTelemetry {
   hasParachute: boolean;
   parachuteDeployed: boolean;
   godModeActive: boolean;
+  cheatSessionActive: boolean;
   gameClockStr: string;
   gameTimeNormalized: number;
   cloudCoverage: number;
+  weatherType: WeatherType;
+  weatherLabel: string;
+  rainIntensity: number;
+  ambientTempC: number;
+  nearestNpcDialogue: { speaker: string; text: string; behavior: string } | null;
   controlCategory: VehicleControlCategory;
   equippedWeapon: WeaponId;
   ammoInClip: number;

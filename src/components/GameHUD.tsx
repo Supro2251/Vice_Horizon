@@ -4,17 +4,20 @@ import {
   ChevronDown,
   Clock,
   Cloud,
+  CloudRain,
   Crosshair,
   Gamepad2,
   Map as MapIcon,
   MapPin,
   Navigation,
   Package,
+  RotateCcw,
   Settings,
   Shield,
   Shirt,
   Smartphone,
   Star,
+  Sun,
   Users,
 } from 'lucide-react';
 import {
@@ -55,6 +58,7 @@ interface GameHUDProps {
   onTogglePhone: () => void;
   onOpenCloud: () => void;
   onRequestLock: () => void;
+  onRestartCleanSession?: () => void;
 }
 
 const CAMERA_LABELS: Record<CameraMode, string> = {
@@ -81,6 +85,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
   onTogglePhone,
   onOpenCloud,
   onRequestLock,
+  onRestartCleanSession,
 }) => {
   const radarCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
@@ -437,6 +442,15 @@ export const GameHUD: React.FC<GameHUDProps> = ({
             {telemetry.gameClockStr}
           </span>
           <span className="text-slate-600">·</span>
+          <span className="inline-flex items-center gap-1 text-sky-200 font-medium">
+            {telemetry.rainIntensity > 0.25 ? (
+              <CloudRain className="w-3 h-3 text-sky-400" />
+            ) : (
+              <Sun className="w-3 h-3 text-amber-300" />
+            )}
+            {telemetry.weatherLabel} {telemetry.ambientTempC}°C
+          </span>
+          <span className="text-slate-600">·</span>
           <span className="text-slate-300">{telemetry.district}</span>
           {telemetry.remotePlayersCount > 0 && (
             <>
@@ -468,6 +482,21 @@ export const GameHUD: React.FC<GameHUDProps> = ({
             </>
           )}
         </div>
+
+        {telemetry.cheatSessionActive && (
+          <div className="px-3 py-1.5 rounded-lg bg-rose-500/20 border border-rose-400/40 text-xs text-rose-100 flex items-center justify-between gap-2">
+            <span className="font-semibold">Cheaty aktívne · Misie zamknuté</span>
+            {onRestartCleanSession && (
+              <button
+                onClick={onRestartCleanSession}
+                className="px-2 py-0.5 rounded bg-rose-500 hover:bg-rose-400 text-[11px] font-bold text-white inline-flex items-center gap-1 shrink-0"
+              >
+                <RotateCcw className="w-3 h-3" />
+                Reštart bez cheatov
+              </button>
+            )}
+          </div>
+        )}
 
         {telemetry.policeDispatchTimer > 0 && telemetry.wantedStars === 0 && (
           <div className="px-3 py-1.5 rounded-lg bg-amber-500/20 border border-amber-400/40 text-xs text-amber-200 font-medium">
@@ -690,6 +719,18 @@ export const GameHUD: React.FC<GameHUDProps> = ({
         <div className="fixed bottom-40 left-1/2 -translate-x-1/2">
           <div className="px-3.5 py-1.5 rounded-lg bg-sky-500/20 border border-sky-400/40 text-xs font-semibold text-sky-200">
             [Medzerník] Otvoriť padák ({telemetry.altitudeM} m)
+          </div>
+        </div>
+      )}
+
+      {/* AI NPC Dynamic Reaction Subtitle */}
+      {telemetry.nearestNpcDialogue && (
+        <div className="fixed bottom-44 left-1/2 -translate-x-1/2 max-w-md px-4 py-2 rounded-xl bg-[#090e1a]/92 border border-sky-400/35 shadow-xl text-center">
+          <div className="text-[10px] font-bold uppercase tracking-wider text-sky-400">
+            {telemetry.nearestNpcDialogue.speaker}
+          </div>
+          <div className="text-xs text-slate-100 leading-snug mt-0.5">
+            „{telemetry.nearestNpcDialogue.text}“
           </div>
         </div>
       )}
@@ -974,10 +1015,10 @@ export const GameHUD: React.FC<GameHUDProps> = ({
         )}
       </div>
 
-      {/* Quick Consumables hint bottom-left */}
+      {/* Quick Consumables & AI NPC talk hint bottom-left */}
       <div className="fixed bottom-4 left-[204px] hidden xl:flex items-center gap-2 text-[11px] text-slate-400 pointer-events-none">
         <span className="inline-flex items-center gap-1 px-2 py-1 rounded bg-[#0b101b]/80 border border-white/10">
-          <Shield className="w-3 h-3 text-emerald-400" /> [1] Lekárnička · [2] Vesta · [Q] Zbraň · [{getGlyph(controls.keyBindings.phone, controls.gamepadBindings.phone)}] Telefón
+          <Shield className="w-3 h-3 text-emerald-400" /> [1] Lekárnička · [2] Vesta · [T] Rozhovor s NPC · [Q] Zbraň · [{getGlyph(controls.keyBindings.phone, controls.gamepadBindings.phone)}] Telefón
         </span>
       </div>
     </div>

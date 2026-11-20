@@ -3,7 +3,13 @@ import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUti
 import { AIRPORT_HANGAR_ZONE, SAFEHOUSE_GARAGE_ZONE, SHOPS } from '../data/defaults';
 import { GpsPoint, ShopDef } from '../types/game';
 import { ProceduralTextureSet } from './textures';
-import { createExplosiveBarrelMesh, createRangeTargetRig, createYachtMesh } from './models';
+import {
+  createCharacterRig,
+  CharacterRig,
+  createExplosiveBarrelMesh,
+  createRangeTargetRig,
+  createYachtMesh,
+} from './models';
 import {
   BRIDGE_SPANS,
   getBridgeElevationAt,
@@ -81,6 +87,24 @@ export interface ElevatorEntity {
   cabGroup: THREE.Group;
 }
 
+export interface ClubPerformerRig {
+  rig: CharacterRig;
+  baseX: number;
+  baseY: number;
+  baseZ: number;
+  phase: number;
+  style: 'pole' | 'podiumL' | 'podiumR' | 'dj' | 'patron';
+}
+
+export interface ClubShowRig {
+  clubX: number;
+  clubZ: number;
+  discoBall: THREE.Object3D;
+  spotlights: THREE.Mesh[];
+  eqBars: THREE.Mesh[];
+  performers: ClubPerformerRig[];
+}
+
 export interface WorldBuildResult {
   worldGroup: THREE.Group;
   colliders: AABBCollider[];
@@ -91,6 +115,9 @@ export interface WorldBuildResult {
   rangeTargets: RangeTargetEntity[];
   elevators: ElevatorEntity[];
   buildingWindowMaterials: THREE.Material[];
+  wettableRoadMaterials: THREE.MeshStandardMaterial[];
+  extraTextures: THREE.Texture[];
+  clubShow: ClubShowRig | null;
   spinners: THREE.Object3D[];
   oceanMesh: THREE.Mesh;
   skyMat: THREE.ShaderMaterial;
@@ -174,7 +201,8 @@ function clipPolygonHalfPlane(
 
 function buildLandmassGeometry(
   poly: GpsPoint[],
-  uvScale: number
+  uvScale: number,
+  rectHoles: { minX: number; maxX: number; minZ: number; maxZ: number }[] = []
 ): THREE.BufferGeometry | null {
   if (poly.length < 3) return null;
   const shape = new THREE.Shape();
@@ -183,6 +211,29 @@ function buildLandmassGeometry(
     shape.lineTo(poly[i].x, -poly[i].z);
   }
   shape.closePath();
+
+  // Compute polygon bbox so holes are only added to the piece that actually contains them
+  let pMinX = Infinity;
+  let pMaxX = -Infinity;
+  let pMinZ = Infinity;
+  let pMaxZ = -Infinity;
+  for (const pt of poly) {
+    if (pt.x < pMinX) pMinX = pt.x;
+    if (pt.x > pMaxX) pMaxX = pt.x;
+    if (pt.z < pMinZ) pMinZ = pt.z;
+    if (pt.z > pMaxZ) pMaxZ = pt.z;
+  }
+  for (const h of rectHoles) {
+    if (h.minX > pMinX + 4 && h.maxX < pMaxX - 4 && h.minZ > pMinZ + 4 && h.maxZ < pMaxZ - 4) {
+      const hole = new THREE.Path();
+      hole.moveTo(h.minX, -h.minZ);
+      hole.lineTo(h.maxX, -h.minZ);
+      hole.lineTo(h.maxX, -h.maxZ);
+      hole.lineTo(h.minX, -h.maxZ);
+      hole.closePath();
+      shape.holes.push(hole);
+    }
+  }
 
   const geo = new THREE.ShapeGeometry(shape, 1);
   geo.rotateX(-Math.PI / 2);
@@ -309,10 +360,17 @@ function isPointInsideOtherRoad(x: number, z: number, excludeSegId: string, marg
 function isSidewalkEdgeBlocked(x: number, z: number, segId: string): boolean {
   if (isWaterAt(x, z) || getBridgeElevationAt(x, z) > 0.05) return true;
   if (x >= -1385 && x <= -535 && z >= 565 && z <= 1015) return true; // Airport tarmac & runways
-  if (isPointInsideOtherRoad(x, z, segId, 1.4)) return true;
+  if (isPointInsideOtherRoad(x, z, segId, 2.2)) return true;
 
   for (const b of BRIDGE_SPANS) {
-    if (z >= b.zStart - 8 && z <= b.zEnd + 8 && Math.abs(x - b.x) <= b.width * 0.65 + 4) return true;
+    const zMid = (b.zStart + b.zEnd) * 0.5;
+    const halfSpan = (b.zEnd - b.zStart) * 0.5;
+    const dx = x - b.x;
+    const dz = z - zMid;
+    const ang = -(b.angle ?? 0);
+    const lx = dx * Math.cos(ang) - dz * Math.sin(ang);
+    const lz = dx * Math.sin(ang) + dz * Math.cos(ang);
+    if (Math.abs(lz) <= halfSpan + 10 && Math.abs(lx) <= b.width * 0.65 + 4) return true;
   }
   for (const ov of OVERPASS_SPANS) {
     const along = ov.axis === 'x' ? Math.abs(x - ov.centerX) : Math.abs(z - ov.centerZ);
@@ -327,9 +385,9 @@ function isSidewalkEdgeBlocked(x: number, z: number, segId: string): boolean {
   for (const p of PARKING_LOTS) {
     if (Math.abs(x - p.x) < p.width * 0.5 + 2.5 && Math.abs(z - p.z) < p.depth * 0.5 + 2.5) return true;
   }
-  if (Math.abs(x - SAFEHOUSE_GARAGE_ZONE.x) < 11 && Math.abs(z - SAFEHOUSE_GARAGE_ZONE.z) < 12) return true;
+  if (Math.abs(x - SAFEHOUSE_GARAGE_ZONE.x) < 12 && Math.abs(z - SAFEHOUSE_GARAGE_ZONE.z) < 13) return true;
   for (const s of SHOPS) {
-    if (Math.abs(x - s.x) < 18 && Math.abs(z - s.z) < 16) return true;
+    if (Math.abs(x - s.x) < 20 && Math.abs(z - s.z) < 18) return true;
   }
   return false;
 }
@@ -391,6 +449,9 @@ export function buildOpenWorld(textures: ProceduralTextureSet): WorldBuildResult
   const rangeTargets: RangeTargetEntity[] = [];
   const elevators: ElevatorEntity[] = [];
   const buildingWindowMaterials: THREE.Material[] = [];
+  const wettableRoadMaterials: THREE.MeshStandardMaterial[] = [];
+  const extraTextures: THREE.Texture[] = [];
+  let clubShow: ClubShowRig | null = null;
   const spinners: THREE.Object3D[] = [];
   const roadRects: { x: number; z: number; w: number; l: number }[] = [];
   const buildingFootprints: { x: number; z: number; w: number; d: number; color: string }[] = [];
@@ -644,9 +705,17 @@ float tFbm(vec2 p) {
     return pieces;
   };
 
+  const underpassHoles = UNDERPASS_SPANS.map((un) => {
+    const halfW = un.width * 0.5 + 0.5;
+    const halfL = un.length * 0.5;
+    return un.axis === 'x'
+      ? { minX: un.centerX - halfL, maxX: un.centerX + halfL, minZ: un.centerZ - halfW, maxZ: un.centerZ + halfW }
+      : { minX: un.centerX - halfW, maxX: un.centerX + halfW, minZ: un.centerZ - halfL, maxZ: un.centerZ + halfL };
+  });
+
   const terrainGeos: THREE.BufferGeometry[] = [];
   for (const piece of splitIslandPolygons(outerOutline)) {
-    const g = buildLandmassGeometry(piece, 0.055);
+    const g = buildLandmassGeometry(piece, 0.055, underpassHoles);
     if (g) terrainGeos.push(g.toNonIndexed());
   }
   if (terrainGeos.length > 0) {
@@ -662,7 +731,11 @@ float tFbm(vec2 p) {
   const sidewalkTex = textures.sidewalk;
   const concretePlazaTex = textures.sidewalk.clone();
   concretePlazaTex.repeat.set(1, 1);
+  concretePlazaTex.generateMipmaps = true;
+  concretePlazaTex.minFilter = THREE.LinearMipmapLinearFilter;
+  concretePlazaTex.magFilter = THREE.LinearFilter;
   concretePlazaTex.needsUpdate = true;
+  extraTextures.push(concretePlazaTex);
 
   const sidewalkDeckMat = new THREE.MeshStandardMaterial({
     map: sidewalkTex,
@@ -710,7 +783,11 @@ float tFbm(vec2 p) {
   // Scenic Roundabout Plazas & Central Fountains (Textured Grass Lawns + Granite Rim)
   const plazaGrassTex = textures.meadowGrass.clone();
   plazaGrassTex.repeat.set(5, 5);
+  plazaGrassTex.generateMipmaps = true;
+  plazaGrassTex.minFilter = THREE.LinearMipmapLinearFilter;
+  plazaGrassTex.magFilter = THREE.LinearFilter;
   plazaGrassTex.needsUpdate = true;
+  extraTextures.push(plazaGrassTex);
   const plazaGrassMat = new THREE.MeshStandardMaterial({
     map: plazaGrassTex,
     normalMap: textures.grassNormal,
@@ -801,6 +878,7 @@ float tFbm(vec2 p) {
     polygonOffset: true,
     polygonOffsetFactor: -1,
   });
+  wettableRoadMaterials.push(streetMat, highwayMat, urbanPlazaMat);
 
   const highwayGeos: THREE.BufferGeometry[] = [];
   const streetGeos: THREE.BufferGeometry[] = [];
@@ -861,9 +939,17 @@ float tFbm(vec2 p) {
           const toOutZ = p.z - rbCenter.z;
           if (nx * toOutX + nz * toOutZ < 0) return false;
         }
+        const innerX = p.x + nx * (hw + 0.85);
+        const innerZ = p.z + nz * (hw + 0.85);
         const checkX = p.x + nx * (hw + swWidth * 0.52);
         const checkZ = p.z + nz * (hw + swWidth * 0.52);
-        return !isSidewalkEdgeBlocked(checkX, checkZ, seg.id);
+        const outerX = p.x + nx * (hw + curbFaceW + swWidth);
+        const outerZ = p.z + nz * (hw + curbFaceW + swWidth);
+        return (
+          !isSidewalkEdgeBlocked(innerX, innerZ, seg.id) &&
+          !isSidewalkEdgeBlocked(checkX, checkZ, seg.id) &&
+          !isSidewalkEdgeBlocked(outerX, outerZ, seg.id)
+        );
       });
 
       // Extract continuous runs of valid sidewalk samples
@@ -1074,6 +1160,7 @@ float tFbm(vec2 p) {
     polygonOffset: true,
     polygonOffsetFactor: -2,
   });
+  wettableRoadMaterials.push(parkingMat);
   const curbMat = curbStoneMat;
   for (const p of PARKING_LOTS) {
     const lot = new THREE.Mesh(new THREE.PlaneGeometry(p.width, p.depth), parkingMat);
@@ -1096,37 +1183,61 @@ float tFbm(vec2 p) {
   const railMat = new THREE.MeshStandardMaterial({ color: 0x94a3b8, metalness: 0.55, roughness: 0.36 });
   for (const b of BRIDGE_SPANS) {
     const spanLen = b.zEnd - b.zStart;
+    const zMidCenter = (b.zStart + b.zEnd) * 0.5;
+    const halfSpan = spanLen * 0.5;
     const bridgeSegs = 12;
     const segLen = spanLen / bridgeSegs;
+    const bGroup = new THREE.Group();
+    bGroup.position.set(b.x, 0, zMidCenter);
+    const bAng = b.angle ?? 0;
+    bGroup.rotation.y = bAng;
+
+    const evalLocalEl = (lz: number) => {
+      const t = 1 - Math.abs(lz) / halfSpan;
+      return Math.sin(Math.max(0, t) * Math.PI * 0.5) * b.peakElevation;
+    };
+
     for (let s = 0; s < bridgeSegs; s++) {
-      const zMid = b.zStart + (s + 0.5) * segLen;
-      const yMid = getBridgeElevationAt(b.x, zMid);
-      const y0 = getBridgeElevationAt(b.x, b.zStart + s * segLen);
-      const y1 = getBridgeElevationAt(b.x, b.zStart + (s + 1) * segLen);
+      const lz0 = -halfSpan + s * segLen;
+      const lz1 = -halfSpan + (s + 1) * segLen;
+      const lzMid = (lz0 + lz1) * 0.5;
+      const yMid = evalLocalEl(lzMid);
+      const y0 = evalLocalEl(lz0);
+      const y1 = evalLocalEl(lz1);
       const slope = Math.atan2(y1 - y0, segLen);
-      const deck = new THREE.Mesh(new THREE.BoxGeometry(b.width + 0.8, 0.48, segLen + 0.35), deckMat);
-      deck.position.set(b.x, yMid - 0.18, zMid);
+      const deck = new THREE.Mesh(new THREE.BoxGeometry(b.width + 2.8, 0.48, segLen + 0.35), deckMat);
+      deck.position.set(0, yMid - 0.34, lzMid);
       deck.rotation.x = -slope;
       deck.receiveShadow = true;
-      worldGroup.add(deck);
+      bGroup.add(deck);
     }
-    const halfW = b.width * 0.5;
+    const halfW = b.width * 0.5 + 1.4;
+    const cosA = Math.cos(bAng);
+    const sinA = Math.sin(bAng);
     [-halfW, halfW].forEach((gx) => {
       const rail = new THREE.Mesh(new THREE.CapsuleGeometry(0.18, spanLen - 1, 4, 8), railMat);
       rail.rotation.x = Math.PI / 2;
-      rail.position.set(b.x + gx, b.peakElevation * 0.62 + 1.0, (b.zStart + b.zEnd) * 0.5);
-      worldGroup.add(rail);
-      colliders.push({
-        minX: b.x + gx - 0.4,
-        maxX: b.x + gx + 0.4,
-        minZ: b.zStart + 0.5,
-        maxZ: b.zEnd - 0.5,
-        height: b.peakElevation + 2.5,
-      });
+      rail.position.set(gx, b.peakElevation * 0.62 + 1.0, 0);
+      bGroup.add(rail);
+      // Sample rail collision points along span so angled bridges have accurate colliders outside driving lanes
+      const railSegs = 5;
+      for (let r = 0; r < railSegs; r++) {
+        const lz = -halfSpan + ((r + 0.5) / railSegs) * spanLen;
+        const wx = b.x + gx * cosA + lz * sinA;
+        const wz = zMidCenter - gx * sinA + lz * cosA;
+        colliders.push({
+          minX: wx - 0.55,
+          maxX: wx + 0.55,
+          minZ: wz - 0.55,
+          maxZ: wz + 0.55,
+          height: b.peakElevation + 2.5,
+        });
+      }
     });
+    worldGroup.add(bGroup);
   }
 
-  // Elevated Highway Overpasses (Nadchody) with Drive-Up Ramps & Pillars
+  // Elevated Highway Overpasses (Nadchody) with Drive-Up Ramps & Road-Safe Pillars
   for (const ov of OVERPASS_SPANS) {
     const ovGroup = new THREE.Group();
     const flatLen = ov.length - ov.rampLen * 2;
@@ -1152,13 +1263,14 @@ float tFbm(vec2 p) {
     roadTop.position.set(ov.centerX, ov.deckHeight + 0.04, ov.centerZ);
     ovGroup.add(roadTop);
 
-    // Support pillars spaced so traffic passes freely beneath
+    // Support pillars spaced so traffic passes freely beneath (never inside any road)
     for (const offset of [-flatLen * 0.42, -flatLen * 0.16, flatLen * 0.16, flatLen * 0.42]) {
       const px = ov.axis === 'x' ? ov.centerX + offset : ov.centerX;
       const pz = ov.axis === 'x' ? ov.centerZ : ov.centerZ + offset;
       for (const side of [-ov.width * 0.38, ov.width * 0.38]) {
         const sx = ov.axis === 'x' ? px : px + side;
         const sz = ov.axis === 'x' ? pz + side : pz;
+        if (distanceToRoadNetwork(sx, sz) < 3.6) continue;
         const pillar = new THREE.Mesh(new THREE.CylinderGeometry(0.7, 0.85, ov.deckHeight, 12), canalWallMat);
         pillar.position.set(sx, ov.deckHeight * 0.5, sz);
         pillar.castShadow = true;
@@ -1189,23 +1301,23 @@ float tFbm(vec2 p) {
     worldGroup.add(ovGroup);
   }
 
-  // Sunken Underpasses (Podchody) with Tunnel Roof Bridge & Interior Lights
+  // Sunken Underpasses (Podchody) with Cutout Trench, Concrete Retaining Walls, Ramps & Roof Bridge
   const tunnelLightMat = new THREE.MeshBasicMaterial({ color: 0xfbbf24 });
   for (const un of UNDERPASS_SPANS) {
     const flatLen = un.length - un.rampLen * 2;
     const roofDeck = new THREE.Mesh(
       new THREE.BoxGeometry(
         un.axis === 'x' ? flatLen * 0.65 : un.width + 4,
-        0.8,
+        0.55,
         un.axis === 'x' ? un.width + 4 : flatLen * 0.65
       ),
       deckMat
     );
-    roofDeck.position.set(un.centerX, 0.35, un.centerZ);
+    roofDeck.position.set(un.centerX, -0.25, un.centerZ);
     roofDeck.receiveShadow = true;
     worldGroup.add(roofDeck);
 
-    // Interior tunnel floor strip + glowing lights
+    // Interior tunnel floor strip
     const floorStrip = new THREE.Mesh(
       new THREE.PlaneGeometry(un.axis === 'x' ? flatLen : un.width, un.axis === 'x' ? un.width : flatLen),
       streetMat
@@ -1214,11 +1326,53 @@ float tFbm(vec2 p) {
     floorStrip.position.set(un.centerX, -un.depth + 0.04, un.centerZ);
     worldGroup.add(floorStrip);
 
+    // Two sloped entry/exit ramps into the sunken tunnel
+    const slopeAngle = Math.atan2(un.depth, un.rampLen);
+    const slopeLen = Math.hypot(un.rampLen, un.depth);
+    [-1, 1].forEach((dir) => {
+      const rampMesh = new THREE.Mesh(
+        new THREE.BoxGeometry(un.axis === 'x' ? slopeLen : un.width, 0.32, un.axis === 'x' ? un.width : slopeLen),
+        streetMat
+      );
+      const midOffset = dir * (flatLen * 0.5 + un.rampLen * 0.5);
+      rampMesh.position.set(
+        un.axis === 'x' ? un.centerX + midOffset : un.centerX,
+        -un.depth * 0.5 - 0.14,
+        un.axis === 'x' ? un.centerZ : un.centerZ + midOffset
+      );
+      if (un.axis === 'x') rampMesh.rotation.z = dir * slopeAngle;
+      else rampMesh.rotation.x = -dir * slopeAngle;
+      rampMesh.receiveShadow = true;
+      worldGroup.add(rampMesh);
+    });
+
+    // Retaining concrete side walls along trench perimeter
+    const wallH = un.depth + 0.35;
+    [-1, 1].forEach((side) => {
+      const wThick = 0.85;
+      const wall = new THREE.Mesh(
+        new THREE.BoxGeometry(
+          un.axis === 'x' ? un.length : wThick,
+          wallH,
+          un.axis === 'x' ? wThick : un.length
+        ),
+        canalWallMat
+      );
+      const lat = side * (un.width * 0.5 + wThick * 0.5);
+      wall.position.set(
+        un.axis === 'x' ? un.centerX : un.centerX + lat,
+        -un.depth * 0.5 + 0.15,
+        un.axis === 'x' ? un.centerZ + lat : un.centerZ
+      );
+      wall.receiveShadow = true;
+      worldGroup.add(wall);
+    });
+
     for (let t = -flatLen * 0.35; t <= flatLen * 0.35; t += 24) {
       const lamp = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.16, 0.45), tunnelLightMat);
       lamp.position.set(
         un.axis === 'x' ? un.centerX + t : un.centerX,
-        -0.12,
+        -0.58,
         un.axis === 'x' ? un.centerZ : un.centerZ + t
       );
       worldGroup.add(lamp);
@@ -1236,7 +1390,11 @@ float tFbm(vec2 p) {
   });
   const apronConcreteTex = textures.sidewalk.clone();
   apronConcreteTex.repeat.set(38, 20);
+  apronConcreteTex.generateMipmaps = true;
+  apronConcreteTex.minFilter = THREE.LinearMipmapLinearFilter;
+  apronConcreteTex.magFilter = THREE.LinearFilter;
   apronConcreteTex.needsUpdate = true;
+  extraTextures.push(apronConcreteTex);
   const apronMat = new THREE.MeshStandardMaterial({
     map: apronConcreteTex,
     normalMap: textures.sidewalkNormal,
@@ -1362,6 +1520,15 @@ float tFbm(vec2 p) {
       { minX: cx - hw * 0.5, maxX: cx - hw * 0.5 + thick + 0.2, minZ: cz - hd * 0.5, maxZ: cz + hd * 0.5, height: hh + 2 },
       { minX: cx + hw * 0.5 - thick - 0.2, maxX: cx + hw * 0.5, minZ: cz - hd * 0.5, maxZ: cz + hd * 0.5, height: hh + 2 }
     );
+    floorSurfaces.push({
+      minX: cx - hw * 0.5,
+      maxX: cx + hw * 0.5,
+      minZ: cz - hd * 0.5,
+      maxZ: cz + hd * 0.5,
+      minY: hh - 0.5,
+      height: hh + 2.5,
+      isRoofSurface: true,
+    });
   };
 
   addOpenHangar(AIRPORT_HANGAR_ZONE.x, AIRPORT_HANGAR_ZONE.z, 60, 48, 15, 0x06b6d4, true);
@@ -1621,6 +1788,15 @@ float tFbm(vec2 p) {
       { minX: gx - gw * 0.5, maxX: gx - gw * 0.5 + 1.0, minZ: gz - gd * 0.5, maxZ: gz + gd * 0.5, height: gh + 1 },
       { minX: gx + gw * 0.5 - 1.0, maxX: gx + gw * 0.5, minZ: gz - gd * 0.5, maxZ: gz + gd * 0.5, height: gh + 1 }
     );
+    floorSurfaces.push({
+      minX: gx - gw * 0.5,
+      maxX: gx + gw * 0.5,
+      minZ: gz - gd * 0.5,
+      maxZ: gz + gd * 0.5,
+      minY: gh,
+      height: gh + 0.65,
+      isRoofSurface: true,
+    });
   }
 
   // 6. All 14 Enlarged Walk-In Shops, Drive-In Garages, Multi-Floor Buildings with Elevators & Malibu Neon Lounge
@@ -1820,7 +1996,7 @@ float tFbm(vec2 p) {
 
     // Authentic Detailed Spacious Walk-In Interior Furniture by Category!
     if (isBoutique) {
-      // Multi-aisle Boutique with 8 clothing racks + mannequins + dressing mirror
+      // Multi-aisle Boutique with 8 clothing racks + mannequins + fitting booths + velvet ottoman + tall mirror
       const rackPositions: [number, number][] = [
         [-8.5, -7.2],
         [-8.5, -2.0],
@@ -1850,33 +2026,79 @@ float tFbm(vec2 p) {
         }
         colliders.push({ minX: shop.x + rx - 2.2, maxX: shop.x + rx + 2.2, minZ: shop.z + rz - 0.35, maxZ: shop.z + rz + 0.35, height: 1.7 });
       });
-      const mirror = new THREE.Mesh(new THREE.BoxGeometry(0.28, 3.2, 4.2), chromeMat);
+      // Center Velvet Ottoman + 2 Fashion Mannequins on pedestals
+      const ottoman = new THREE.Mesh(new THREE.CylinderGeometry(1.4, 1.5, 0.55, 16), new THREE.MeshStandardMaterial({ color: 0x831843, roughness: 0.75 }));
+      ottoman.position.set(-2.0, 0.28, 0);
+      g.add(ottoman);
+      [-5.5, 5.5].forEach((mz, mIdx) => {
+        const ped = new THREE.Mesh(new THREE.CylinderGeometry(0.7, 0.8, 0.32, 12), chromeMat);
+        ped.position.set(11.5, 0.16, mz);
+        const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.24, 0.75, 4, 8), new THREE.MeshStandardMaterial({ color: mIdx === 0 ? 0xec4899 : 0x06b6d4, roughness: 0.45 }));
+        torso.position.set(11.5, 1.1, mz);
+        const head = new THREE.Mesh(new THREE.SphereGeometry(0.16, 10, 8), chromeMat);
+        head.position.set(11.5, 1.76, mz);
+        g.add(ped, torso, head);
+      });
+      const mirror = new THREE.Mesh(new THREE.BoxGeometry(0.28, 3.2, 4.6), chromeMat);
       mirror.position.set(w * 0.5 - 1.4, 1.6, 0);
       g.add(mirror);
     } else if (isMarket) {
-      // 4 Supermarket Aisles with stocked shelves
-      [-9.5, -3.5, 3.5, 9.5].forEach((ax) => {
+      // 4 Supermarket Aisles with colorful stocked boxes + glowing cold drink fridges along back wall + promo island
+      const boxColors = [0xef4444, 0x3b82f6, 0x22c55e, 0xfbbf24, 0xa855f7];
+      [-9.5, -3.5, 3.5, 9.5].forEach((ax, aIdx) => {
         const shelf = new THREE.Mesh(new THREE.BoxGeometry(1.4, 2.3, 13.5), woodShelfMat);
         shelf.position.set(ax, 1.15, 0);
         const topTrim = new THREE.Mesh(new THREE.BoxGeometry(1.46, 0.18, 13.54), neonMat);
         topTrim.position.set(ax, 2.35, 0);
         g.add(shelf, topTrim);
+        for (let b = -5.5; b <= 5.5; b += 2.2) {
+          const item = new THREE.Mesh(
+            new THREE.BoxGeometry(1.52, 0.42, 1.1),
+            new THREE.MeshStandardMaterial({ color: boxColors[(aIdx + Math.round(b + 6)) % boxColors.length], roughness: 0.6 })
+          );
+          item.position.set(ax, 1.45, b);
+          g.add(item);
+        }
         colliders.push({ minX: shop.x + ax - 0.75, maxX: shop.x + ax + 0.75, minZ: shop.z - 6.75, maxZ: shop.z + 6.75, height: 2.4 });
       });
+      // Illuminated Cold Beverage Coolers on east interior wall
+      const cooler = new THREE.Mesh(new THREE.BoxGeometry(1.2, 2.8, 12), new THREE.MeshStandardMaterial({ color: 0x0ea5e9, emissive: 0x0284c7, emissiveIntensity: 0.65, roughness: 0.2 }));
+      cooler.position.set(w * 0.5 - 2.0, 1.4, 0);
+      g.add(cooler);
     } else if (isWeapons) {
-      // Tactical Gun Walls, Ammo Crates & Display Cases
+      // Tactical Gun Walls with mounted weapon bars, green/amber ammo crates & Kevlar armor stands
       [-11.5, 11.5].forEach((wx) => {
         const rack = new THREE.Mesh(new THREE.BoxGeometry(0.7, 3.2, 14.0), rackMetalMat);
         rack.position.set(wx, 1.6, 0);
         const glow = new THREE.Mesh(new THREE.BoxGeometry(0.74, 0.16, 14.0), neonMat);
         glow.position.set(wx, 3.2, 0);
         g.add(rack, glow);
+        for (let rz = -5; rz <= 5; rz += 2.5) {
+          const gunBar = new THREE.Mesh(new THREE.BoxGeometry(0.85, 0.22, 1.4), chromeMat);
+          gunBar.position.set(wx, 1.85, rz);
+          g.add(gunBar);
+        }
       });
+      // Green military ammo crates & ballistic armor stand
+      [-6.5, 6.5].forEach((cx) => {
+        const crate = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.95, 1.4), new THREE.MeshStandardMaterial({ color: 0x3f6212, roughness: 0.75 }));
+        crate.position.set(cx, 0.48, 5.5);
+        g.add(crate);
+      });
+      const vestStand = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.45, 1.55, 10), new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.65 }));
+      vestStand.position.set(0, 0.78, 5.5);
+      g.add(vestStand);
     } else if (isRange) {
       const firingBench = new THREE.Mesh(new THREE.BoxGeometry(w - 4, 1.05, 1.2), rackMetalMat);
       firingBench.position.set(0, 0.52, -5.5);
       g.add(firingBench);
       colliders.push({ minX: shop.x - (w - 4) * 0.5, maxX: shop.x + (w - 4) * 0.5, minZ: shop.z - 6.1, maxZ: shop.z - 4.9, height: 1.2 });
+      // Lane dividers & ammo trays along shooting stalls
+      [-6.75, -2.25, 2.25, 6.75].forEach((dx) => {
+        const div = new THREE.Mesh(new THREE.BoxGeometry(0.16, 2.2, 2.4), wallMat);
+        div.position.set(dx, 1.1, -6.2);
+        g.add(div);
+      });
 
       [-9, -4.5, 0, 4.5, 9].forEach((tx, tIdx) => {
         const tMesh = createRangeTargetRig();
@@ -1895,49 +2117,236 @@ float tFbm(vec2 p) {
         });
       });
     } else if (isBarber || isTattoo) {
+      const chairMat = new THREE.MeshStandardMaterial({ color: isTattoo ? 0x14b8a6 : 0x7f1d1d, roughness: 0.45 });
       [-7.5, -2.5, 2.5, 7.5].forEach((cx) => {
-        const chair = new THREE.Mesh(new THREE.CylinderGeometry(0.52, 0.56, 0.92, 12), rackMetalMat);
-        chair.position.set(cx, 0.5, 3.2);
-        const mirror = new THREE.Mesh(new THREE.BoxGeometry(1.8, 2.1, 0.16), chromeMat);
-        mirror.position.set(cx, 1.85, 6.2);
-        g.add(chair, mirror);
+        const base = new THREE.Mesh(new THREE.CylinderGeometry(0.45, 0.52, 0.35, 12), chromeMat);
+        base.position.set(cx, 0.18, 2.6);
+        const cushion = new THREE.Mesh(new THREE.BoxGeometry(0.95, 0.25, isTattoo ? 2.0 : 0.95), chairMat);
+        cushion.position.set(cx, 0.65, 2.6);
+        const backrest = new THREE.Mesh(new THREE.BoxGeometry(0.92, 0.85, 0.22), chairMat);
+        backrest.position.set(cx, 1.05, 2.15);
+        const mirror = new THREE.Mesh(new THREE.BoxGeometry(1.9, 2.2, 0.16), chromeMat);
+        mirror.position.set(cx, 1.9, 6.2);
+        const frameGlow = new THREE.Mesh(new THREE.BoxGeometry(2.05, 0.1, 0.2), neonMat);
+        frameGlow.position.set(cx, 3.05, 6.2);
+        g.add(base, cushion, backrest, mirror, frameGlow);
       });
+      // Waiting bench
+      const waitSofa = new THREE.Mesh(new THREE.BoxGeometry(5.5, 0.75, 1.3), chairMat);
+      waitSofa.position.set(6.5, 0.38, -7.2);
+      g.add(waitSofa);
     } else if (isHospital) {
+      // Hospital beds + IV drip stands + vital monitors + reception glass divider
       [-8.5, -3.5, 2.5].forEach((bx) => {
         const bed = new THREE.Mesh(
           new THREE.BoxGeometry(2.2, 0.75, 4.2),
           new THREE.MeshStandardMaterial({ color: 0xe2e8f0, roughness: 0.4 })
         );
         bed.position.set(bx, 0.4, 2.0);
-        g.add(bed);
+        const pillow = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.18, 0.65), new THREE.MeshStandardMaterial({ color: 0x38bdf8, roughness: 0.7 }));
+        pillow.position.set(bx, 0.84, 0.35);
+        const ivPole = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 2.1, 8), chromeMat);
+        ivPole.position.set(bx + 1.3, 1.05, 0.5);
+        const monitor = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.45, 0.35), new THREE.MeshStandardMaterial({ color: 0x0f172a, emissive: 0x10b981, emissiveIntensity: 0.85 }));
+        monitor.position.set(bx - 1.3, 1.35, 0.4);
+        g.add(bed, pillow, ivPole, monitor);
         colliders.push({ minX: shop.x + bx - 1.1, maxX: shop.x + bx + 1.1, minZ: shop.z - 0.1, maxZ: shop.z + 4.1, height: 1.0 });
       });
+    } else if (isPoliceStation) {
+      // Police briefing room: 2 barred holding cells on west wall + glowing evidence board + officer desks
+      const barMat = chromeMat;
+      for (let z = -7; z <= 3; z += 5) {
+        const desk = new THREE.Mesh(new THREE.BoxGeometry(2.8, 0.85, 1.5), rackMetalMat);
+        desk.position.set(-7.5, 0.42, z);
+        const pc = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.48, 0.12), new THREE.MeshStandardMaterial({ color: 0x1e293b, emissive: 0x38bdf8, emissiveIntensity: 0.7 }));
+        pc.position.set(-7.5, 1.1, z);
+        g.add(desk, pc);
+      }
+      // Barred Holding Cell enclosure on back-west side
+      for (let bx = -12; bx <= -4; bx += 0.9) {
+        const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 3.6, 6), barMat);
+        bar.position.set(bx, 1.8, -8.5);
+        g.add(bar);
+      }
+      const crimeBoard = new THREE.Mesh(new THREE.BoxGeometry(0.25, 2.4, 5.2), new THREE.MeshStandardMaterial({ color: 0x1e3a8a, emissive: 0x2563eb, emissiveIntensity: 0.55 }));
+      crimeBoard.position.set(12.8, 2.2, 0);
+      g.add(crimeBoard);
+    } else if (isFire) {
+      // VCFD Fire Station: Turnout gear lockers with red coats/helmets & coiled hose wall racks
+      for (let lz = -7; lz <= 7; lz += 3.5) {
+        const locker = new THREE.Mesh(new THREE.BoxGeometry(1.4, 2.8, 2.6), new THREE.MeshStandardMaterial({ color: 0x7f1d1d, roughness: 0.5 }));
+        locker.position.set(-13.5, 1.4, lz);
+        const helmet = new THREE.Mesh(new THREE.SphereGeometry(0.26, 8, 6), new THREE.MeshStandardMaterial({ color: 0xfacc15, roughness: 0.3 }));
+        helmet.position.set(-13.1, 2.1, lz);
+        g.add(locker, helmet);
+      }
+      const dispatchTable = new THREE.Mesh(new THREE.BoxGeometry(4.2, 0.95, 2.0), rackMetalMat);
+      dispatchTable.position.set(10.5, 0.48, -6.5);
+      g.add(dispatchTable);
     } else if (isSafehouse) {
       const sofa = new THREE.Mesh(
         new THREE.BoxGeometry(5.6, 0.95, 2.0),
         new THREE.MeshStandardMaterial({ color: 0x0ea5e9, roughness: 0.7 })
       );
       sofa.position.set(-7.5, 0.48, 3.0);
+      const coffeeTable = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.45, 1.3), chromeMat);
+      coffeeTable.position.set(-7.5, 0.24, 0.4);
+      const tvScreen = new THREE.Mesh(new THREE.BoxGeometry(4.6, 2.3, 0.2), new THREE.MeshStandardMaterial({ color: 0x090d16, emissive: 0x38bdf8, emissiveIntensity: 0.45 }));
+      tvScreen.position.set(-7.5, 2.1, -11.4);
       const closetRack = new THREE.Mesh(new THREE.BoxGeometry(1.4, 2.6, 6.4), woodShelfMat);
       closetRack.position.set(-11.5, 1.3, -4.0);
-      g.add(sofa, closetRack);
+      // 2nd Floor Luxury Bedroom Suit on Mezzanine
+      const bed = new THREE.Mesh(new THREE.BoxGeometry(3.8, 0.75, 4.4), new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.75 }));
+      bed.position.set(-7.0, floor2Y + 0.38, -2.5);
+      const rug = new THREE.Mesh(new THREE.PlaneGeometry(7.5, 6.5), new THREE.MeshStandardMaterial({ color: 0x0284c7, roughness: 0.85 }));
+      rug.rotation.x = -Math.PI / 2;
+      rug.position.set(-7.0, floor2Y + 0.04, -2.5);
+      g.add(sofa, coffeeTable, tvScreen, closetRack, bed, rug);
       colliders.push(
         { minX: shop.x - 10.3, maxX: shop.x - 4.7, minZ: shop.z + 2.0, maxZ: shop.z + 4.0, height: 1.0 },
         { minX: shop.x - 12.2, maxX: shop.x - 10.8, minZ: shop.z - 7.2, maxZ: shop.z - 0.8, height: 2.6 }
       );
     } else if (isLounge) {
-      // Safe, Clothed Neon Nightclub & VIP Lounge: Glowing Dance Stage + DJ Booth + VIP Booths
+      // Malibu Neon Lounge: Glowing Stage + Chrome Dance Pole + Twin Side Podiums + DJ Booth + Disco Ball + Spotlights + Clothed Dancers & Patrons!
       const stage = new THREE.Mesh(
-        new THREE.CylinderGeometry(4.8, 5.2, 0.65, 24),
-        new THREE.MeshStandardMaterial({ color: 0x2e1065, roughness: 0.3, metalness: 0.4 })
+        new THREE.CylinderGeometry(4.8, 5.2, 0.65, 28),
+        new THREE.MeshStandardMaterial({ color: 0x2e1065, roughness: 0.28, metalness: 0.48 })
       );
       stage.position.set(-5.0, 0.32, 0);
       const stageRing = new THREE.Mesh(new THREE.TorusGeometry(4.9, 0.12, 8, 28), neonMat);
       stageRing.rotation.x = Math.PI / 2;
       stageRing.position.set(-5.0, 0.66, 0);
-      const djBooth = new THREE.Mesh(new THREE.BoxGeometry(2.2, 1.35, 6.2), rackMetalMat);
+
+      // Chrome central stage pole + Twin glowing side podiums
+      const dancePole = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 5.6, 12), chromeMat);
+      dancePole.position.set(-5.0, 3.4, 0);
+      const podiumL = new THREE.Mesh(new THREE.CylinderGeometry(1.45, 1.65, 0.55, 18), new THREE.MeshStandardMaterial({ color: 0x4c1d95, roughness: 0.3 }));
+      podiumL.position.set(-3.2, 0.28, -5.8);
+      const podiumLRing = new THREE.Mesh(new THREE.TorusGeometry(1.5, 0.08, 6, 20), neonMat);
+      podiumLRing.rotation.x = Math.PI / 2;
+      podiumLRing.position.set(-3.2, 0.57, -5.8);
+      const podiumR = podiumL.clone();
+      podiumR.position.set(-3.2, 0.28, 5.8);
+      const podiumRRing = podiumLRing.clone();
+      podiumRRing.position.set(-3.2, 0.57, 5.8);
+
+      // DJ Booth + Turntables + Speaker Stacks + Equalizer Wall Bars
+      const djBooth = new THREE.Mesh(new THREE.BoxGeometry(2.2, 1.35, 6.4), rackMetalMat);
       djBooth.position.set(-12.5, 0.68, 0);
-      g.add(stage, stageRing, djBooth);
+      [-1.1, 1.1].forEach((tz) => {
+        const deckPlate = new THREE.Mesh(new THREE.CylinderGeometry(0.45, 0.45, 0.08, 16), chromeMat);
+        deckPlate.position.set(-12.2, 1.4, tz);
+        g.add(deckPlate);
+      });
+      [-4.8, 4.8].forEach((sz) => {
+        const spk = new THREE.Mesh(new THREE.BoxGeometry(1.6, 3.6, 1.8), new THREE.MeshStandardMaterial({ color: 0x090d16, roughness: 0.5 }));
+        spk.position.set(-13.8, 1.8, sz);
+        const cone = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.55, 0.14, 14), neonMat);
+        cone.rotation.z = Math.PI / 2;
+        cone.position.set(-12.95, 2.3, sz);
+        g.add(spk, cone);
+      });
+      const eqBars: THREE.Mesh[] = [];
+      for (let i = 0; i < 9; i++) {
+        const barCol = i % 2 === 0 ? 0xd946ef : 0x06b6d4;
+        const eq = new THREE.Mesh(
+          new THREE.BoxGeometry(0.25, 1.0, 0.48),
+          new THREE.MeshBasicMaterial({ color: barCol })
+        );
+        eq.position.set(-16.2, 2.4, (i - 4) * 1.15);
+        g.add(eq);
+        eqBars.push(eq);
+      }
+
+      // Disco Ball suspended over central stage
+      const discoGroup = new THREE.Group();
+      discoGroup.position.set(-5.0, 5.1, 0);
+      const discoCore = new THREE.Mesh(
+        new THREE.IcosahedronGeometry(0.68, 1),
+        new THREE.MeshStandardMaterial({ color: 0xf8fafc, metalness: 0.96, roughness: 0.08, flatShading: true })
+      );
+      const discoChain = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 1.2, 6), chromeMat);
+      discoChain.position.y = 0.9;
+      discoGroup.add(discoCore, discoChain);
+      g.add(discoGroup);
+
+      // Sweeping Additive Spotlight Cones above the stage
+      const spotlights: THREE.Mesh[] = [];
+      const spotColors = [0xec4899, 0x06b6d4, 0xa855f7];
+      [
+        [-5.0, 5.8, -4.0],
+        [-5.0, 5.8, 4.0],
+        [-1.0, 5.8, 0.0],
+      ].forEach(([sx, sy, sz], sIdx) => {
+        const coneGeo = new THREE.ConeGeometry(2.5, 5.6, 16, 1, true);
+        coneGeo.translate(0, -2.8, 0);
+        const coneMat = new THREE.MeshBasicMaterial({
+          color: spotColors[sIdx],
+          transparent: true,
+          opacity: 0.14,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+          blending: THREE.AdditiveBlending,
+        });
+        const cone = new THREE.Mesh(coneGeo, coneMat);
+        cone.position.set(sx, sy, sz);
+        g.add(cone);
+        spotlights.push(cone);
+      });
+
+      // Clothed Glamorous Stage Dancers, DJ & Cheering VIP Patrons (ZERO nudity — full stylish clubwear!)
+      const dancersMeta: {
+        baseX: number;
+        baseY: number;
+        baseZ: number;
+        phase: number;
+        style: ClubPerformerRig['style'];
+        jacketColor: string;
+        shirtColor: string;
+        pantsColor: string;
+        hairColor: string;
+      }[] = [
+        { baseX: -5.0, baseY: 0.65, baseZ: 0.65, phase: 0, style: 'pole', jacketColor: '#ec4899', shirtColor: '#fbcfe8', pantsColor: '#be185d', hairColor: '#271a14' },
+        { baseX: -3.2, baseY: 0.56, baseZ: -5.8, phase: 1.8, style: 'podiumL', jacketColor: '#06b6d4', shirtColor: '#e0f2fe', pantsColor: '#0e7490', hairColor: '#f59e0b' },
+        { baseX: -3.2, baseY: 0.56, baseZ: 5.8, phase: 3.4, style: 'podiumR', jacketColor: '#a855f7', shirtColor: '#f3e8ff', pantsColor: '#6b21a8', hairColor: '#111827' },
+        { baseX: -14.1, baseY: 0.05, baseZ: 0.0, phase: 0.5, style: 'dj', jacketColor: '#0f172a', shirtColor: '#38bdf8', pantsColor: '#1e293b', hairColor: '#1f2937' },
+        { baseX: 2.0, baseY: 0.05, baseZ: -5.2, phase: 1.1, style: 'patron', jacketColor: '#f97316', shirtColor: '#fff7ed', pantsColor: '#334155', hairColor: '#3b281c' },
+        { baseX: 2.2, baseY: 0.05, baseZ: 4.8, phase: 2.7, style: 'patron', jacketColor: '#e2e8f0', shirtColor: '#ec4899', pantsColor: '#0f172a', hairColor: '#1c1917' },
+      ];
+      const performers: ClubPerformerRig[] = [];
+      for (const dm of dancersMeta) {
+        const rig = createCharacterRig({
+          skinTone: '#d49a73',
+          hairStyle: dm.style === 'dj' ? 'fade' : 'waves',
+          hairColor: dm.hairColor,
+          facialHair: 'none',
+          glasses: dm.style === 'dj' ? 'visor' : 'none',
+          tattoo: 'none',
+          jacketStyle: 'bomber',
+          jacketColor: dm.jacketColor,
+          shirtColor: dm.shirtColor,
+          pantsColor: dm.pantsColor,
+          shoesColor: '#f8fafc',
+          accessory: 'gold_chain',
+        });
+        rig.root.position.set(dm.baseX, dm.baseY, dm.baseZ);
+        if (dm.style === 'dj') rig.root.rotation.y = Math.PI / 2;
+        else if (dm.style === 'patron') rig.root.rotation.y = -Math.PI / 2;
+        g.add(rig.root);
+        performers.push({ rig, baseX: dm.baseX, baseY: dm.baseY, baseZ: dm.baseZ, phase: dm.phase, style: dm.style });
+      }
+
+      // Barstools along East VIP Bar Counter + Backlit Bottle Rack
+      for (let bz = -2.2; bz <= 2.2; bz += 1.45) {
+        const stool = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.24, 0.85, 10), chromeMat);
+        stool.position.set(w * 0.5 - 7.1, 0.42, bz);
+        g.add(stool);
+      }
+      const bottleShelf = new THREE.Mesh(new THREE.BoxGeometry(0.4, 2.2, 5.2), new THREE.MeshStandardMaterial({ color: 0x06b6d4, emissive: 0x0891b2, emissiveIntensity: 0.75 }));
+      bottleShelf.position.set(w * 0.5 - 1.6, 1.8, 0);
+      g.add(bottleShelf);
+
+      g.add(stage, stageRing, dancePole, podiumL, podiumLRing, podiumR, podiumRRing, djBooth);
       colliders.push(
         { minX: shop.x - 13.6, maxX: shop.x - 11.4, minZ: shop.z - 3.1, maxZ: shop.z + 3.1, height: 1.4 }
       );
@@ -1951,8 +2360,17 @@ float tFbm(vec2 p) {
         g.add(booth);
         colliders.push({ minX: shop.x - 1.9, maxX: shop.x + 4.9, minZ: shop.z + vz - 1.0, maxZ: shop.z + vz + 1.0, height: 1.0 });
       });
+
+      clubShow = {
+        clubX: shop.x,
+        clubZ: shop.z,
+        discoBall: discoGroup,
+        spotlights,
+        eqBars,
+        performers,
+      };
     } else if (isGarage) {
-      // Spacious Drive-In Customs Bay: Hydraulic Lift Posts + Illuminated Bay Pad right at center!
+      // Spacious Drive-In Customs Bay: Hydraulic Lift Posts + Tool Cabinets + Tire Stacks + Engine Hoist + Illuminated Bay Pad
       const bayPad = new THREE.Mesh(new THREE.RingGeometry(3.2, 3.65, 28), neonMat);
       bayPad.rotation.x = -Math.PI / 2;
       bayPad.position.set(0, 0.06, 0);
@@ -1964,6 +2382,15 @@ float tFbm(vec2 p) {
           g.add(post);
         });
       });
+      const toolCab = new THREE.Mesh(new THREE.BoxGeometry(2.6, 1.3, 0.9), new THREE.MeshStandardMaterial({ color: 0xdc2626, roughness: 0.4 }));
+      toolCab.position.set(-12.5, 0.65, -9.2);
+      g.add(toolCab);
+      for (let t = 0; t < 3; t++) {
+        const tire = new THREE.Mesh(new THREE.TorusGeometry(0.42, 0.16, 8, 16), new THREE.MeshStandardMaterial({ color: 0x111827, roughness: 0.85 }));
+        tire.rotation.x = Math.PI / 2;
+        tire.position.set(12.2, 0.16 + t * 0.32, -9.0);
+        g.add(tire);
+      }
     }
 
     // Service Desk / Counter (positioned away from doorway & garage drive-in path)
@@ -2093,7 +2520,7 @@ float tFbm(vec2 p) {
   const roofGeos: THREE.BufferGeometry[] = [];
   const neonBuckets = new Map<number, THREE.BufferGeometry[]>();
 
-  const canPlaceStructure = (x: number, z: number, w: number, d: number, extraPad = 4.0): boolean => {
+  const canPlaceStructure = (x: number, z: number, w: number, d: number, extraPad = 6.8): boolean => {
     const rad = Math.hypot(w * 0.5, d * 0.5);
     const ang = Math.atan2(z, x);
     if (Math.hypot(x, z) + rad > getIslandCoastRadius(ang) - 55) return false;
@@ -2101,7 +2528,14 @@ float tFbm(vec2 p) {
     if (z >= 365 && z <= 495 && x >= -360) return false; // canal banks
     if (z >= -845 && z <= -735 && x >= -840 && x <= 880) return false; // north river banks
     if (x >= -1380 && x <= -520 && z >= 520 && z <= 1020) return false; // airport complex
-    if (x >= 500 && x <= 550 && z >= -655 && z <= -585) return false; // safehouse garage & driveway
+    if (
+      x >= SAFEHOUSE_GARAGE_ZONE.minX - 18 &&
+      x <= SAFEHOUSE_GARAGE_ZONE.maxX + 18 &&
+      z >= SAFEHOUSE_GARAGE_ZONE.minZ - 18 &&
+      z <= SAFEHOUSE_GARAGE_ZONE.maxZ + 28
+    ) {
+      return false; // safehouse garage & driveway
+    }
     if (Math.hypot(x, z + 70) < 76 + rad || Math.hypot(x - 520, z + 70) < 62 + rad) return false;
     for (const p of PARKING_LOTS) {
       if (Math.abs(x - p.x) < (w + p.width) * 0.5 + 8 && Math.abs(z - p.z) < (d + p.depth) * 0.5 + 8) return false;
@@ -2118,7 +2552,7 @@ float tFbm(vec2 p) {
     }
     if (distanceToRoadNetwork(x, z) < rad + extraPad) return false;
     for (const s of SHOPS) {
-      if (Math.hypot(x - s.x, z - s.z) < rad + 28 || Math.hypot(x - s.doorX, z - s.doorZ) < rad + 24) {
+      if (Math.hypot(x - s.x, z - s.z) < rad + 30 || Math.hypot(x - s.doorX, z - s.doorZ) < rad + 26) {
         return false;
       }
     }
@@ -2430,10 +2864,10 @@ float tFbm(vec2 p) {
     ramps.push({ x, z, width, length, height, heading });
   };
 
-  addRamp(0, 330, 8.2, 22, 2.7, 0);
-  addRamp(520, 330, 8.2, 22, 2.7, 0);
-  addRamp(-360, 340, 8.5, 22, 2.8, 0);
-  addRamp(180, -290, 7.6, 20, 2.5, Math.PI / 2);
+  addRamp(-140, 340, 8.2, 22, 2.7, 0);
+  addRamp(455, 635, 8.2, 22, 2.7, 0);
+  addRamp(-820, 740, 8.5, 22, 2.8, Math.PI / 2);
+  addRamp(830, -20, 7.6, 20, 2.5, Math.PI);
 
   // 11. Explosive Barrels
   const barrelCoords: [number, number][] = [
@@ -2802,6 +3236,9 @@ float tFbm(vec2 p) {
     rangeTargets,
     elevators,
     buildingWindowMaterials,
+    wettableRoadMaterials,
+    extraTextures,
+    clubShow,
     spinners,
     oceanMesh,
     skyMat,

@@ -78,10 +78,14 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
     tex.wrapS = THREE.RepeatWrapping;
     tex.wrapT = THREE.RepeatWrapping;
     tex.repeat.set(repeatX, repeatY);
+    tex.generateMipmaps = true;
+    tex.minFilter = THREE.LinearMipmapLinearFilter;
+    tex.magFilter = THREE.LinearFilter;
     tex.anisotropy = Math.min(8, maxAnisotropy || 1);
     if (isColor) {
       tex.colorSpace = THREE.SRGBColorSpace;
     }
+    tex.needsUpdate = true;
     created.push(tex);
     return tex;
   };
@@ -588,6 +592,10 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
   shctx.fillStyle = rgrad;
   shctx.fillRect(0, 0, 128, 128);
   const contactShadow = new THREE.CanvasTexture(shadCanvas);
+  contactShadow.generateMipmaps = true;
+  contactShadow.minFilter = THREE.LinearMipmapLinearFilter;
+  contactShadow.magFilter = THREE.LinearFilter;
+  contactShadow.needsUpdate = true;
   created.push(contactShadow);
 
   return {

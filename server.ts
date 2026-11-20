@@ -5,6 +5,22 @@ import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
+import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
+
+const GEMINI_MODEL = 'gemini-4-hydrogen';
+
+function getGenAIClient(): GoogleGenAI | null {
+  const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
+  if (!apiKey) return null;
+  return new GoogleGenAI({
+    apiKey,
+    httpOptions: {
+      headers: {
+        'User-Agent': 'aistudio-build',
+      },
+    },
+  });
+}
 
 interface ClientSession {
   ws: WebSocket;
@@ -42,9 +58,128 @@ async function startServer() {
   app.get('/api/health', healthHandler);
   app.get('/healthz', healthHandler);
 
+  // Server-side AI integration: Adaptive NPC reactions & Vice AI Dispatcher Assistant
+  app.post('/api/ai/npc-react', async (req, res) => {
+    const ai = getGenAIClient();
+    if (!ai) {
+      res.status(503).json({
+        error: 'GEMINI_API_KEY nie je nakonfigurovaný na serveri.',
+      });
+      return;
+    }
+
+    const body = (req.body || {}) as Record<string, unknown>;
+    const district = String(body.district || 'Vice Horizon');
+    const weather = String(body.weather || 'jasno');
+    const timeOfDay = String(body.timeOfDay || '17:00');
+    const playerWanted = Number(body.wantedStars || 0);
+    const inVehicle = Boolean(body.inVehicle);
+    const nearClub = Boolean(body.nearClub);
+    const eventHint = String(body.eventHint || 'bežný ruch v meste');
+    const npcName = String(body.npcName || 'Obyvateľ Leonidy');
+
+    try {
+      const response = await ai.models.generateContent({
+        model: GEMINI_MODEL,
+        contents: `Si NPC obyvateľ menom "${npcName}" v slnečnom prímorskom meste Vice Horizon (štýl Miami / Leonida).
+Kontext okolia práve teraz:
+- Okres: ${district}
+- Čas v hre: ${timeOfDay}
+- Počasie: ${weather}
+- Hráčov stupeň pátrania políciou: ${playerWanted} hviezdičiek
+- Hráč je vo vozidle: ${inVehicle ? 'áno' : 'pešo'}
+- Pri klube Malibu Neon Lounge: ${nearClub ? 'áno' : 'nie'}
+- Aktuálna udalosť v okolí: ${eventHint}
+
+Vyber pre NPC realistickú reakciu a napíš krátku prirodzenú vetu v slovenčine (max 14 slov), ktorá presne reaguje na situáciu.`,
+        config: {
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              behavior: {
+                type: Type.STRING,
+                enum: ['stroll', 'chill', 'flee', 'seek_shelter', 'cheer'],
+              },
+              dialogue: {
+                type: Type.STRING,
+              },
+            },
+            required: ['behavior', 'dialogue'],
+          },
+        },
+      });
+
+      const rawText = response.text?.trim() || '{}';
+      const parsed = JSON.parse(rawText) as { behavior?: string; dialogue?: string };
+      res.json({
+        behavior: parsed.behavior || 'stroll',
+        dialogue: parsed.dialogue || 'Pekný deň v Leonide!',
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Chyba pri komunikácii s AI službou.';
+      res.status(502).json({ error: message });
+    }
+  });
+
+  app.post('/api/ai/chat', async (req, res) => {
+    const ai = getGenAIClient();
+    if (!ai) {
+      res.status(503).json({
+        error: 'GEMINI_API_KEY nie je nakonfigurovaný na serveri.',
+      });
+      return;
+    }
+
+    const body = (req.body || {}) as Record<string, unknown>;
+    const message = String(body.message || '').trim();
+    if (!message) {
+      res.status(400).json({ error: 'Správa nesmie byť prázdna.' });
+      return;
+    }
+    const ctx = (body.context || {}) as Record<string, unknown>;
+
+    try {
+      const response = await ai.models.generateContent({
+        model: GEMINI_MODEL,
+        contents: `Si "Vice AI Asistent" v telefóne iVice v otvorenej 3D hre Vice Horizon (ostrov Leonida).
+Aktuálny stav hráča:
+- Postava: ${String(ctx.characterName || 'Lucia')}
+- Okres: ${String(ctx.district || 'Coral Strip')}
+- Čas v hre: ${String(ctx.gameClock || '17:15')}
+- Počasie: ${String(ctx.weatherLabel || 'Jasno')}
+- Peniaze: $${Number(ctx.cash || 0)}
+- Stupeň pátrania: ${Number(ctx.wantedStars || 0)} hviezdičiek
+- Aktívna misia: ${String(ctx.activeMission || 'Žiadna (Voľná jazda)')}
+
+Poznáš obchody a lokácie v meste: Ammu-Nation (zbrane a strelnica), Bayshore Boutique (oblečenie), 24/7 Ocean Market, Coral Villa (úkryt s garážou), Bayshore Customs / Servis (opravy a tuning autom priamo dnu), Nemocnica Vice Central, Policajná stanica VCPD, Hasičská stanica VCFD, Letisko Bayshore (hangár, vrtuľníky, stíhačka F-22), Prístav Marina a nočný klub Malibu Neon Lounge s pódiovou show.
+Poznáš aj telefónne kódy: 3324 (nesmrteľnosť), 5342 (vrtuľník), 7645 (taxík), 7726 (superšport), 8654 (lietadlo), 9975 (stíhačka), ale upozorni hráča, že použitie cheatov zablokuje misie až do reštartu relácie.
+
+Odpovedaj hráčovi po slovensky, vecne, štýlovo a užitočne (max 3–4 vety).
+Otázka hráča: ${message}`,
+        config: {
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        },
+      });
+
+      res.json({
+        reply: response.text?.trim() || 'Systém iVice Dispatch momentálne neodpovedá.',
+      });
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : 'Chyba AI dispečingu.';
+      res.status(502).json({ error: errMsg });
+    }
+  });
+
   const broadcastPresence = () => {
     const onlineUids = Array.from(sessions.keys());
-    const payload = JSON.stringify({ type: 'presence', onlineUids });
+    const onlinePlayers = Array.from(sessions.values()).map((s) => ({
+      uid: s.uid,
+      displayName: s.displayName,
+      friendCode: `VH-${s.uid.slice(0, 6).toUpperCase()}`,
+    }));
+    const payload = JSON.stringify({ type: 'presence', onlineUids, onlinePlayers });
     for (const s of sessions.values()) {
       if (s.ws.readyState === WebSocket.OPEN) {
         s.ws.send(payload);
@@ -160,6 +295,15 @@ async function startServer() {
       const session = sessions.get(currentUid);
       if (!session) return;
       session.isAlive = true;
+
+      if (type === 'update_profile') {
+        const nextName = String(msg.displayName || '').trim().slice(0, 32);
+        if (nextName.length >= 2) {
+          session.displayName = nextName;
+          broadcastPresence();
+        }
+        return;
+      }
 
       if (type === 'update_friends') {
         const friendsArr = Array.isArray(msg.friends)

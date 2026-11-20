@@ -39,13 +39,14 @@ service cloud.firestore {
     // Validation Blueprints
     function isValidUserSaveProfile(data, userId) {
       return data.keys().hasAll(['uid', 'displayName', 'activeCharacterId', 'cash', 'totalEliminations', 'policeEscapes', 'stuntJumps', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['uid', 'displayName', 'activeCharacterId', 'cash', 'totalEliminations', 'policeEscapes', 'stuntJumps', 'shootingRangeScore', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'displayName', 'nickname', 'activeCharacterId', 'cash', 'totalEliminations', 'policeEscapes', 'stuntJumps', 'shootingRangeScore', 'createdAt', 'updatedAt'])
         && data.uid is string
         && data.uid == userId
         && isValidId(data.uid)
         && data.displayName is string
         && data.displayName.size() >= 1
         && data.displayName.size() <= 80
+        && (!('nickname' in data) || (data.nickname is string && data.nickname.size() >= 2 && data.nickname.size() <= 32))
         && isValidCharId(data.activeCharacterId)
         && data.cash is number
         && data.cash >= 0
@@ -170,13 +171,15 @@ service cloud.firestore {
 
     function isValidPublicUserCard(data, userId) {
       return data.keys().hasAll(['uid', 'displayName', 'friendCode', 'updatedAt'])
-        && data.keys().hasOnly(['uid', 'displayName', 'emailLower', 'friendCode', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'displayName', 'nickname', 'nicknameLower', 'emailLower', 'friendCode', 'updatedAt'])
         && data.uid is string
         && data.uid == userId
         && isValidId(data.uid)
         && data.displayName is string
         && data.displayName.size() >= 1
         && data.displayName.size() <= 80
+        && (!('nickname' in data) || (data.nickname is string && data.nickname.size() >= 2 && data.nickname.size() <= 32))
+        && (!('nicknameLower' in data) || (data.nicknameLower is string && data.nicknameLower.size() >= 2 && data.nicknameLower.size() <= 32))
         && (!('emailLower' in data) || (data.emailLower is string && data.emailLower.size() <= 160))
         && data.friendCode is string
         && data.friendCode.size() >= 4
@@ -186,7 +189,7 @@ service cloud.firestore {
 
     function isValidFriendSave(data, userId, friendId) {
       return data.keys().hasAll(['uid', 'ownerId', 'displayName', 'friendCode', 'addedAt'])
-        && data.keys().hasOnly(['uid', 'ownerId', 'displayName', 'email', 'friendCode', 'addedAt'])
+        && data.keys().hasOnly(['uid', 'ownerId', 'displayName', 'nickname', 'email', 'friendCode', 'addedAt'])
         && data.uid is string
         && data.uid == friendId
         && isValidId(data.uid)
@@ -195,6 +198,7 @@ service cloud.firestore {
         && data.displayName is string
         && data.displayName.size() >= 1
         && data.displayName.size() <= 80
+        && (!('nickname' in data) || (data.nickname is string && data.nickname.size() >= 2 && data.nickname.size() <= 32))
         && (!('email' in data) || (data.email is string && data.email.size() <= 160))
         && data.friendCode is string
         && data.friendCode.size() >= 4
@@ -236,7 +240,7 @@ service cloud.firestore {
         && incoming().uid == existing().uid
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
-        && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'activeCharacterId', 'cash', 'totalEliminations', 'policeEscapes', 'stuntJumps', 'shootingRangeScore', 'updatedAt']);
+        && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'nickname', 'activeCharacterId', 'cash', 'totalEliminations', 'policeEscapes', 'stuntJumps', 'shootingRangeScore', 'updatedAt']);
       allow delete: if isValidId(userId) && isOwner(userId);
 
       match /characters/{characterId} {

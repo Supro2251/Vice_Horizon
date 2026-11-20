@@ -1,5 +1,5 @@
 import React from 'react';
-import { CheckCircle2, Clock, Compass, Lock, MapPin, Navigation, Play, Square, X } from 'lucide-react';
+import { CheckCircle2, Clock, Compass, Lock, MapPin, Navigation, Play, RotateCcw, Square, X } from 'lucide-react';
 import { MissionProgressRecord } from '../types/game';
 import { isMissionUnlocked, MISSIONS, SIDE_DISCOVERY_MISSIONS } from '../data/defaults';
 
@@ -7,10 +7,12 @@ interface MissionsModalProps {
   missionsProgress: Record<string, MissionProgressRecord>;
   discoveredSideIds: string[];
   activeMissionId: string | null;
+  cheatSessionActive?: boolean;
   accentColor: string;
   onStartMission: (missionId: string) => void;
   onNavigateGps: (x: number, z: number, label: string) => void;
   onCancelMission: () => void;
+  onRestartCleanSession?: () => void;
   onClose: () => void;
 }
 
@@ -18,10 +20,12 @@ export const MissionsModal: React.FC<MissionsModalProps> = ({
   missionsProgress,
   discoveredSideIds,
   activeMissionId,
+  cheatSessionActive = false,
   accentColor,
   onStartMission,
   onNavigateGps,
   onCancelMission,
+  onRestartCleanSession,
   onClose,
 }) => {
   const orderedMissions = [...MISSIONS].sort((a, b) => a.storyOrder - b.storyOrder);
@@ -47,6 +51,30 @@ export const MissionsModal: React.FC<MissionsModalProps> = ({
         </div>
 
         <div className="p-6 overflow-y-auto space-y-4">
+          {cheatSessionActive && (
+            <div className="p-4 rounded-xl bg-rose-500/15 border border-rose-400/40 flex flex-wrap items-center justify-between gap-3">
+              <div className="space-y-0.5">
+                <div className="text-sm font-bold text-rose-200">
+                  Cheaty sú v tejto relácii aktívne — misie sú zamknuté!
+                </div>
+                <div className="text-xs text-rose-100/80">
+                  Pre plnenie misií reštartuj reláciu bez cheatov (zmaže sa len to, čo bolo nacheatované).
+                </div>
+              </div>
+              {onRestartCleanSession && (
+                <button
+                  onClick={() => {
+                    onRestartCleanSession();
+                  }}
+                  className="px-4 py-2 rounded-lg text-xs font-bold bg-rose-500 hover:bg-rose-400 text-white flex items-center gap-1.5 shrink-0"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  Reštartovať bez cheatov
+                </button>
+              )}
+            </div>
+          )}
+
           {orderedMissions.map((m) => {
             const prog = missionsProgress[m.id];
             const unlocked = isMissionUnlocked(m.id, missionsProgress);
@@ -152,15 +180,16 @@ export const MissionsModal: React.FC<MissionsModalProps> = ({
                         Navigovať GPS
                       </button>
                       <button
+                        disabled={cheatSessionActive}
                         onClick={() => {
                           onStartMission(m.id);
                           onClose();
                         }}
-                        className="px-4 py-2 rounded-lg text-xs font-semibold text-slate-950 flex items-center gap-1.5 whitespace-nowrap"
+                        className="px-4 py-2 rounded-lg text-xs font-semibold text-slate-950 flex items-center gap-1.5 whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed"
                         style={{ backgroundColor: accentColor }}
                       >
-                        <Play className="w-3.5 h-3.5" />
-                        {isDone ? 'Zopakovať' : 'Spustiť misiu'}
+                        {cheatSessionActive ? <Lock className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
+                        {cheatSessionActive ? 'Zamknuté (Cheaty)' : isDone ? 'Zopakovať' : 'Spustiť misiu'}
                       </button>
                     </>
                   )}
@@ -224,14 +253,16 @@ export const MissionsModal: React.FC<MissionsModalProps> = ({
                       </button>
                       {!isRunning && (
                         <button
+                          disabled={cheatSessionActive}
                           onClick={() => {
                             onStartMission(sm.id);
                             onClose();
                           }}
-                          className="px-3.5 py-2 rounded-lg text-xs font-semibold text-slate-950 flex items-center gap-1"
+                          className="px-3.5 py-2 rounded-lg text-xs font-semibold text-slate-950 flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
                           style={{ backgroundColor: accentColor }}
                         >
-                          <Play className="w-3.5 h-3.5" /> Spustiť
+                          {cheatSessionActive ? <Lock className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
+                          {cheatSessionActive ? 'Zamknuté' : 'Spustiť'}
                         </button>
                       )}
                     </div>

@@ -13,7 +13,7 @@ interface TaxiModalProps {
 
 const TAXI_DESTINATIONS = [
   { label: 'Bayshore Medzinárodné letisko', district: 'Hangáre a dráhy', x: -960, z: 750 },
-  { label: 'Coral Villa Úkryt & Garáž', district: 'Súkromná vila', x: 480, z: -604 },
+  { label: 'Coral Villa Úkryt & Garáž', district: 'Súkromná vila', x: 420, z: -484 },
   { label: 'Vice General Nemocnica', district: 'Severné centrum', x: -90, z: -592 },
   { label: 'Downtown Plaza', district: 'Centrum mesta', x: 0, z: -90 },
   { label: 'Marina Prístav & Jachty', district: 'Juhovýchodný prístav', x: 520, z: 685 },

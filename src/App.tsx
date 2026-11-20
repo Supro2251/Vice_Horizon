@@ -20,6 +20,7 @@ import {
   InventoryState,
   MissionInvite,
   MissionProgressRecord,
+  OnlinePlayerInfo,
   RemotePlayerState,
   SavedGarageState,
   WeaponId,
@@ -29,6 +30,7 @@ import { ROAD_SEGMENTS } from './engine/navigation';
 import {
   addFriendByQuery,
   computeFriendCode,
+  ensurePublicUserCard,
   fetchFriends,
   loadGameFromCloud,
   removeFriend,
@@ -37,6 +39,7 @@ import {
   signOutUser,
   subscribeToAuth,
   testFirestoreConnection,
+  updatePlayerNickname,
 } from './services/firebase';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { GameHUD } from './components/GameHUD';
@@ -99,9 +102,15 @@ const INITIAL_TELEMETRY: HudTelemetry = {
   hasParachute: false,
   parachuteDeployed: false,
   godModeActive: false,
+  cheatSessionActive: false,
   gameClockStr: '17:15',
   gameTimeNormalized: 0.72,
   cloudCoverage: 0.42,
+  weatherType: 'clear',
+  weatherLabel: 'Jasno',
+  rainIntensity: 0,
+  ambientTempC: 26,
+  nearestNpcDialogue: null,
   controlCategory: 'foot',
   equippedWeapon: 'pistol',
   ammoInClip: 15,
@@ -230,10 +239,12 @@ function ViceHorizonApp() {
   const [shopNotice, setShopNotice] = useState<string | null>(null);
 
   const [user, setUser] = useState<User | null>(null);
+  const [playerNickname, setPlayerNickname] = useState<string>('');
   const [cloudStatus, setCloudStatus] = useState<string | null>(null);
   const [cloudBusy, setCloudBusy] = useState(false);
   const [friends, setFriends] = useState<FriendRecord[]>([]);
   const [onlineUids, setOnlineUids] = useState<string[]>([]);
+  const [onlinePlayers, setOnlinePlayers] = useState<OnlinePlayerInfo[]>([]);
   const [remotePlayers, setRemotePlayers] = useState<RemotePlayerState[]>([]);
   const [incomingInvite, setIncomingInvite] = useState<MissionInvite | null>(null);
 
@@ -257,6 +268,7 @@ function ViceHorizonApp() {
     activeMissionId,
     telemetry,
     friends,
+    playerNickname,
   });
   stateRef.current = {
     characters,
@@ -271,6 +283,7 @@ function ViceHorizonApp() {
     activeMissionId,
     telemetry,
     friends,
+    playerNickname,
   };
 
   // Validate Firestore connection & subscribe to Auth
@@ -281,8 +294,16 @@ function ViceHorizonApp() {
       if (u) {
         setCloudBusy(true);
         try {
-          const [loaded, friendList] = await Promise.all([loadGameFromCloud(u), fetchFriends(u)]);
+          const [loaded, friendList, resolvedNick] = await Promise.all([
+            loadGameFromCloud(u),
+            fetchFriends(u),
+            ensurePublicUserCard(u),
+          ]);
           setFriends(friendList);
+          setPlayerNickname(resolvedNick || u.displayName || u.email?.split('@')[0] || 'Hráč');
+          if (wsRef.current?.readyState === WebSocket.OPEN && resolvedNick) {
+            wsRef.current.send(JSON.stringify({ type: 'update_profile', displayName: resolvedNick }));
+          }
           if (loaded) {
             setCharacters(loaded.characters);
             setActiveCharacterId(loaded.activeCharacterId);
@@ -309,8 +330,10 @@ function ViceHorizonApp() {
           setCloudBusy(false);
         }
       } else {
+        setPlayerNickname('');
         setFriends([]);
         setOnlineUids([]);
+        setOnlinePlayers([]);
         setRemotePlayers([]);
         engineRef.current?.updateRemotePlayers([]);
         setCloudStatus(null);
@@ -334,11 +357,13 @@ function ViceHorizonApp() {
       wsRef.current = ws;
 
       ws.onopen = () => {
+        const myName =
+          stateRef.current.playerNickname || user.displayName || user.email?.split('@')[0] || 'Hráč';
         ws.send(
           JSON.stringify({
             type: 'hello',
             uid: user.uid,
-            displayName: user.displayName || user.email?.split('@')[0] || 'Hráč',
+            displayName: myName,
             friends: stateRef.current.friends.map((f) => f.uid),
           })
         );
@@ -348,9 +373,11 @@ function ViceHorizonApp() {
           const s = stateRef.current;
           const t = s.telemetry;
           const ch = s.characters[s.activeCharacterId];
+          const myLiveName =
+            s.playerNickname || user.displayName || user.email?.split('@')[0] || 'Hráč';
           const playerPayload: RemotePlayerState = {
             uid: user.uid,
-            displayName: user.displayName || user.email?.split('@')[0] || 'Hráč',
+            displayName: myLiveName,
             characterId: s.activeCharacterId,
             x: t.playerX,
             y: t.inVehicle ? t.altitudeM : 0,
@@ -378,6 +405,9 @@ function ViceHorizonApp() {
           const data = JSON.parse(String(evt.data));
           if (data.type === 'presence' && Array.isArray(data.onlineUids)) {
             setOnlineUids(data.onlineUids);
+            if (Array.isArray(data.onlinePlayers)) {
+              setOnlinePlayers(data.onlinePlayers as OnlinePlayerInfo[]);
+            }
             setRemotePlayers((prev) => {
               const onlineSet = new Set<string>(data.onlineUids);
               const next = prev.filter((p) => onlineSet.has(p.uid));
@@ -559,6 +589,8 @@ function ViceHorizonApp() {
         engine.useConsumable('medkit');
       } else if (action === 'quickArmor') {
         engine.useConsumable('armor_plate');
+      } else if (action === 'talkNpc') {
+        engine.talkToNearestNpc();
       }
     };
 
@@ -614,8 +646,28 @@ function ViceHorizonApp() {
     engineRef.current?.applySettings(next);
   }, []);
 
+  const handleRestartCleanSession = useCallback(() => {
+    const res = engineRef.current?.restartCleanSession();
+    setSettings((prev) => ({
+      ...prev,
+      gameplayMods: {
+        ...prev.gameplayMods,
+        lowGravity: false,
+        infiniteAmmo: false,
+        rapidFire: false,
+        turboVehicles: false,
+        noPolice: false,
+      },
+    }));
+    if (res?.message) showNotice(res.message);
+  }, [showNotice]);
+
   const handleSaveCloud = useCallback(async () => {
     if (!user) return;
+    if (stateRef.current.telemetry.cheatSessionActive) {
+      setCloudStatus('Ukladanie zablokované počas aktívnych cheatov. Reštartuj reláciu bez cheatov.');
+      return;
+    }
     setCloudBusy(true);
     try {
       const s = stateRef.current;
@@ -669,11 +721,12 @@ function ViceHorizonApp() {
     }
   }, [user]);
 
-  // Auto-save locally every 15s & to Cloud every 45s if signed in
+  // Auto-save locally every 15s & to Cloud every 45s if signed in (strictly skipped while cheats are active!)
   useEffect(() => {
     const localTimer = window.setInterval(() => {
       try {
         const s = stateRef.current;
+        if (s.telemetry.cheatSessionActive) return;
         const syncedGarage = engineRef.current?.syncGarageBeforeSave() || s.savedGarage;
         localStorage.setItem(
           LOCAL_SAVE_KEY,
@@ -869,6 +922,7 @@ function ViceHorizonApp() {
             setActiveModal('settings');
           }}
           onRequestLock={() => engineRef.current?.input.requestPointerLock()}
+          onRestartCleanSession={handleRestartCleanSession}
         />
       )}
 
@@ -968,6 +1022,7 @@ function ViceHorizonApp() {
           missionsProgress={missionsProgress}
           discoveredSideIds={discoveredSideIds}
           activeMissionId={activeMissionId}
+          cheatSessionActive={telemetry.cheatSessionActive}
           accentColor={settings.hudMod.accentColor}
           onStartMission={(id) => {
             setActiveMissionId(id);
@@ -978,6 +1033,7 @@ function ViceHorizonApp() {
             setActiveMissionId(null);
             engineRef.current?.cancelMission();
           }}
+          onRestartCleanSession={handleRestartCleanSession}
           onClose={() => setActiveModal('none')}
         />
       )}
@@ -1050,15 +1106,29 @@ function ViceHorizonApp() {
       {phoneOpen && activeModal === 'none' && !telemetry.activeCutscene && (
         <PhoneOverlay
           user={user}
+          myNickname={playerNickname || user?.displayName || user?.email?.split('@')[0] || ''}
           myFriendCode={user ? computeFriendCode(user.uid) : 'VH-OFFLINE'}
           friends={friends}
           onlineUids={onlineUids}
+          onlinePlayers={onlinePlayers}
           remotePlayers={remotePlayers}
           activeMissionId={activeMissionId}
           savedGarage={savedGarage}
           gameClockStr={telemetry.gameClockStr}
+          district={telemetry.district}
+          weatherLabel={telemetry.weatherLabel}
+          cheatSessionActive={telemetry.cheatSessionActive}
           accentColor={settings.hudMod.accentColor}
           onSignIn={() => signInWithGoogle().catch((e) => setCloudStatus(String(e)))}
+          onUpdateNickname={async (nextNick) => {
+            if (!user) throw new Error('Najprv sa prihlás Google účtom.');
+            const saved = await updatePlayerNickname(user, nextNick);
+            setPlayerNickname(saved);
+            if (wsRef.current?.readyState === WebSocket.OPEN) {
+              wsRef.current.send(JSON.stringify({ type: 'update_profile', displayName: saved }));
+            }
+            showNotice(`Nickname uložený: ${saved}`);
+          }}
           onAddFriend={async (q) => {
             if (!user) throw new Error('Najprv sa prihlás Google účtom.');
             const rec = await addFriendByQuery(user, q);
@@ -1100,6 +1170,7 @@ function ViceHorizonApp() {
           onApplyCheat={(code) =>
             engineRef.current?.applyCheatCode(code) || { ok: false, message: 'Hra nie je pripravená.' }
           }
+          onRestartCleanSession={handleRestartCleanSession}
           onClose={() => setPhoneOpen(false)}
         />
       )}
@@ -1119,6 +1190,11 @@ function ViceHorizonApp() {
         <SettingsAndModsModal
           settings={settings}
           user={user}
+          myNickname={playerNickname || user?.displayName || user?.email?.split('@')[0] || ''}
+          myFriendCode={user ? computeFriendCode(user.uid) : 'VH-OFFLINE'}
+          friends={friends}
+          onlineUids={onlineUids}
+          onlinePlayers={onlinePlayers}
           cloudStatus={cloudStatus}
           cloudBusy={cloudBusy}
           stats={stats}
@@ -1127,11 +1203,32 @@ function ViceHorizonApp() {
           controllerName={telemetry.controllerName}
           gameClockStr={telemetry.gameClockStr}
           gameTimeNormalized={telemetry.gameTimeNormalized}
+          cheatSessionActive={telemetry.cheatSessionActive}
           initialTab={settingsInitialTab}
           onUpdateSettings={handleUpdateSettings}
           onSetTimeOfDay={(n) => engineRef.current?.setTimeOfDay(n)}
+          onRestartCleanSession={handleRestartCleanSession}
           onSignIn={() => signInWithGoogle().catch((e) => setCloudStatus(String(e)))}
           onSignOut={() => signOutUser().catch(() => {})}
+          onUpdateNickname={async (nextNick) => {
+            if (!user) throw new Error('Najprv sa prihlás Google účtom.');
+            const saved = await updatePlayerNickname(user, nextNick);
+            setPlayerNickname(saved);
+            if (wsRef.current?.readyState === WebSocket.OPEN) {
+              wsRef.current.send(JSON.stringify({ type: 'update_profile', displayName: saved }));
+            }
+            showNotice(`Nickname uložený: ${saved}`);
+          }}
+          onAddFriend={async (q) => {
+            if (!user) throw new Error('Najprv sa prihlás Google účtom.');
+            const rec = await addFriendByQuery(user, q);
+            setFriends((prev) => (prev.some((f) => f.uid === rec.uid) ? prev : [...prev, rec]));
+          }}
+          onRemoveFriend={async (uid) => {
+            if (!user) return;
+            await removeFriend(user, uid);
+            setFriends((prev) => prev.filter((f) => f.uid !== uid));
+          }}
           onSaveCloud={handleSaveCloud}
           onLoadCloud={handleLoadCloud}
           onClose={() => setActiveModal('none')}

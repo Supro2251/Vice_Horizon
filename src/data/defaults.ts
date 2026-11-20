@@ -160,10 +160,10 @@ export const SHOPS: ShopDef[] = [
     name: 'Coral Villa Úkryt',
     subtitle: 'Súkromná vila, šatník, zrkadlo a ukrytie pred políciou',
     category: 'safehouse',
-    x: 480,
-    z: -620,
-    doorX: 480,
-    doorZ: -604,
+    x: 420,
+    z: -500,
+    doorX: 420,
+    doorZ: -484,
     color: '#38bdf8',
   },
   {
@@ -215,10 +215,10 @@ export const SHOPS: ShopDef[] = [
     name: 'VCPD Policajná stanica',
     subtitle: 'Recepcia, cely, kaucia a zánik pátrania',
     category: 'police_station',
-    x: -450,
-    z: -635,
-    doorX: -450,
-    doorZ: -619,
+    x: -460,
+    z: -530,
+    doorX: -460,
+    doorZ: -514,
     color: '#3b82f6',
   },
   {
@@ -268,7 +268,7 @@ export const SHOPS: ShopDef[] = [
 ];
 
 export const HOSPITAL_RESPAWN = { x: -90, z: -612, heading: Math.PI };
-export const POLICE_STATION_RESPAWN = { x: -450, z: -612, heading: Math.PI };
+export const POLICE_STATION_RESPAWN = { x: -460, z: -506, heading: Math.PI };
 
 export const AIRPORT_HANGAR_ZONE = {
   id: 'airport_hangar',
@@ -286,14 +286,14 @@ export const AIRPORT_HANGAR_ZONE = {
 export const SAFEHOUSE_GARAGE_ZONE = {
   id: 'safehouse_garage',
   label: 'Coral Villa Garáž (Autá a motorky)',
-  x: 522,
-  z: -620,
-  minX: 513,
-  maxX: 531,
-  minZ: -630,
-  maxZ: -609,
-  doorX: 522,
-  doorZ: -604,
+  x: 456,
+  z: -500,
+  minX: 447,
+  maxX: 465,
+  minZ: -510,
+  maxZ: -489,
+  doorX: 456,
+  doorZ: -484,
 };
 
 export const DEFAULT_SAVED_GARAGE: SavedGarageState = {
@@ -797,6 +797,7 @@ export const DEFAULT_SETTINGS: GameSettings = {
     turboVehicles: false,
     noPolice: false,
     timeOfDay: 'auto',
+    weatherOverride: 'auto',
   },
 };
 
@@ -1011,7 +1012,7 @@ export const MISSIONS: MissionDef[] = [
       { id: 'climb_overpass', type: 'goto', label: 'Vyjdi na nadchod Midtown Skyway', targetX: 0, targetZ: -255, radius: 20 },
       { id: 'fight_convoy', type: 'eliminate', label: 'Zneškodni eskortu na nadchode', targetX: 40, targetZ: -255, radius: 48, enemyCount: 6 },
       { id: 'loot_convoy', type: 'collect', label: 'Zober trezorový kľúč z konvoja', targetX: 55, targetZ: -255, radius: 9 },
-      { id: 'escape_skyway', type: 'escape_police', label: 'Unikni z nadchodu pred políciou', targetX: 480, targetZ: -600, radius: 30 },
+      { id: 'escape_skyway', type: 'escape_police', label: 'Unikni z nadchodu pred políciou', targetX: 420, targetZ: -484, radius: 30 },
     ],
   },
   {
@@ -1204,9 +1205,9 @@ export const MISSIONS: MissionDef[] = [
       { speaker: 'Lucia Reyes', text: 'Všetky spisy zmizli v dymovej clone. Sme čistí ako ľalia!', cameraFocus: 'player' },
     ],
     stages: [
-      { id: 'raid_vcpd', type: 'eliminate', label: 'Preraz obranu pred VCPD Policajnou stanicou', targetX: -450, targetZ: -619, radius: 52, enemyCount: 10 },
-      { id: 'steal_drives', type: 'collect', label: 'Zober disky s dôkazmi z recepcie', targetX: -450, targetZ: -630, radius: 10 },
-      { id: 'survive_vcpd', type: 'escape_police', label: 'Unikni hliadkam cez severnú diaľnicu', targetX: 480, targetZ: -620, radius: 35 },
+      { id: 'raid_vcpd', type: 'eliminate', label: 'Preraz obranu pred VCPD Policajnou stanicou', targetX: -460, targetZ: -514, radius: 52, enemyCount: 10 },
+      { id: 'steal_drives', type: 'collect', label: 'Zober disky s dôkazmi z recepcie', targetX: -460, targetZ: -526, radius: 10 },
+      { id: 'survive_vcpd', type: 'escape_police', label: 'Unikni hliadkam cez severnú diaľnicu', targetX: 420, targetZ: -484, radius: 35 },
     ],
   },
   {
@@ -1257,7 +1258,7 @@ export const MISSIONS: MissionDef[] = [
       { id: 'west_depot', type: 'eliminate', label: '2. Vyčisti západný sklad pri Airport Blvd', targetX: -760, targetZ: 240, radius: 60, enemyCount: 9 },
       { id: 'underpass_drop', type: 'collect', label: '3. Získaj kódovací kufrík v tuneli Coral', targetX: 380, targetZ: 195, radius: 14 },
       { id: 'south_fortress', type: 'eliminate', label: '4. Znič južnú pevnosť pri prístave', targetX: 620, targetZ: 920, radius: 65, enemyCount: 11 },
-      { id: 'marathon_escape', type: 'escape_police', label: '5. Unikni 4-hviezdičkovej polícii cez celý ostrov', targetX: 480, targetZ: -604, radius: 35 },
+      { id: 'marathon_escape', type: 'escape_police', label: '5. Unikni 4-hviezdičkovej polícii cez celý ostrov', targetX: 420, targetZ: -484, radius: 35 },
     ],
   },
   {
@@ -1284,7 +1285,7 @@ export const MISSIONS: MissionDef[] = [
       { id: 'defeat_lieutenants', type: 'eliminate', label: 'Znič prvú obrannú líniu syndikátu', targetX: 1060, targetZ: 300, radius: 60, enemyCount: 10 },
       { id: 'defeat_boss_guard', type: 'eliminate', label: 'Zlikviduj elitnú gardu veliteľa na útesoch', targetX: 1120, targetZ: 360, radius: 65, enemyCount: 12 },
       { id: 'grab_crown_key', type: 'collect', label: 'Zober hlavný kľúč k rezerve Leonidy ($50,000)', targetX: 1140, targetZ: 375, radius: 12 },
-      { id: 'grand_escape', type: 'escape_police', label: 'Unikni vrtuľníkom, stíhačkou, člnom alebo autom z dosahu VCPD!', targetX: 480, targetZ: -604, radius: 40 },
+      { id: 'grand_escape', type: 'escape_police', label: 'Unikni vrtuľníkom, stíhačkou, člnom alebo autom z dosahu VCPD!', targetX: 420, targetZ: -484, radius: 40 },
     ],
   },
 ];
@@ -1314,7 +1315,7 @@ export const SIDE_DISCOVERY_MISSIONS: MissionDef[] = [
   { id: 'side_21', storyOrder: 121, isSideDiscovery: true, difficulty: 'Stredná', estimatedMinutes: '5-7 min', title: 'Nález v kanáli Vice', subtitle: 'Na brehu kanála leží vyhodený kufor so šperkami.', giver: 'Kanálový objav', rewardCash: 4300, startX: 120, startZ: 365, stages: [{ id: 's21_c', type: 'collect', label: 'Zober kufor z betónového nábrežia', targetX: 125, targetZ: 372, radius: 8 }] },
   { id: 'side_22', storyOrder: 122, isSideDiscovery: true, difficulty: 'Stredná', estimatedMinutes: '5-8 min', title: 'Nočná stráž pri Highland Tuning', subtitle: 'Zlodeji chcú vykradnúť severný tuningový servis.', giver: 'Severný objav', rewardCash: 4800, startX: 145, startZ: -960, stages: [{ id: 's22_e', type: 'eliminate', label: 'Zneškodni zlodejov áut', targetX: 155, targetZ: -975, radius: 42, enemyCount: 5 }] },
   { id: 'side_23', storyOrder: 123, isSideDiscovery: true, difficulty: 'Ľahká', estimatedMinutes: '4-6 min', title: 'Plážový bar Coral Cove', subtitle: 'Na severovýchodnej pláži zostala opustená pokladňa.', giver: 'Plážový objav', rewardCash: 3500, startX: 1080, startZ: -520, stages: [{ id: 's23_c', type: 'collect', label: 'Vyber prímorskú pokladnicu', targetX: 1090, targetZ: -530, radius: 8 }] },
-  { id: 'side_24', storyOrder: 124, isSideDiscovery: true, difficulty: 'Ťažká', estimatedMinutes: '7-11 min', title: 'Prepad na letiskovom nadchode', subtitle: 'Nad západnou triedou operuje ozbrojené komando.', giver: 'Diaľničný objav', rewardCash: 6600, startX: -620, startZ: 70, stages: [{ id: 's24_e', type: 'eliminate', label: 'Vyčisti nadchod Airport Express', targetX: -620, targetZ: 85, radius: 48, enemyCount: 7 }, { id: 's24_c', type: 'collect', label: 'Zober vojenský kufrík', targetX: -620, targetZ: 95, radius: 9 }] },
+  { id: 'side_24', storyOrder: 124, isSideDiscovery: true, difficulty: 'Ťažká', estimatedMinutes: '7-11 min', title: 'Prepad na letiskovom nadchode', subtitle: 'Nad západnou triedou operuje ozbrojené komando.', giver: 'Diaľničný objav', rewardCash: 6600, startX: -620, startZ: 35, stages: [{ id: 's24_e', type: 'eliminate', label: 'Vyčisti nadchod Airport Express', targetX: -620, targetZ: 50, radius: 48, enemyCount: 7 }, { id: 's24_c', type: 'collect', label: 'Zober vojenský kufrík', targetX: -620, targetZ: 60, radius: 9 }] },
   { id: 'side_25', storyOrder: 125, isSideDiscovery: true, difficulty: 'Stredná', estimatedMinutes: '5-8 min', title: 'Tajný ostrovček na juhu', subtitle: 'Na najjužnejšej plytčine je ukrytý poklad z lode.', giver: 'Morský objav', rewardCash: 5600, startX: -480, startZ: 1240, stages: [{ id: 's25_c', type: 'collect', label: 'Zober potopenú truhlicu', targetX: -490, targetZ: 1250, radius: 10 }] },
   { id: 'side_26', storyOrder: 126, isSideDiscovery: true, difficulty: 'Extrémna', estimatedMinutes: '10-14 min', title: 'Posledná skrýša na severnom myse', subtitle: 'Najtajnejšia pevnosť na najsevernejšom výbežku ostrova.', giver: 'Legendárny objav', rewardCash: 12000, startX: 20, startZ: -1360, stages: [{ id: 's26_e', type: 'eliminate', label: 'Poraz elitu severného mysu', targetX: 20, targetZ: -1380, radius: 55, enemyCount: 10 }, { id: 's26_c', type: 'collect', label: 'Zober platinový kufrík Legendy', targetX: 20, targetZ: -1395, radius: 10 }] },
 ];

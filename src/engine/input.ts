@@ -147,6 +147,7 @@ export class InputManager {
       | 'quickArmor'
       | 'toggleDock'
       | 'phone'
+      | 'talkNpc'
   ) => void;
 
   private boundKeyDown: (e: KeyboardEvent) => void;
@@ -160,6 +161,10 @@ export class InputManager {
 
   constructor() {
     this.boundKeyDown = (e) => {
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT')) {
+        return;
+      }
       if (this.paused) return;
       this.keysDown.add(e.code);
 
@@ -184,6 +189,8 @@ export class InputManager {
       } else if (e.code === this.getKeyBinding('phone')) {
         e.preventDefault();
         this.onActionTriggered?.('phone');
+      } else if (e.code === 'KeyT') {
+        this.onActionTriggered?.('talkNpc');
       } else if (e.code === 'Digit1') {
         this.onActionTriggered?.('quickHeal');
       } else if (e.code === 'Digit2') {
@@ -469,8 +476,10 @@ export class InputManager {
     // Movement axes
     let moveX = (this.isKeyBindingDown('moveRight') ? 1 : 0) - (this.isKeyBindingDown('moveLeft') ? 1 : 0);
     let moveY = (this.isKeyBindingDown('moveForward') ? 1 : 0) - (this.isKeyBindingDown('moveBackward') ? 1 : 0);
-    if (this.keysDown.has('ArrowRight')) moveX = Math.max(moveX, 1);
-    if (this.keysDown.has('ArrowLeft')) moveX = Math.min(moveX, -1);
+    if (this.inAircraft) {
+      if (this.keysDown.has('ArrowRight')) moveX = Math.max(moveX, 1);
+      if (this.keysDown.has('ArrowLeft')) moveX = Math.min(moveX, -1);
+    }
 
     let leftStickX = moveX;
     let leftStickY = moveY;
@@ -488,12 +497,19 @@ export class InputManager {
       padLeftStickY = ly;
     }
 
-    // Look delta
+    // Look delta (Mouse + Gamepad right stick + Keyboard Arrow keys when on foot / driving)
     const ySign = this.settings.invertY ? -1 : 1;
     let lookDeltaX = this.mouseDeltaX * 0.0024 * this.settings.mouseSensitivity;
     let lookDeltaY = this.mouseDeltaY * 0.0024 * this.settings.mouseSensitivity * ySign;
     this.mouseDeltaX = 0;
     this.mouseDeltaY = 0;
+
+    if (!this.inAircraft) {
+      const keyLookX = (this.keysDown.has('ArrowRight') ? 1 : 0) - (this.keysDown.has('ArrowLeft') ? 1 : 0);
+      const keyLookY = (this.keysDown.has('ArrowDown') ? 1 : 0) - (this.keysDown.has('ArrowUp') ? 1 : 0);
+      lookDeltaX += keyLookX * 2.15 * dt;
+      lookDeltaY += keyLookY * 1.45 * dt * ySign;
+    }
 
     if (pad && pad.axes.length >= 4) {
       const rx = applyDz(pad.axes[2]);
@@ -534,8 +550,12 @@ export class InputManager {
       (this.controlCategory === 'foot' && l3Down);
     const jumpHeld = this.isKeyBindingDown('jump') || this.isGamepadButtonDown(pad, 'jump');
     const handbrakeHeld = jumpHeld || (this.controlCategory === 'car' || this.controlCategory === 'motorcycle' ? Boolean(pad && pad.buttons[5]?.pressed) : false);
-    const shootHeld = this.isKeyBindingDown('shoot') || (this.getGamepadBinding('shoot') === 7 ? r2Val > 0.4 : this.isGamepadButtonDown(pad, 'shoot'));
-    const aimHeld = this.isKeyBindingDown('aim') || l2Val > 0.4;
+    const shootHeld =
+      this.isKeyBindingDown('shoot') ||
+      this.keysDown.has('ControlRight') ||
+      this.keysDown.has('Enter') ||
+      (this.getGamepadBinding('shoot') === 7 ? r2Val > 0.4 : this.isGamepadButtonDown(pad, 'shoot'));
+    const aimHeld = this.isKeyBindingDown('aim') || this.keysDown.has('KeyZ') || l2Val > 0.4;
     const reloadDown = this.isKeyBindingDown('reload') || this.isGamepadButtonDown(pad, 'reload');
     const enterDown = this.isKeyBindingDown('enterVehicle') || this.isGamepadButtonDown(pad, 'enterVehicle');
     const l1Held = Boolean(pad && pad.buttons[4]?.pressed) || this.keysDown.has('KeyQ');

@@ -27,6 +27,7 @@ import {
   VehicleKind,
   VehicleUpgrades,
   WeaponId,
+  WeatherType,
 } from '../types/game';
 import {
   AIRPORT_HANGAR_ZONE,
@@ -61,6 +62,7 @@ import {
   AABBCollider,
   buildOpenWorld,
   CircleCollider,
+  ClubShowRig,
   ElevatorEntity,
   ExplosiveBarrelEntity,
   getDistrictName,
@@ -86,6 +88,7 @@ import {
 const _v1 = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
 const _v3 = new THREE.Vector3();
+const _v4 = new THREE.Vector3();
 const _camGoal = new THREE.Vector3();
 const _lookGoal = new THREE.Vector3();
 const _rayOrigin = new THREE.Vector3();
@@ -140,11 +143,14 @@ interface VehicleEntity {
   health: number;
   maxHealth: number;
   destroyed: boolean;
+  isCheatSpawned?: boolean;
   upgrades: VehicleUpgrades;
 }
 
 interface NpcEntity {
   id: string;
+  name?: string;
+  aiDialogue?: string;
   rig: CharacterRig;
   x: number;
   y: number;
@@ -152,7 +158,7 @@ interface NpcEntity {
   heading: number;
   health: number;
   kind: 'civilian' | 'police' | 'enemy';
-  behavior: 'wander' | 'flee' | 'fight';
+  behavior: 'wander' | 'flee' | 'fight' | 'seek_shelter' | 'cheer';
   activity: 'stroll' | 'chat' | 'chill';
   chatTargetX?: number;
   chatTargetZ?: number;
@@ -251,6 +257,10 @@ export class ViceEngine {
   private skyMat!: THREE.ShaderMaterial;
   private cloudGroup!: THREE.Group;
   private cloudMaterials: THREE.MeshStandardMaterial[] = [];
+  private wettableRoadMaterials: THREE.MeshStandardMaterial[] = [];
+  private extraTextures: THREE.Texture[] = [];
+  private clubShow: ClubShowRig | null = null;
+  private clubEncoreTimer = 0;
   public roadSegments: RoadSegmentDef[] = [];
   public roadRects: { x: number; z: number; w: number; l: number }[] = [];
   public buildingFootprints: { x: number; z: number; w: number; d: number; color: string }[] = [];
@@ -322,6 +332,12 @@ export class ViceEngine {
   private wastedReason: string | null = null;
   private bustedTimer = 0;
   private godModeActive = false;
+  private cheatSessionActive = false;
+  private preCheatSnapshot: {
+    cash: number;
+    inventory: InventoryState;
+    characters: Record<CharacterId, CharacterState>;
+  } | null = null;
   private autoAimLocked = false;
 
   private wantedStars = 0;
@@ -334,9 +350,23 @@ export class ViceEngine {
   private policeDispatchReason: string | null = null;
   private pendingDispatchStars = 0;
 
-  // Dynamic Day/Night Cycle & Weather
+  // Dynamic Day/Night Cycle, Smooth Weather & Adaptive AI NPCs
   private gameTimeNormalized = 0.72; // Start at Vice Sunset (17:15)
   private cloudCoverage = 0.42;
+  private weatherType: WeatherType = 'clear';
+  private targetWeatherType: WeatherType = 'partly_cloudy';
+  private weatherChangeTimer = 95;
+  private rainIntensity = 0;
+  private fogWeatherBoost = 0;
+  private lightningFlash = 0;
+  private thunderCooldown = 0;
+  private rainPoints!: THREE.Points;
+  private rainPositions!: Float32Array;
+  private manualCameraCooldown = 0;
+  private aiNpcTimer = 6;
+  private aiNpcInFlight = false;
+  private nearestNpcDialogue: { speaker: string; text: string; behavior: string } | null = null;
+  private npcDialogueTimer = 0;
 
   // Hangar, Garage, Taxi, Side Missions & Cutscenes
   private savedGarage: SavedGarageState = structuredClone(DEFAULT_SAVED_GARAGE);
@@ -517,10 +547,54 @@ export class ViceEngine {
     this.skyMat = world.skyMat;
     this.cloudGroup = world.cloudGroup;
     this.cloudMaterials = world.cloudMaterials;
+    this.wettableRoadMaterials = world.wettableRoadMaterials || [];
+    this.extraTextures = world.extraTextures || [];
+    this.clubShow = world.clubShow || null;
     this.roadSegments = world.roadSegments;
     this.roadRects = world.roadRects;
     this.buildingFootprints = world.buildingFootprints;
     this.buildColliderGrid();
+
+    // Dynamic atmospheric rain streaks around camera (strictly outside buildings/roofs)
+    const rainCount = 900;
+    this.rainPositions = new Float32Array(rainCount * 3);
+    for (let i = 0; i < rainCount; i++) {
+      this.rainPositions[i * 3] = (Math.random() - 0.5) * 40;
+      this.rainPositions[i * 3 + 1] = Math.random() * 20;
+      this.rainPositions[i * 3 + 2] = (Math.random() - 0.5) * 40;
+    }
+    const dropCanvas = document.createElement('canvas');
+    dropCanvas.width = 16;
+    dropCanvas.height = 64;
+    const dCtx = dropCanvas.getContext('2d');
+    if (dCtx) {
+      const grad = dCtx.createLinearGradient(0, 0, 0, 64);
+      grad.addColorStop(0.0, 'rgba(186, 230, 253, 0.0)');
+      grad.addColorStop(0.25, 'rgba(186, 230, 253, 0.55)');
+      grad.addColorStop(0.85, 'rgba(224, 242, 254, 0.9)');
+      grad.addColorStop(1.0, 'rgba(224, 242, 254, 0.0)');
+      dCtx.fillStyle = grad;
+      dCtx.fillRect(6, 0, 4, 64);
+    }
+    const dropTex = new THREE.CanvasTexture(dropCanvas);
+    dropTex.colorSpace = THREE.SRGBColorSpace;
+    this.extraTextures.push(dropTex);
+
+    const rainGeo = new THREE.BufferGeometry();
+    rainGeo.setAttribute('position', new THREE.BufferAttribute(this.rainPositions, 3));
+    const rainMat = new THREE.PointsMaterial({
+      color: 0xbae6fd,
+      map: dropTex,
+      size: 0.42,
+      transparent: true,
+      opacity: 0.0,
+      depthWrite: false,
+      alphaTest: 0.01,
+    });
+    this.rainPoints = new THREE.Points(rainGeo, rainMat);
+    this.rainPoints.frustumCulled = false;
+    this.rainPoints.visible = false;
+    this.scene.add(this.rainPoints);
 
     // Pooled asphalt drift skid-mark meshes (Zero GC)
     for (let i = 0; i < 120; i++) {
@@ -646,9 +720,35 @@ export class ViceEngine {
     this.resizeObserver = new ResizeObserver(() => this.handleResize());
     this.resizeObserver.observe(this.container);
 
-    // Pre-compile shaders on hardware GPUs
+    // Pre-warm ALL procedural & world GPU textures + shaders multiple frames ahead so zero lazy pop-in occurs
+    const warmTex = new Set<THREE.Texture>();
+    for (const val of Object.values(this.textures)) {
+      if (val instanceof THREE.Texture) warmTex.add(val);
+    }
+    for (const et of this.extraTextures) warmTex.add(et);
+    this.scene.traverse((obj) => {
+      const mesh = obj as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      for (const m of mats) {
+        if (!m) continue;
+        const std = m as THREE.MeshStandardMaterial;
+        if (std.map) warmTex.add(std.map);
+        if (std.normalMap) warmTex.add(std.normalMap);
+        if (std.roughnessMap) warmTex.add(std.roughnessMap);
+        if (std.emissiveMap) warmTex.add(std.emissiveMap);
+      }
+    });
+    for (const tex of warmTex) {
+      this.renderer.initTexture(tex);
+    }
     if (!this.isSoftwareGl) {
+      this.camera.position.copy(this.camCurrentPos);
+      this.camera.lookAt(this.camCurrentLook);
       this.renderer.compile(this.scene, this.camera);
+      this.camera.lookAt(activeChar.posX + Math.sin(this.camYaw) * 20, 4, activeChar.posZ + Math.cos(this.camYaw) * 20);
+      this.renderer.compile(this.scene, this.camera);
+      this.camera.lookAt(this.camCurrentLook);
     }
 
     this.scheduleNextTick();
@@ -744,7 +844,7 @@ export class ViceEngine {
       // Supercars (Valkyra) & Sports around Coral Strip, Safehouse & Downtown
       { kind: 'supercar', brand: 'Valkyra', name: 'Aether RS', color: '#fbbf24', x: 472, z: -112, heading: 0 },
       { kind: 'supercar', brand: 'Valkyra', name: 'Solaris GT', color: '#ec4899', x: 32, z: -64, heading: Math.PI / 2 },
-      { kind: 'supercar', brand: 'Valkyra', name: 'Vortex V12', color: '#f97316', x: 492, z: -598, heading: Math.PI },
+      { kind: 'supercar', brand: 'Valkyra', name: 'Vortex V12', color: '#f97316', x: 436, z: -478, heading: Math.PI },
       // Muscle Cars (Solano)
       { kind: 'muscle', brand: 'Solano', name: 'Hellhound V8', color: '#e11d48', x: 182, z: -210, heading: Math.PI / 2 },
       { kind: 'muscle', brand: 'Solano', name: 'Mojave 440', color: '#f97316', x: -120, z: -176, heading: 0 },
@@ -766,8 +866,8 @@ export class ViceEngine {
       { kind: 'motorcycle', brand: 'Zeta', name: 'Cross 450', color: '#22c55e', x: -720, z: -475, heading: Math.PI },
       { kind: 'motorcycle', brand: 'Zeta', name: 'Volt S', color: '#38bdf8', x: 785, z: -108, heading: 0 },
       // Emergency Fleet stationed outside Hospital, Police Station & Fire Station
-      { kind: 'police', brand: 'VCPD', name: 'VCPD Interceptor', color: '#111827', x: -464, z: -606, heading: Math.PI },
-      { kind: 'police', brand: 'VCPD', name: 'VCPD Interceptor', color: '#111827', x: -438, z: -606, heading: Math.PI },
+      { kind: 'police', brand: 'VCPD', name: 'VCPD Interceptor', color: '#111827', x: -474, z: -498, heading: Math.PI },
+      { kind: 'police', brand: 'VCPD', name: 'VCPD Interceptor', color: '#111827', x: -446, z: -498, heading: Math.PI },
       { kind: 'ambulance', brand: 'VEMS', name: 'VEMS Sanitka', color: '#f8fafc', x: -102, z: -606, heading: Math.PI },
       { kind: 'firetruck', brand: 'VCFD', name: 'VCFD Hasičské auto', color: '#dc2626', x: -102, z: 590, heading: 0 },
       // Speedboats (Pelican) in Marina Bay & Coastline
@@ -778,7 +878,7 @@ export class ViceEngine {
       // Dynamic Airport Aircraft Fleet (varied per launch, includes Helicopters & Fighter Jet!)
       { kind: 'plane', brand: 'Pelican', name: 'Skylark Coastal', color: '#f97316', x: -1060, z: 770, heading: Math.PI / 2 },
       { kind: 'helicopter', brand: 'Pelican', name: 'Pelican Helistar', color: '#0ea5e9', x: -860, z: 680, heading: 0 },
-      { kind: 'helicopter', brand: 'VCPD', name: 'VCPD Air-1', color: '#1e293b', x: -450, z: -575, heading: Math.PI },
+      { kind: 'helicopter', brand: 'VCPD', name: 'VCPD Air-1', color: '#1e293b', x: -460, z: -475, heading: Math.PI },
     ];
 
     const airRoll = Math.random();
@@ -844,7 +944,15 @@ export class ViceEngine {
         const nextIdx = (wpIdx + 1) % path.length;
         const cur = path[wpIdx];
         const nxt = path[nextIdx];
-        const heading = Math.atan2(nxt.x - cur.x, nxt.z - cur.z);
+        const segX = nxt.x - cur.x;
+        const segZ = nxt.z - cur.z;
+        const segLen = Math.hypot(segX, segZ) || 1;
+        const laneX = cur.x + (-segZ / segLen) * 3.1;
+        const laneZ = cur.z + (segX / segLen) * 3.1;
+        const safeSpawn = !(isWaterAt(laneX, laneZ) && !isBridgeAt(laneX, laneZ));
+        const spawnX = safeSpawn ? laneX : cur.x;
+        const spawnZ = safeSpawn ? laneZ : cur.z;
+        const heading = Math.atan2(segX, segZ);
         const spec = fleetPalette[tIdx % fleetPalette.length];
         const veh = this.addVehicle(
           `traffic_${tIdx}`,
@@ -852,8 +960,8 @@ export class ViceEngine {
           spec[2],
           spec[0],
           spec[3],
-          cur.x,
-          cur.z,
+          spawnX,
+          spawnZ,
           heading,
           false,
           true,
@@ -899,6 +1007,9 @@ export class ViceEngine {
     waypointIndex = 0
   ): VehicleEntity {
     const rig = createVehicleRig(kind, color, this.textures.contactShadow);
+    if (kind === 'helicopter' || kind === 'plane' || kind === 'fighter_jet') {
+      rig.bodyGroup.rotation.order = 'YXZ';
+    }
     const startY = kind === 'boat' ? -0.35 : getBridgeElevationAt(x, z);
     rig.root.position.set(x, startY, z);
     rig.root.rotation.y = heading;
@@ -1020,8 +1131,10 @@ export class ViceEngine {
     }
 
     this.scene.add(rig.root);
+    const npcNames = ['Elena', 'Marco', 'Sofia', 'Dante', 'Nina', 'Lucas', 'Maya', 'Victor', 'Clara', 'Rafael'];
     const npc: NpcEntity = {
       id: `civ_${Date.now()}_${idxSeed}_${Math.random().toString(36).slice(2, 5)}`,
+      name: npcNames[idxSeed % npcNames.length],
       rig,
       x: resolved.x,
       y: 0,
@@ -1195,11 +1308,21 @@ export class ViceEngine {
       this.sunLight.shadow.map = null;
     }
 
-    // Time of Day, Sky Dome Sun Disc & Horizon Fog
+    // Time of Day, Weather Override & Sandbox Mod Cheat Detection
     const tod = settings.gameplayMods.timeOfDay;
     if (tod === 'sunset') this.gameTimeNormalized = 0.76;
     else if (tod === 'noon') this.gameTimeNormalized = 0.5;
     else if (tod === 'night') this.gameTimeNormalized = 0.02;
+
+    if (settings.gameplayMods.weatherOverride && settings.gameplayMods.weatherOverride !== 'auto') {
+      this.targetWeatherType = settings.gameplayMods.weatherOverride;
+      this.weatherType = settings.gameplayMods.weatherOverride;
+    }
+
+    const gm = settings.gameplayMods;
+    if (gm.lowGravity || gm.infiniteAmmo || gm.rapidFire || gm.turboVehicles || gm.noPolice) {
+      this.activateCheatSession();
+    }
 
     this.updateAtmosphere(0);
 
@@ -1220,25 +1343,131 @@ export class ViceEngine {
     return `${hh}:${mm}`;
   }
 
+  private getWeatherLabelSk(w: WeatherType): string {
+    const labels: Record<WeatherType, string> = {
+      clear: 'Jasno',
+      partly_cloudy: 'Polooblačno',
+      overcast: 'Zamračené',
+      rain: 'Dážď',
+      storm: 'Búrka',
+      foggy: 'Hmlisto',
+    };
+    return labels[w] || 'Jasno';
+  }
+
   private updateAtmosphere(dt: number) {
-    // Advance clock 3x faster than real-time? Spec: 1 in-game 24h cycle smoothly progresses when 'auto' (~16 min full day or smooth 3x clock)
+    // 1. Day/Night clock (3x faster when auto)
     if (dt > 0 && this.settings.gameplayMods.timeOfDay === 'auto') {
-      // 3x real-time minutes => 1 real second = 3 game minutes -> 480s = 24h (8 minutes full day-night cycle)
       this.gameTimeNormalized = (this.gameTimeNormalized + (dt * 3) / 1440) % 1;
     }
 
-    // Dynamic drifting clouds & varying cloud coverage (sometimes sunny clear, sometimes cloudy)
+    // 2. Smooth Weather State Machine
+    const override = this.settings.gameplayMods.weatherOverride;
+    if (override && override !== 'auto') {
+      this.targetWeatherType = override;
+      this.weatherType = override;
+    } else if (dt > 0) {
+      this.weatherChangeTimer -= dt;
+      if (this.weatherChangeTimer <= 0) {
+        this.weatherChangeTimer = 75 + Math.random() * 65;
+        const seq: WeatherType[] = ['clear', 'partly_cloudy', 'overcast', 'rain', 'storm', 'partly_cloudy', 'foggy'];
+        const curIdx = seq.indexOf(this.weatherType);
+        const nextIdx = Math.random() < 0.72 ? (curIdx + 1) % seq.length : Math.floor(Math.random() * seq.length);
+        this.targetWeatherType = seq[nextIdx];
+        this.weatherType = this.targetWeatherType;
+      }
+    }
+
+    const weatherTargets: Record<WeatherType, { cloud: number; rain: number; fogBoost: number }> = {
+      clear: { cloud: 0.16, rain: 0.0, fogBoost: 0.0 },
+      partly_cloudy: { cloud: 0.48, rain: 0.0, fogBoost: 0.08 },
+      overcast: { cloud: 0.85, rain: 0.0, fogBoost: 0.25 },
+      rain: { cloud: 0.94, rain: 0.72, fogBoost: 0.45 },
+      storm: { cloud: 1.0, rain: 1.0, fogBoost: 0.65 },
+      foggy: { cloud: 0.65, rain: 0.0, fogBoost: 1.15 },
+    };
+    const wt = weatherTargets[this.weatherType] || weatherTargets.clear;
+    const wRate = dt > 0 ? 0.35 : 50;
+    this.cloudCoverage = THREE.MathUtils.damp(this.cloudCoverage, wt.cloud, wRate, Math.max(0.016, dt));
+    this.rainIntensity = THREE.MathUtils.damp(this.rainIntensity, wt.rain, wRate, Math.max(0.016, dt));
+    this.fogWeatherBoost = THREE.MathUtils.damp(this.fogWeatherBoost, wt.fogBoost, wRate, Math.max(0.016, dt));
+
+    // Storm thunder & lightning flashes
+    if (this.lightningFlash > 0 && dt > 0) {
+      this.lightningFlash = Math.max(0, this.lightningFlash - dt * 3.8);
+    }
+    if (this.weatherType === 'storm' && this.rainIntensity > 0.6 && dt > 0) {
+      this.thunderCooldown -= dt;
+      if (this.thunderCooldown <= 0) {
+        this.thunderCooldown = 9 + Math.random() * 14;
+        this.lightningFlash = 0.95;
+        this.audio.playThunder();
+      }
+    }
+
+    // Wet road asphalt reflections during rain/storm
+    const wetRoughness = THREE.MathUtils.lerp(0.92, 0.24, this.rainIntensity);
+    for (const rMat of this.wettableRoadMaterials) {
+      rMat.roughness = wetRoughness;
+    }
+
+    // Rain particle drop animation anchored around active camera (never inside buildings or under roofs)
+    if (this.rainPoints) {
+      const activeRain = this.rainIntensity > 0.06;
+      this.rainPoints.visible = activeRain;
+      (this.rainPoints.material as THREE.PointsMaterial).opacity = this.rainIntensity * 0.56;
+      if (activeRain && dt > 0) {
+        const cx = this.camera.position.x;
+        const cy = this.camera.position.y;
+        const cz = this.camera.position.z;
+        const fallSpeed = 28 + this.rainIntensity * 14;
+        const len = this.rainPositions.length;
+        for (let i = 0; i < len; i += 3) {
+          let rx = this.rainPositions[i] + 1.8 * dt;
+          let ry = this.rainPositions[i + 1] - fallSpeed * dt;
+          let rz = this.rainPositions[i + 2];
+
+          const outOfRange = ry < cy - 8 || ry < 0.05 || Math.abs(rx - cx) > 22 || Math.abs(rz - cz) > 22;
+          if (outOfRange || this.isUnderRoofAt(rx, ry, rz)) {
+            let placed = false;
+            for (let attempt = 0; attempt < 4; attempt++) {
+              const candX = cx + (Math.random() - 0.5) * 40;
+              const candY = cy + 8 + Math.random() * 11;
+              const candZ = cz + (Math.random() - 0.5) * 40;
+              if (!this.isUnderRoofAt(candX, candY, candZ) && !this.isUnderRoofAt(candX, Math.max(0.5, cy), candZ)) {
+                rx = candX;
+                ry = candY;
+                rz = candZ;
+                placed = true;
+                break;
+              }
+            }
+            if (!placed) {
+              // Park off-screen below ground if candidate landed under a roof/building
+              ry = -250;
+            }
+          }
+          this.rainPositions[i] = rx;
+          this.rainPositions[i + 1] = ry;
+          this.rainPositions[i + 2] = rz;
+        }
+        (this.rainPoints.geometry.getAttribute('position') as THREE.BufferAttribute).needsUpdate = true;
+      }
+    }
+
+    // Dynamic drifting clouds
     if (this.cloudGroup) {
-      this.cloudCoverage = 0.45 + 0.42 * Math.sin(this.elapsedSec * 0.012);
-      const targetVisOpacity = THREE.MathUtils.clamp((this.cloudCoverage - 0.1) * 0.85, 0.05, 0.78);
+      const targetVisOpacity = THREE.MathUtils.clamp(this.cloudCoverage * 0.85, 0.06, 0.86);
+      const cloudShade = THREE.MathUtils.lerp(1.0, 0.52, this.rainIntensity);
       for (let i = 0; i < this.cloudGroup.children.length; i++) {
         const cloud = this.cloudGroup.children[i];
-        cloud.position.x += dt * (1.8 + (i % 3) * 0.7);
+        cloud.position.x += dt * (2.0 + this.rainIntensity * 3.2 + (i % 3) * 0.7);
         if (cloud.position.x > 1650) cloud.position.x = -1650;
-        cloud.visible = i / this.cloudGroup.children.length <= this.cloudCoverage + 0.12;
+        cloud.visible = i / this.cloudGroup.children.length <= this.cloudCoverage + 0.08;
       }
       for (const m of this.cloudMaterials) {
         m.opacity = targetVisOpacity;
+        m.color.setRGB(cloudShade, cloudShade, cloudShade * 1.03);
       }
     }
 
@@ -1247,15 +1476,15 @@ export class ViceEngine {
     const sunY = Math.sin(sunAngle);
     const sunX = Math.cos(sunAngle);
     const dayWeight = THREE.MathUtils.smoothstep(sunY, -0.15, 0.35);
-    const sunsetWeight = Math.exp(-Math.pow((sunY - 0.05) / 0.22, 2));
+    const sunsetWeight = Math.exp(-Math.pow((sunY - 0.05) / 0.22, 2)) * (1 - this.rainIntensity * 0.7);
 
     const nightHorizon = new THREE.Color(0x0f172a);
     const nightMid = new THREE.Color(0x090d1a);
     const nightTop = new THREE.Color(0x020617);
 
-    const dayHorizon = new THREE.Color(0xbae6fd);
-    const dayMid = new THREE.Color(0x38bdf8);
-    const dayTop = new THREE.Color(0x0284c7);
+    const dayHorizon = new THREE.Color(0xbae6fd).lerp(new THREE.Color(0x64748b), this.rainIntensity * 0.75);
+    const dayMid = new THREE.Color(0x38bdf8).lerp(new THREE.Color(0x475569), this.rainIntensity * 0.82);
+    const dayTop = new THREE.Color(0x0284c7).lerp(new THREE.Color(0x334155), this.rainIntensity * 0.85);
 
     const sunsetHorizon = new THREE.Color(0xfb923c);
     const sunsetMid = new THREE.Color(0x7e22ce).lerp(new THREE.Color(0x334155), 0.35);
@@ -1265,15 +1494,21 @@ export class ViceEngine {
     const mid = nightMid.clone().lerp(dayMid, dayWeight).lerp(sunsetMid, sunsetWeight * 0.78);
     const top = nightTop.clone().lerp(dayTop, dayWeight).lerp(sunsetTop, sunsetWeight * 0.7);
 
+    if (this.lightningFlash > 0.05) {
+      horizon.lerp(new THREE.Color(0xe2e8f0), this.lightningFlash * 0.45);
+      mid.lerp(new THREE.Color(0xf8fafc), this.lightningFlash * 0.35);
+    }
+
     this.skyMat.uniforms.uHorizonColor.value.copy(horizon);
     this.skyMat.uniforms.uMidColor.value.copy(mid);
     this.skyMat.uniforms.uTopColor.value.copy(top);
     this.skyMat.uniforms.uSunDir.value.set(sunX * 0.8, Math.max(-0.2, sunY), 0.42).normalize();
     this.skyMat.uniforms.uSunColor.value.set(sunsetWeight > 0.4 ? 0xffedd5 : 0xfffbeb);
-    this.skyMat.uniforms.uSunStrength.value = THREE.MathUtils.lerp(0.28, 1.05, Math.max(dayWeight, sunsetWeight));
+    this.skyMat.uniforms.uSunStrength.value = THREE.MathUtils.lerp(0.28, 1.05, Math.max(dayWeight, sunsetWeight)) * (1 - this.rainIntensity * 0.7);
 
     const fogColor = horizon.clone().lerp(mid, 0.22);
-    const fogDensity = Math.max(0.0005, 0.24 / Math.max(200, this.settings.graphics.viewDistance));
+    const baseFog = Math.max(0.0005, 0.24 / Math.max(200, this.settings.graphics.viewDistance));
+    const fogDensity = baseFog * (1 + this.fogWeatherBoost * 1.45);
     this.scene.background = fogColor;
     if (this.scene.fog instanceof THREE.FogExp2) {
       this.scene.fog.color.copy(fogColor);
@@ -1286,7 +1521,8 @@ export class ViceEngine {
       .lerp(new THREE.Color(0xfffbeb), dayWeight)
       .lerp(new THREE.Color(0xfdba74), sunsetWeight * 0.8);
     this.sunLight.color.copy(sunColor);
-    this.sunLight.intensity = THREE.MathUtils.lerp(0.45, 1.82, Math.max(dayWeight, sunsetWeight * 0.75));
+    const rainDim = 1 - this.rainIntensity * 0.45;
+    this.sunLight.intensity = THREE.MathUtils.lerp(0.45, 1.82, Math.max(dayWeight, sunsetWeight * 0.75)) * rainDim + this.lightningFlash * 2.1;
     this.rimLight.color.set(dayWeight > 0.5 ? 0xe0f2fe : 0x60a5fa);
     this.rimLight.intensity = THREE.MathUtils.lerp(0.24, 0.34, dayWeight);
     this.hemiLight.color.set(dayWeight > 0.45 ? 0xbae6fd : 0x3b82f6);
@@ -1294,7 +1530,7 @@ export class ViceEngine {
     this.hemiLight.intensity = THREE.MathUtils.lerp(0.28, 0.48, dayWeight);
     this.renderer.toneMappingExposure = THREE.MathUtils.lerp(0.86, 0.94, Math.max(dayWeight, sunsetWeight));
 
-    const windowGlow = THREE.MathUtils.lerp(0.65, 0.04, dayWeight);
+    const windowGlow = THREE.MathUtils.lerp(0.65, 0.04, dayWeight * (1 - this.rainIntensity * 0.3));
     for (const wm of this.buildingWindowMaterials) {
       if ('emissiveIntensity' in wm) {
         (wm as THREE.MeshStandardMaterial).emissiveIntensity = windowGlow;
@@ -1434,7 +1670,7 @@ export class ViceEngine {
   private refreshMissionBeaconVisibility() {
     for (const b of this.missionStartBeacons) {
       const unlocked = isMissionUnlocked(b.mission.id, this.missionsProgress);
-      b.group.visible = !this.activeMission && unlocked;
+      b.group.visible = !this.activeMission && !this.cheatSessionActive && unlocked;
     }
   }
 
@@ -1804,22 +2040,134 @@ export class ViceEngine {
     cb?.();
   }
 
+  private activateCheatSession() {
+    if (!this.cheatSessionActive) {
+      this.preCheatSnapshot = {
+        cash: this.cash,
+        inventory: structuredClone(this.inventory),
+        characters: structuredClone(this.characters),
+      };
+      this.cheatSessionActive = true;
+      if (this.activeMission) {
+        this.cancelMission();
+      }
+      this.refreshMissionBeaconVisibility();
+    }
+  }
+
+  public restartCleanSession(): { ok: boolean; message: string } {
+    if (!this.cheatSessionActive && !this.godModeActive) {
+      return { ok: true, message: 'Relácia je už čistá bez cheatov.' };
+    }
+    if (this.currentVehicle?.isCheatSpawned) {
+      this.exitCurrentVehicle();
+    }
+    this.vehicles = this.vehicles.filter((v) => {
+      if (v.isCheatSpawned) {
+        this.scene.remove(v.rig.root);
+        return false;
+      }
+      return true;
+    });
+    this.godModeActive = false;
+    this.cheatSessionActive = false;
+    this.settings.gameplayMods.lowGravity = false;
+    this.settings.gameplayMods.infiniteAmmo = false;
+    this.settings.gameplayMods.rapidFire = false;
+    this.settings.gameplayMods.turboVehicles = false;
+    this.settings.gameplayMods.noPolice = false;
+
+    if (this.preCheatSnapshot) {
+      this.cash = this.preCheatSnapshot.cash;
+      this.inventory = structuredClone(this.preCheatSnapshot.inventory);
+      const savedPos = this.playerRig.root.position;
+      this.characters = structuredClone(this.preCheatSnapshot.characters);
+      const ch = this.characters[this.activeCharId];
+      ch.posX = savedPos.x;
+      ch.posY = savedPos.y;
+      ch.posZ = savedPos.z;
+      this.syncEquippedWeaponMesh();
+      this.callbacks.onCashChange(this.cash);
+      this.callbacks.onInventoryChange(structuredClone(this.inventory));
+      this.callbacks.onCharactersChange(structuredClone(this.characters), this.activeCharId);
+      this.preCheatSnapshot = null;
+    }
+    this.refreshMissionBeaconVisibility();
+    this.stuntMessage = 'Čistá relácia bez cheatov reštartovaná! Misie a ukladanie sú opäť odomknuté.';
+    this.stuntTimer = 3.8;
+    this.audio.playUiChime('mission');
+    return { ok: true, message: 'Všetko nacheatované bolo zmazané. Misie sú opäť aktívne!' };
+  }
+
   public applyCheatCode(rawCode: string): { ok: boolean; message: string } {
     const clean = rawCode.trim().replace(/\s+/g, '').toUpperCase();
     const ch = this.characters[this.activeCharId];
 
-    if (clean === '1999-463-663' || clean === 'GODMODE') {
+    if (clean === '3324' || clean === '1999-463-663' || clean === 'GODMODE') {
+      this.activateCheatSession();
       this.godModeActive = !this.godModeActive;
       this.audio.playUiChime('mission');
-      return { ok: true, message: this.godModeActive ? 'God Mode (Nesmrteľnosť) AKTIVOVANÝ!' : 'God Mode VYPNUTÝ.' };
+      return {
+        ok: true,
+        message: this.godModeActive
+          ? 'Cheat 3324: Nesmrteľnosť (God Mode) AKTIVOVANÁ! (Misie dočasne zamknuté)'
+          : 'God Mode vypnutý. Pre misie reštartuj reláciu bez cheatov.',
+      };
+    }
+    if (clean === '5342' || clean === '1999-435-426' || clean === 'HELI') {
+      this.activateCheatSession();
+      const px = this.playerRig.root.position.x + Math.sin(this.camYaw) * 12;
+      const pz = this.playerRig.root.position.z + Math.cos(this.camYaw) * 12;
+      const veh = this.addVehicle(`cheat_heli_${Date.now()}`, 'Pelican', 'Pelican Helistar', 'helicopter', '#0ea5e9', px, pz, this.camYaw, false, false);
+      veh.isCheatSpawned = true;
+      this.audio.playUiChime('mission');
+      return { ok: true, message: 'Cheat 5342: Pristavený vrtuľník Pelican Helistar! (Misie dočasne zamknuté)' };
+    }
+    if (clean === '7645') {
+      this.activateCheatSession();
+      const px = this.playerRig.root.position.x + Math.sin(this.camYaw) * 9;
+      const pz = this.playerRig.root.position.z + Math.cos(this.camYaw) * 9;
+      const veh = this.addVehicle(`cheat_taxi_${Date.now()}`, 'Horizon Cab', 'Horizon Taxík', 'taxi', '#facc15', px, pz, this.camYaw, false, false);
+      veh.isCheatSpawned = true;
+      this.audio.playUiChime('mission');
+      return { ok: true, message: 'Cheat 7645: Pristavený taxík Horizon Cab! (Misie dočasne zamknuté)' };
+    }
+    if (clean === '7726' || clean === '1999-787-372' || clean === 'SUPERCAR') {
+      this.activateCheatSession();
+      const px = this.playerRig.root.position.x + Math.sin(this.camYaw) * 9;
+      const pz = this.playerRig.root.position.z + Math.cos(this.camYaw) * 9;
+      const veh = this.addVehicle(`cheat_super_${Date.now()}`, 'Valkyra', 'Aether RS', 'supercar', '#fbbf24', px, pz, this.camYaw, false, false);
+      veh.isCheatSpawned = true;
+      this.audio.playUiChime('mission');
+      return { ok: true, message: 'Cheat 7726: Pristavený superšport Valkyra Aether RS! (Misie dočasne zamknuté)' };
+    }
+    if (clean === '8654') {
+      this.activateCheatSession();
+      const px = this.playerRig.root.position.x + Math.sin(this.camYaw) * 15;
+      const pz = this.playerRig.root.position.z + Math.cos(this.camYaw) * 15;
+      const veh = this.addVehicle(`cheat_plane_${Date.now()}`, 'Pelican', 'Skylark Coastal', 'plane', '#f97316', px, pz, this.camYaw, false, false);
+      veh.isCheatSpawned = true;
+      this.audio.playUiChime('mission');
+      return { ok: true, message: 'Cheat 8654: Pristavené lietadlo Pelican Skylark! (Misie dočasne zamknuté)' };
+    }
+    if (clean === '9975' || clean === '1999-727-438' || clean === 'JET') {
+      this.activateCheatSession();
+      const px = this.playerRig.root.position.x + Math.sin(this.camYaw) * 15;
+      const pz = this.playerRig.root.position.z + Math.cos(this.camYaw) * 15;
+      const veh = this.addVehicle(`cheat_jet_${Date.now()}`, 'Zeta', 'Zeta F-22 Interceptor', 'fighter_jet', '#334155', px, pz, this.camYaw, false, false);
+      veh.isCheatSpawned = true;
+      this.audio.playUiChime('mission');
+      return { ok: true, message: 'Cheat 9975: Pristavená ozbrojená stíhačka Zeta F-22! (Misie dočasne zamknuté)' };
     }
     if (clean === '1999-227-468' || clean === 'CASH50K') {
+      this.activateCheatSession();
       this.cash += 50000;
       this.callbacks.onCashChange(this.cash);
       this.audio.playUiChime('mission');
-      return { ok: true, message: '+$50,000 pripísaných na účet!' };
+      return { ok: true, message: '+$50,000 pripísaných! (Misie dočasne zamknuté až do reštartu relácie)' };
     }
     if (clean === '1999-887-853' || clean === 'TURTLE') {
+      this.activateCheatSession();
       ch.health = ch.maxHealth;
       ch.armor = ch.maxArmor;
       this.playerStamina = 100;
@@ -1828,38 +2176,20 @@ export class ViceEngine {
       return { ok: true, message: 'Zdravie a vesta doplnené na 100%!' };
     }
     if (clean === '1999-529-937' || clean === 'LAWYERUP') {
+      this.activateCheatSession();
       this.clearPolicePursuit();
       this.audio.playUiChime('mission');
       return { ok: true, message: 'Policajné pátranie úplne vymazané!' };
     }
-    if (clean === '1999-727-438' || clean === 'JET') {
-      const px = this.playerRig.root.position.x + Math.sin(this.camYaw) * 14;
-      const pz = this.playerRig.root.position.z + Math.cos(this.camYaw) * 14;
-      this.addVehicle(`cheat_jet_${Date.now()}`, 'Zeta', 'Zeta F-22 Interceptor', 'fighter_jet', '#334155', px, pz, this.camYaw, false, false);
-      this.audio.playUiChime('mission');
-      return { ok: true, message: 'Pristavená bojová stíhačka Zeta F-22!' };
-    }
-    if (clean === '1999-435-426' || clean === 'HELI') {
-      const px = this.playerRig.root.position.x + Math.sin(this.camYaw) * 12;
-      const pz = this.playerRig.root.position.z + Math.cos(this.camYaw) * 12;
-      this.addVehicle(`cheat_heli_${Date.now()}`, 'Pelican', 'Pelican Helistar', 'helicopter', '#0ea5e9', px, pz, this.camYaw, false, false);
-      this.audio.playUiChime('mission');
-      return { ok: true, message: 'Pristavený vrtuľník Pelican Helistar!' };
-    }
-    if (clean === '1999-787-372' || clean === 'SUPERCAR') {
-      const px = this.playerRig.root.position.x + Math.sin(this.camYaw) * 9;
-      const pz = this.playerRig.root.position.z + Math.cos(this.camYaw) * 9;
-      this.addVehicle(`cheat_super_${Date.now()}`, 'Valkyra', 'Aether RS', 'supercar', '#fbbf24', px, pz, this.camYaw, false, false);
-      this.audio.playUiChime('mission');
-      return { ok: true, message: 'Pristavený superšport Valkyra Aether RS!' };
-    }
     if (clean === '1999-759-348' || clean === 'SKYDIVE') {
+      this.activateCheatSession();
       this.inventory.hasParachute = true;
       this.callbacks.onInventoryChange(structuredClone(this.inventory));
       this.audio.playUiChime('mission');
       return { ok: true, message: 'Získaný taktický padák do výbavy!' };
     }
     if (clean === '1999-866-587' || clean === 'TOOLUP') {
+      this.activateCheatSession();
       this.inventory.weapons = this.inventory.weapons.map((w) => {
         const def = WEAPON_CATALOG[w.id];
         return { ...w, unlocked: true, ammoInClip: def.clipSize, reserveAmmo: def.clipSize * 6 };
@@ -1869,7 +2199,7 @@ export class ViceEngine {
       this.audio.playUiChime('mission');
       return { ok: true, message: 'Všetky zbrane a plná munícia odomknuté!' };
     }
-    return { ok: false, message: 'Neznámy cheat kód. Pozri nápovedu v aplikácii Cheaty.' };
+    return { ok: false, message: 'Neznámy cheat kód. Skús 3324, 5342, 7645, 7726, 8654 alebo 9975.' };
   }
 
   public teleportTo(x: number, z: number, label?: string) {
@@ -1960,6 +2290,12 @@ export class ViceEngine {
   }
 
   public startMission(missionId: string) {
+    if (this.cheatSessionActive) {
+      this.stuntMessage = 'Cheaty sú aktívne! Reštartuj reláciu bez cheatov pre spustenie misií.';
+      this.stuntTimer = 3.8;
+      this.audio.playUiChime('click');
+      return;
+    }
     const def = ALL_MISSIONS.find((m) => m.id === missionId);
     if (!def) return;
     const launch = () => {
@@ -2240,9 +2576,9 @@ export class ViceEngine {
       return isInsideZone(activeInWorld, SAFEHOUSE_GARAGE_ZONE);
     });
 
-    // Also capture any eligible vehicle currently parked inside Hangar or Safehouse Garage
+    // Also capture any eligible non-cheat vehicle currently parked inside Hangar or Safehouse Garage
     for (const v of this.vehicles) {
-      if (v.destroyed) continue;
+      if (v.destroyed || v.isCheatSpawned) continue;
       const isAir = v.kind === 'plane' || v.kind === 'helicopter' || v.kind === 'fighter_jet';
       if (isAir && isInsideZone(v, AIRPORT_HANGAR_ZONE)) {
         this.upsertGarageVehicle('hangar', v);
@@ -2374,11 +2710,21 @@ export class ViceEngine {
       return;
     }
 
-    // Look angles
+    // Look angles & manual mouse/pad camera cooldown
+    if (Math.abs(inp.lookDeltaX) > 0.0008 || Math.abs(inp.lookDeltaY) > 0.0008) {
+      this.manualCameraCooldown = 0.95;
+    } else if (this.manualCameraCooldown > 0) {
+      this.manualCameraCooldown = Math.max(0, this.manualCameraCooldown - dt);
+    }
     this.camYaw -= inp.lookDeltaX;
     this.camPitch = THREE.MathUtils.clamp(this.camPitch + inp.lookDeltaY, -0.55, 0.85);
 
     // Timers
+    if (this.clubEncoreTimer > 0) this.clubEncoreTimer = Math.max(0, this.clubEncoreTimer - dt);
+    if (this.npcDialogueTimer > 0) {
+      this.npcDialogueTimer -= dt;
+      if (this.npcDialogueTimer <= 0) this.nearestNpcDialogue = null;
+    }
     if (this.fireCooldown > 0) this.fireCooldown -= dt;
     if (this.garageTriggerCooldown > 0) this.garageTriggerCooldown -= dt;
     if (this.hitMarkerTimer > 0) this.hitMarkerTimer -= dt;
@@ -2466,6 +2812,51 @@ export class ViceEngine {
       this.taxiDropBeacon.rotation.z += dt * 2.4;
     }
 
+    // Animate Malibu Neon Lounge stage show, disco ball, EQ bars & choreographed club performers
+    if (this.clubShow) {
+      const tempo = this.clubEncoreTimer > 0 ? 5.6 : 3.2;
+      this.clubShow.discoBall.rotation.y += dt * (this.clubEncoreTimer > 0 ? 3.2 : 1.3);
+      for (let i = 0; i < this.clubShow.spotlights.length; i++) {
+        const sp = this.clubShow.spotlights[i];
+        sp.rotation.z = Math.sin(this.elapsedSec * tempo * 0.5 + i * 1.4) * 0.45;
+        sp.rotation.x = Math.cos(this.elapsedSec * tempo * 0.4 + i) * 0.3;
+      }
+      for (let i = 0; i < this.clubShow.eqBars.length; i++) {
+        const bar = this.clubShow.eqBars[i];
+        const pulse = 0.55 + Math.abs(Math.sin(this.elapsedSec * tempo * 1.7 + i * 0.75)) * (this.clubEncoreTimer > 0 ? 1.85 : 1.15);
+        bar.scale.y = pulse;
+      }
+      for (const pf of this.clubShow.performers) {
+        const ph = this.elapsedSec * tempo + pf.phase;
+        if (pf.style === 'pole') {
+          pf.rig.root.position.set(
+            pf.baseX + Math.sin(ph * 0.65) * 0.55,
+            pf.baseY + Math.abs(Math.sin(ph)) * 0.35,
+            pf.baseZ + Math.cos(ph * 0.65) * 0.55
+          );
+          pf.rig.root.rotation.y = ph * 0.9;
+          pf.rig.leftArmPivot.rotation.x = -1.4 + Math.sin(ph) * 0.4;
+          pf.rig.rightArmPivot.rotation.x = -1.4 - Math.sin(ph) * 0.4;
+          pf.rig.leftLegPivot.rotation.x = Math.sin(ph) * 0.45;
+          pf.rig.rightLegPivot.rotation.x = -Math.sin(ph) * 0.45;
+        } else if (pf.style === 'podiumL' || pf.style === 'podiumR') {
+          pf.rig.root.position.set(pf.baseX, pf.baseY + Math.abs(Math.sin(ph * 1.1)) * 0.14, pf.baseZ);
+          pf.rig.root.rotation.y = Math.sin(ph * 0.5) * 0.85;
+          pf.rig.leftArmPivot.rotation.set(-0.9 + Math.sin(ph) * 0.55, 0, -0.35);
+          pf.rig.rightArmPivot.rotation.set(-0.9 - Math.sin(ph) * 0.55, 0, 0.35);
+          pf.rig.leftLegPivot.rotation.x = Math.sin(ph) * 0.25;
+          pf.rig.rightLegPivot.rotation.x = -Math.sin(ph) * 0.25;
+        } else if (pf.style === 'dj') {
+          pf.rig.leftArmPivot.rotation.x = -0.8 + Math.sin(ph * 1.6) * 0.28;
+          pf.rig.rightArmPivot.rotation.x = -0.8 - Math.sin(ph * 1.6) * 0.28;
+        } else {
+          pf.rig.root.position.y = pf.baseY + Math.abs(Math.sin(ph * 1.2)) * 0.08;
+          pf.rig.leftArmPivot.rotation.x = this.clubEncoreTimer > 0 ? -1.8 + Math.sin(ph * 2) * 0.4 : -0.4 + Math.sin(ph) * 0.25;
+          pf.rig.rightArmPivot.rotation.x = this.clubEncoreTimer > 0 ? -1.8 - Math.sin(ph * 2) * 0.4 : -0.4 - Math.sin(ph) * 0.25;
+        }
+      }
+    }
+
     // Sync active control category
     this.input.inAircraft = Boolean(
       this.currentVehicle &&
@@ -2507,7 +2898,7 @@ export class ViceEngine {
       }
     }
 
-    // Find nearby vehicle, enterable shop, or unlocked story mission marker
+    // Find nearby vehicle, enterable shop, club stage, or unlocked story mission marker
     let nearbyVehicle: VehicleEntity | null = null;
     let bestVehDist = 5.4;
     if (!this.currentVehicle) {
@@ -2526,6 +2917,13 @@ export class ViceEngine {
       }
     }
 
+    const nearClubStage = Boolean(
+      this.clubShow &&
+        !this.currentVehicle &&
+        this.clubEncoreTimer <= 0 &&
+        Math.hypot(px - this.clubShow.clubX, pz - this.clubShow.clubZ) < 12.5
+    );
+
     let nearbyShop: ShopDef | null = null;
     let bestShopDist = 5.2;
     for (const s of SHOPS) {
@@ -2539,7 +2937,7 @@ export class ViceEngine {
     }
 
     let nearbyMission: MissionDef | null = null;
-    if (!this.activeMission && !this.currentVehicle) {
+    if (!this.activeMission && !this.currentVehicle && !this.cheatSessionActive) {
       for (const b of this.missionStartBeacons) {
         if (!b.group.visible) continue;
         if (Math.hypot(b.mission.startX - px, b.mission.startZ - pz) < 4.5) {
@@ -2549,7 +2947,7 @@ export class ViceEngine {
       }
     }
 
-    // Interact / Enter / Carjack / Exit Vehicle / Use Elevator
+    // Interact / Enter / Carjack / Exit Vehicle / Use Elevator / Club VIP Show
     if (inp.enterVehiclePressed || inp.carjackPressed) {
       if (this.currentVehicle) {
         if (this.taxiMode === 'passenger' && inp.carjackPressed) {
@@ -2570,6 +2968,8 @@ export class ViceEngine {
         } else {
           this.exitCurrentVehicle();
         }
+      } else if (nearClubStage && (!nearbyShop || nearbyShop.category === 'lounge')) {
+        this.triggerClubEncoreShow();
       } else if (nearbyShop && (!nearbyVehicle || bestShopDist <= bestVehDist)) {
         this.callbacks.onShopInteract(nearbyShop);
       } else if (nearbyVehicle) {
@@ -2700,17 +3100,25 @@ export class ViceEngine {
     // Update live soft Auto-Aim lock state for HUD indicator
     this.autoAimLocked = Boolean(inp.aimHeld && !this.currentVehicle && this.findAutoAimTarget());
 
+    // Periodically run Adaptive Gemini AI NPC behavior updates based on weather/stars/district
+    this.aiNpcTimer -= dt;
+    if (this.aiNpcTimer <= 0 && !this.aiNpcInFlight) {
+      this.aiNpcTimer = 8.5;
+      this.stepAiNpcReaction(px, pz);
+    }
+
     // Update Camera smoothly
     this.updateActiveCamera(dt, inp.aimHeld);
 
-    // Update Audio Engine
+    // Update Audio Engine (including dynamic rain ambience)
     const speedKmh = this.currentVehicle ? Math.abs(this.currentVehicle.speed) * 3.6 : 0;
     this.audio.updateContinuous(
       Boolean(this.currentVehicle),
       speedKmh,
       this.wantedStars,
       this.elapsedSec,
-      this.currentDriftIntensity
+      this.currentDriftIntensity,
+      this.rainIntensity
     );
 
     // Sync active character coordinates
@@ -2727,7 +3135,9 @@ export class ViceEngine {
       if (this.currentVehicle && nearbyShop?.category === 'garage') {
         prompt = `Vstúpiť do servisu ${nearbyShop.name}`;
       } else if (!this.currentVehicle) {
-        if (nearbyShop && (!nearbyVehicle || bestShopDist <= bestVehDist)) {
+        if (nearClubStage && (!nearbyShop || nearbyShop.category === 'lounge')) {
+          prompt = 'Spustiť VIP Encore Show v Malibu Lounge (-$100)';
+        } else if (nearbyShop && (!nearbyVehicle || bestShopDist <= bestVehDist)) {
           prompt = `Vstúpiť: ${nearbyShop.name}`;
         } else if (nearbyVehicle) {
           const isEmerg =
@@ -2764,6 +3174,123 @@ export class ViceEngine {
       }
       this.pushTelemetry(inp, prompt);
     }
+  }
+
+  private triggerClubEncoreShow() {
+    if (this.cash < 100) {
+      this.stuntMessage = 'Malibu Lounge: Potrebuješ aspoň $100 na VIP Encore Show!';
+      this.stuntTimer = 2.6;
+      return;
+    }
+    this.cash -= 100;
+    this.callbacks.onCashChange(this.cash);
+    this.clubEncoreTimer = 26;
+    this.audio.playUiChime('mission');
+    this.stuntMessage = 'Malibu VIP Encore Show spustená! DJ zrýchľuje set (-$100)';
+    this.stuntTimer = 3.2;
+    const cx = this.clubShow?.clubX ?? 720;
+    const cz = this.clubShow?.clubZ ?? -340;
+    for (const n of this.npcs) {
+      if (n.alive && n.kind === 'civilian' && Math.hypot(n.x - cx, n.z - cz) < 35) {
+        n.behavior = 'cheer';
+        n.panicTimer = 18;
+      }
+    }
+  }
+
+  public talkToNearestNpc() {
+    const px = this.playerRig.root.position.x;
+    const pz = this.playerRig.root.position.z;
+    let closest: NpcEntity | null = null;
+    let bestD = 9.0;
+    for (const n of this.npcs) {
+      if (!n.alive || n.kind !== 'civilian') continue;
+      const d = Math.hypot(n.x - px, n.z - pz);
+      if (d < bestD) {
+        bestD = d;
+        closest = n;
+      }
+    }
+    if (!closest) {
+      this.stuntMessage = 'V blízkosti nie je žiadny okoloidúci na rozhovor.';
+      this.stuntTimer = 2.0;
+      return;
+    }
+    closest.heading = Math.atan2(px - closest.x, pz - closest.z);
+    const defaultLine =
+      this.rainIntensity > 0.35
+        ? 'Riadny lejak v Leonide, idem si nájsť prístrešok!'
+        : this.wantedStars > 0
+          ? 'Počul som policajné sirény, radšej sa držím bokom!'
+          : 'V meste je dnes skvelá atmosféra, choď pozrieť do Malibu Lounge!';
+    this.nearestNpcDialogue = {
+      speaker: closest.name || 'Obyvateľ Leonidy',
+      text: closest.aiDialogue || defaultLine,
+      behavior: closest.behavior,
+    };
+    this.npcDialogueTimer = 5.5;
+    this.audio.playUiChime('click');
+    this.stepAiNpcReaction(px, pz, closest);
+  }
+
+  private stepAiNpcReaction(px: number, pz: number, specificNpc?: NpcEntity) {
+    let target = specificNpc || null;
+    if (!target) {
+      let bestD = 42;
+      for (const n of this.npcs) {
+        if (!n.alive || n.kind !== 'civilian') continue;
+        const d = Math.hypot(n.x - px, n.z - pz);
+        if (d < bestD) {
+          bestD = d;
+          target = n;
+        }
+      }
+    }
+    if (!target) return;
+
+    this.aiNpcInFlight = true;
+    const weather = this.weatherType;
+    const district = getDistrictName(px, pz);
+    const wantedStars = this.wantedStars;
+    const speedKmh = this.currentVehicle ? Math.round(Math.abs(this.currentVehicle.speed) * 3.6) : 0;
+
+    fetch('/api/ai/npc-react', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        npcName: target.name || 'Obyvateľ',
+        weather,
+        wantedStars,
+        district,
+        timeOfDay: this.getGameClockString(),
+        playerSpeedKmh: speedKmh,
+      }),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (!data || !target || !target.alive) return;
+        if (typeof data.dialogue === 'string' && data.dialogue.trim()) {
+          const line = data.dialogue.trim();
+          target.aiDialogue = line;
+          if (Math.hypot(target.x - this.playerRig.root.position.x, target.z - this.playerRig.root.position.z) < 16) {
+            this.nearestNpcDialogue = {
+              speaker: target.name || 'Obyvateľ Leonidy',
+              text: line,
+              behavior: String(data.behavior || target.behavior),
+            };
+            this.npcDialogueTimer = 5.5;
+          }
+        }
+        const b = data.behavior;
+        if (b === 'flee' || b === 'seek_shelter' || b === 'cheer' || b === 'wander') {
+          target.behavior = b;
+          if (b !== 'wander') target.panicTimer = 10;
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        this.aiNpcInFlight = false;
+      });
   }
 
   private stepPlayerOnFoot(dt: number, inp: ReturnType<InputManager['poll']>) {
@@ -2846,19 +3373,26 @@ export class ViceEngine {
       this.playerVelY = Math.max(-18.0, this.playerVelY);
     }
 
-    let nx = this.playerRig.root.position.x + this.playerVelX * dt;
+    // Sub-step horizontal movement with 0.33m collision radius so player can walk closely up to racks/counters/walls without tunneling
+    const startX = this.playerRig.root.position.x;
+    const startZ = this.playerRig.root.position.z;
+    const dx = this.playerVelX * dt;
+    const dz = this.playerVelZ * dt;
     let ny = this.playerRig.root.position.y + this.playerVelY * dt;
-    let nz = this.playerRig.root.position.z + this.playerVelZ * dt;
-
-    // Invisible Deep-Ocean Boundary (No visible wall — crossing causes drowning & Hospital respawn!)
-    if (isOutOfBoundsSeaAt(nx, nz)) {
-      this.triggerDeepOceanDeath();
-      return;
+    const subSteps = Math.max(1, Math.ceil(Math.hypot(dx, dz) / 0.22));
+    let nx = startX;
+    let nz = startZ;
+    for (let s = 1; s <= subSteps; s++) {
+      const candX = nx + dx / subSteps;
+      const candZ = nz + dz / subSteps;
+      if (isOutOfBoundsSeaAt(candX, candZ)) {
+        this.triggerDeepOceanDeath();
+        return;
+      }
+      const res = this.resolveBuildingCollision(candX, candZ, 0.33, Math.max(0, ny), false);
+      nx = res.x;
+      nz = res.z;
     }
-
-    const resolved = this.resolveBuildingCollision(nx, nz, 0.45, Math.max(0, ny), false);
-    nx = resolved.x;
-    nz = resolved.z;
 
     const groundH = this.getGroundHeightAt(nx, nz, this.playerRig.root.position.y);
     const waterHere = isWaterAt(nx, nz) && groundH <= 0.05;
@@ -3187,45 +3721,88 @@ export class ViceEngine {
       }
     }
 
-    // 1. HELICOPTER 3D HOVER & ROTOR PHYSICS
+    // 1. HELICOPTER 3D CYCLIC ROTOR, MOMENTUM & GROUND-EFFECT PHYSICS
     if (v.kind === 'helicopter') {
+      v.rig.bodyGroup.rotation.order = 'YXZ';
       const groundH = isWaterAt(v.x, v.z) ? 0.1 : this.getGroundHeightAt(v.x, v.z, v.y);
-      const isAirborne = v.y > groundH + 0.35;
+      const agl = Math.max(0, v.y - groundH);
+      const isAirborne = agl > 0.35;
 
       // Spin Main Rotor & Tail Rotor
-      if (v.rig.propeller) v.rig.propeller.rotation.y += (isAirborne ? 24 : 11) * dt;
-      if (v.rig.tailRotor) v.rig.tailRotor.rotation.x += (isAirborne ? 36 : 16) * dt;
+      if (v.rig.propeller) v.rig.propeller.rotation.y += (isAirborne ? 26 : 12) * dt;
+      if (v.rig.tailRotor) v.rig.tailRotor.rotation.x += (isAirborne ? 38 : 18) * dt;
 
-      // Ascend (Space / R2-climb assist / Pitch) & Descend (Shift / L2 / Pitch)
+      // Ground effect lift cushion within 4.5m of surface
+      const groundEffect = 1 + (1 - Math.min(1, agl / 4.5)) * 0.28;
+
+      // Collective Ascend (Space / R2-climb assist) & Descend (Shift / L2)
       const heliStickY =
         Math.abs(inp.padRightStickY) > 0.2 ? inp.padRightStickY : inp.stickConfig.moveStick === 'right' ? inp.padLeftStickY : 0;
       const heliClimbAxis = inp.stickConfig.pitchInvert ? -heliStickY : heliStickY;
-      let targetVy = isAirborne ? -0.45 : 0;
+      let targetVy = isAirborne ? -0.35 : 0;
       if (inp.jumpHeld || inp.pitchUpHeld || heliClimbAxis > 0.2) {
-        targetVy = 14.5 * flyingSkillBonus;
+        targetVy = 16.5 * flyingSkillBonus * groundEffect;
       } else if (inp.sprint || inp.pitchDownHeld || heliClimbAxis < -0.2) {
-        targetVy = -12.5;
+        targetVy = isAirborne ? -13.5 : 0;
       }
-      v.vy = THREE.MathUtils.damp(v.vy, targetVy, 5.5, dt);
+      v.vy = THREE.MathUtils.damp(v.vy, targetVy, 5.2, dt);
 
-      const thrust = (inp.throttle - inp.brake * 0.75) * (isAirborne ? 1 : 0.35);
-      v.speed = THREE.MathUtils.damp(v.speed, thrust * maxSpd, 2.4, dt);
-
+      // Cyclic Pitch & Roll Attitude + Aerodynamic Tilt Thrust Vectoring
+      const cyclicCmd = inp.throttle - inp.brake * 0.78;
+      const bankInput = inp.moveX;
       const yawBumper = (inp.r1Held ? 1 : 0) - (inp.l1Held ? 1 : 0);
-      const yawCmd = inp.stickConfig.yawSource === 'bumpers' && yawBumper !== 0 ? yawBumper : inp.moveX;
-      const yawRate = -yawCmd * 2.0 * dt;
-      v.heading += yawRate;
+      const rudderCmd =
+        inp.stickConfig.yawSource === 'bumpers' && yawBumper !== 0
+          ? yawBumper
+          : inp.stickConfig.yawSource === 'right_x' && Math.abs(inp.padRightStickX) > 0.12
+            ? inp.padRightStickX
+            : bankInput * 0.88;
 
-      const targetPitch = -thrust * 0.24;
-      const targetRoll = -inp.moveX * 0.32;
-      v.pitch = THREE.MathUtils.damp(v.pitch, isAirborne ? targetPitch : 0, 5.5, dt);
-      v.roll = THREE.MathUtils.damp(v.roll, isAirborne ? targetRoll : 0, 5.5, dt);
+      // Coordinated tail-rotor yaw + subtle bank-assisted turn
+      const yawRate = -(rudderCmd * 1.95 + Math.sin(v.roll) * 0.55) * flyingSkillBonus * dt;
+      v.heading += isAirborne ? yawRate : yawRate * 0.35;
 
-      v.vx = Math.sin(v.heading) * v.speed;
-      v.vz = Math.cos(v.heading) * v.speed;
+      const targetPitch = isAirborne ? -cyclicCmd * 0.32 : 0;
+      const targetRoll = isAirborne ? bankInput * 0.42 : 0; // Right bank (+rotation.z tilts -X wing down)
+      v.pitch = THREE.MathUtils.damp(v.pitch, targetPitch, 5.0, dt);
+      v.roll = THREE.MathUtils.damp(v.roll, targetRoll, 5.2, dt);
+
+      const fwdX = Math.sin(v.heading);
+      const fwdZ = Math.cos(v.heading);
+      // Facing +Z with +Y up, screen right is -X: (-cos(heading), +sin(heading))
+      const rightVecX = -Math.cos(v.heading);
+      const rightVecZ = Math.sin(v.heading);
+
+      if (isAirborne) {
+        // Horizontal thrust vector comes from rotor disc tilt (sin(-pitch) forward, sin(roll) lateral)
+        const rotorAccelMag = Math.max(accel * 1.45, 28) * flyingSkillBonus;
+        const forwardTilt = Math.sin(-v.pitch) * 1.75 + cyclicCmd * 0.28;
+        const lateralTilt = Math.sin(v.roll) * 0.85;
+        v.vx += (fwdX * forwardTilt + rightVecX * lateralTilt) * rotorAccelMag * dt;
+        v.vz += (fwdZ * forwardTilt + rightVecZ * lateralTilt) * rotorAccelMag * dt;
+
+        // Aerodynamic drag + rotor downwash damping
+        const airSpeedHoriz = Math.hypot(v.vx, v.vz);
+        const dragFactor = Math.exp(-(0.55 + airSpeedHoriz * 0.012) * dt);
+        v.vx *= dragFactor;
+        v.vz *= dragFactor;
+
+        if (airSpeedHoriz > maxSpd) {
+          const clampScale = maxSpd / airSpeedHoriz;
+          v.vx *= clampScale;
+          v.vz *= clampScale;
+        }
+      } else {
+        // On skids: rolling friction
+        const skidDrag = Math.exp(-5.0 * dt);
+        v.vx *= skidDrag;
+        v.vz *= skidDrag;
+      }
+
+      v.speed = v.vx * fwdX + v.vz * fwdZ;
 
       let nx = v.x + v.vx * dt;
-      let ny = THREE.MathUtils.clamp(v.y + v.vy * dt, groundH, 195);
+      let ny = THREE.MathUtils.clamp(v.y + v.vy * dt, groundH, 210);
       let nz = v.z + v.vz * dt;
 
       if (isOutOfBoundsSeaAt(nx, nz)) {
@@ -3233,12 +3810,24 @@ export class ViceEngine {
         return;
       }
 
+      if (ny <= groundH && v.vy < -10.5) {
+        const impactShock = Math.min(28, Math.abs(v.vy + 10.5) * 2.2);
+        if (!this.godModeActive) v.health = Math.max(0, v.health - impactShock);
+        this.audio.playImpact(0.7);
+        this.input.triggerVibration(160, 0.5, 0.65);
+        v.vy = 0;
+      } else if (ny <= groundH) {
+        v.vy = 0;
+      }
+
       if (ny < 68) {
         const heliCol = this.resolveBuildingCollision(nx, nz, 2.6, Math.max(0, ny), true, v);
         if (heliCol.collided) {
           nx = heliCol.x;
           nz = heliCol.z;
-          v.speed *= 0.5;
+          v.vx *= 0.4;
+          v.vz *= 0.4;
+          v.speed *= 0.4;
           this.audio.playImpact(0.5);
         }
       }
@@ -3257,25 +3846,37 @@ export class ViceEngine {
       return;
     }
 
-    // 2. AIRCRAFT & FIGHTER JET 3D FLIGHT PHYSICS (GTA V Inverted Pitch: Pull Stick DOWN = Nose UP / Climb!)
+    // 2. AIRCRAFT & FIGHTER JET 3D AERODYNAMIC FLIGHT PHYSICS (Lift, Stall, Gravity Energy Trade-off, Bank-to-Turn)
     if (v.kind === 'plane' || v.kind === 'fighter_jet') {
+      v.rig.bodyGroup.rotation.order = 'YXZ';
       const isJet = v.kind === 'fighter_jet';
       const afterburner = isJet && inp.sprint && inp.throttle > 0.1;
       const effMaxSpd = maxSpd * (afterburner ? 1.32 : 1.0);
-      const effAccel = accel * (afterburner ? 1.45 : 1.0);
+      const effAccel = accel * (afterburner ? 1.48 : 1.0);
 
+      const groundH = isWaterAt(v.x, v.z) ? -0.35 : this.getGroundHeightAt(v.x, v.z, v.y);
+      const isAirborne = v.y > groundH + 0.4;
+      const stallSpeed = isJet ? 18.0 : 13.5;
+      const takeoffSpeed = isJet ? 22.0 : 17.0;
+
+      // Engine Thrust + Quadratic Aerodynamic Drag + Climb/Dive Energy Exchange
       if (inp.throttle > 0.05) {
         v.speed += effAccel * inp.throttle * dt;
       } else {
-        v.speed *= Math.exp(-0.2 * dt);
+        const parasiticDrag = isAirborne ? 0.065 + Math.abs(v.speed) * 0.0022 : 0.45;
+        v.speed *= Math.exp(-parasiticDrag * dt);
       }
       if (inp.brake > 0.05) {
-        v.speed -= effAccel * 0.9 * inp.brake * dt;
+        const brakeDecel = isAirborne ? effAccel * 0.55 : effAccel * 1.15;
+        v.speed -= brakeDecel * inp.brake * dt;
       }
-      v.speed = THREE.MathUtils.clamp(v.speed, -6, effMaxSpd);
-
-      const groundH = isWaterAt(v.x, v.z) ? -0.35 : this.getGroundHeightAt(v.x, v.z, v.y);
-      const isAirborne = v.y > groundH + 0.35;
+      if (isAirborne) {
+        // Gravity trades airspeed for altitude on climbs and accelerates dives
+        v.speed -= Math.sin(v.pitch) * 15.5 * dt;
+        // Induced drag during high-angle bank maneuvers
+        v.speed -= Math.abs(Math.sin(v.roll)) * 2.4 * dt;
+      }
+      v.speed = THREE.MathUtils.clamp(v.speed, isAirborne ? 4 : -6, effMaxSpd);
 
       if (v.rig.propeller) {
         v.rig.propeller.rotation.z += (8 + Math.abs(v.speed) * 1.15) * dt;
@@ -3308,37 +3909,73 @@ export class ViceEngine {
       const climbStrength = Math.max(analogClimb, inp.jumpHeld || kbClimb ? 1 : 0);
       const diveStrength = Math.max(analogDive, kbDive || (!isJet && inp.sprint) ? 1 : 0);
 
-      const takeoffSpeed = isJet ? 22 : 17;
-      if (v.speed >= takeoffSpeed && climbStrength > 0.05) {
-        v.pitch = THREE.MathUtils.clamp(v.pitch + 0.88 * climbStrength * flyingSkillBonus * dt, -0.52, 0.56);
+      const controlAuthority = THREE.MathUtils.clamp(v.speed / takeoffSpeed, 0.2, 1.15);
+      const isStalling = isAirborne && v.speed < stallSpeed;
+
+      if (v.speed >= takeoffSpeed * 0.9 && climbStrength > 0.05) {
+        v.pitch = THREE.MathUtils.clamp(
+          v.pitch + (isJet ? 1.05 : 0.86) * climbStrength * controlAuthority * flyingSkillBonus * dt,
+          -0.68,
+          0.66
+        );
       } else if (isAirborne && diveStrength > 0.05) {
-        v.pitch = THREE.MathUtils.clamp(v.pitch - 0.88 * diveStrength * flyingSkillBonus * dt, -0.52, 0.56);
+        v.pitch = THREE.MathUtils.clamp(
+          v.pitch - (isJet ? 1.05 : 0.86) * diveStrength * controlAuthority * flyingSkillBonus * dt,
+          -0.68,
+          0.66
+        );
+      } else if (isStalling) {
+        // Stall nose-drop recovery pitches nose gently downward toward dive
+        v.pitch = THREE.MathUtils.damp(v.pitch, -0.26, 1.8, dt);
+      } else if (!isAirborne) {
+        v.pitch = THREE.MathUtils.damp(v.pitch, 0, 5.5, dt);
       } else {
-        v.pitch = THREE.MathUtils.damp(v.pitch, isAirborne ? 0.01 : 0, 3.5, dt);
+        // Subtle aerodynamic pitch stability in cruise
+        v.pitch = THREE.MathUtils.damp(v.pitch, 0.015, 0.85, dt);
       }
 
+      // Bank / Aileron Roll + Dihedral Self-Leveling when stick neutral
       const rollInput = inp.moveX;
-      const targetRoll = -rollInput * (isAirborne ? 0.68 : 0.08);
-      v.roll = THREE.MathUtils.damp(v.roll, targetRoll, 6, dt);
+      const maxBankAngle = isJet ? 0.98 : 0.78;
+      if (isAirborne) {
+        if (Math.abs(rollInput) > 0.05) {
+          const rollRate = (isJet ? 2.4 : 1.85) * controlAuthority * flyingSkillBonus;
+          v.roll = THREE.MathUtils.clamp(v.roll + rollInput * rollRate * dt, -maxBankAngle, maxBankAngle);
+        } else {
+          v.roll = THREE.MathUtils.damp(v.roll, 0, 2.2, dt);
+        }
+      } else {
+        v.roll = THREE.MathUtils.damp(v.roll, rollInput * 0.06, 7, dt);
+      }
 
+      // Coordinated Bank-to-Turn + Rudder Yaw
       const bumperYaw = (inp.r1Held ? 1 : 0) - (inp.l1Held ? 1 : 0);
-      const yawCmd =
+      const rudderInput =
         inp.stickConfig.yawSource === 'bumpers'
-          ? bumperYaw * 0.9 + rollInput * 0.55
+          ? bumperYaw * 0.85
           : inp.stickConfig.yawSource === 'right_x'
-            ? inp.padRightStickX + (Math.abs(inp.padRightStickX) < 0.05 ? rollInput * 0.7 : 0)
-            : rollInput;
-      const turnFactor = isAirborne ? (isJet ? 1.55 : 1.35) : Math.min(1, Math.abs(v.speed) / 10) * 1.1;
-      v.heading -= yawCmd * turnFactor * dt;
+            ? inp.padRightStickX * 0.85
+            : 0;
+      const bankTurnRate = Math.sin(v.roll) * (isJet ? 1.48 : 1.18) * controlAuthority;
+      const groundSteerRate = (rollInput * 0.9 + rudderInput) * Math.min(1, Math.abs(v.speed) / 10);
+      const yawDelta = isAirborne
+        ? (bankTurnRate + rudderInput * 0.65 + rollInput * 0.25) * flyingSkillBonus * dt
+        : groundSteerRate * dt;
+      v.heading -= yawDelta;
 
       const cosP = Math.cos(v.pitch);
       v.vx = Math.sin(v.heading) * v.speed * cosP;
       v.vz = Math.cos(v.heading) * v.speed * cosP;
 
-      if (v.speed >= takeoffSpeed && (v.pitch > 0.03 || isAirborne)) {
-        v.vy = Math.sin(v.pitch) * Math.max(v.speed, 24) - (v.speed < 20 ? 3.5 : 0.2);
+      // Wing Lift Curve & Vertical Flight Path
+      if (v.speed >= takeoffSpeed && (v.pitch > 0.025 || isAirborne)) {
+        const liftRatio = THREE.MathUtils.clamp(v.speed / takeoffSpeed, 0.55, 1.35);
+        const stallSink = isStalling ? (1 - v.speed / stallSpeed) * 14.5 : 0;
+        const bankLiftLoss = (1 - Math.cos(v.roll)) * 3.8;
+        const targetVy = Math.sin(v.pitch) * Math.max(v.speed, takeoffSpeed) * liftRatio - stallSink - bankLiftLoss;
+        v.vy = THREE.MathUtils.damp(v.vy, targetVy, isStalling ? 2.4 : 4.2, dt);
       } else {
-        v.vy += -18 * dt;
+        v.vy += -16.5 * dt;
       }
 
       // Armed Fighter Jet Twin Rockets!
@@ -3368,7 +4005,7 @@ export class ViceEngine {
       }
 
       let nx = v.x + v.vx * dt;
-      let ny = THREE.MathUtils.clamp(v.y + v.vy * dt, groundH, 230);
+      let ny = THREE.MathUtils.clamp(v.y + v.vy * dt, groundH, 240);
       let nz = v.z + v.vz * dt;
 
       if (isOutOfBoundsSeaAt(nx, nz)) {
@@ -3377,6 +4014,12 @@ export class ViceEngine {
       }
 
       if (ny <= groundH) {
+        if (v.vy < -13.0) {
+          const crashDamage = Math.min(48, Math.abs(v.vy + 13.0) * 3.2);
+          if (!this.godModeActive) v.health = Math.max(0, v.health - crashDamage);
+          this.audio.playImpact(0.8);
+          this.input.triggerVibration(220, 0.7, 0.8);
+        }
         ny = groundH;
         v.vy = 0;
         if (v.pitch < 0) v.pitch = 0;
@@ -3791,17 +4434,29 @@ export class ViceEngine {
 
         const targetSpd = dist > 11 ? 24 + this.wantedStars * 2.4 : 0;
         v.speed = THREE.MathUtils.damp(v.speed, targetSpd, 4, dt);
-        v.vx = Math.sin(v.heading) * v.speed;
-        v.vz = Math.cos(v.heading) * v.speed;
+        const pFwdX = Math.sin(v.heading);
+        const pFwdZ = Math.cos(v.heading);
+        v.vx = pFwdX * v.speed;
+        v.vz = pFwdZ * v.speed;
 
         const nx = v.x + v.vx * dt;
         const nz = v.z + v.vz * dt;
-        if (!isWaterAt(nx, nz) || isBridgeAt(nx, nz)) {
+        const probeX = nx + pFwdX * 1.8;
+        const probeZ = nz + pFwdZ * 1.8;
+        const hitsWater =
+          (isWaterAt(nx, nz) && !isBridgeAt(nx, nz)) ||
+          (isWaterAt(probeX, probeZ) && !isBridgeAt(probeX, probeZ));
+
+        if (!hitsWater) {
           const col = this.resolveBuildingCollision(nx, nz, 1.5, Math.max(0, v.y), true, v);
           v.x = col.x;
           v.z = col.z;
+        } else {
+          // Turn along shoreline/bridge instead of plunging into canal or harbor
+          v.speed *= 0.45;
+          v.heading += 1.45 * dt;
         }
-        v.y = getBridgeElevationAt(v.x, v.z);
+        v.y = this.getGroundHeightAt(v.x, v.z, v.y);
         v.rig.root.position.set(v.x, v.y, v.z);
         v.rig.root.rotation.y = v.heading;
         v.wheelSpin += (v.speed / 0.36) * dt;
@@ -3829,7 +4484,7 @@ export class ViceEngine {
           continue;
         }
 
-        // Autonomous Curved-Path City & Highway Traffic
+        // Autonomous Curved-Path City & Highway Traffic (strictly on paved roads & bridges)
         if (v.stopHoldTimer > 0) {
           v.stopHoldTimer -= dt;
           if (v.stopHoldTimer <= 0) v.stoppedByPlayer = false;
@@ -3892,9 +4547,13 @@ export class ViceEngine {
         const segLen = Math.hypot(segX, segZ) || 1;
         segX /= segLen;
         segZ /= segLen;
-        // Right-hand driving lane offset (+3.1m)
-        const targetX = wp.x + -segZ * 3.1;
-        const targetZ = wp.z + segX * 3.1;
+        // Right-hand driving lane offset (+3.1m), falling back to centerline if near bridge edge
+        let targetX = wp.x + -segZ * 3.1;
+        let targetZ = wp.z + segX * 3.1;
+        if (isWaterAt(targetX, targetZ) && !isBridgeAt(targetX, targetZ)) {
+          targetX = wp.x;
+          targetZ = wp.z;
+        }
 
         if (Math.hypot(targetX - v.x, targetZ - v.z) < 8.5) {
           v.waypointIndex = (v.waypointIndex + 1) % path.length;
@@ -3905,7 +4564,7 @@ export class ViceEngine {
         while (hDiff > Math.PI) hDiff -= Math.PI * 2;
         while (hDiff < -Math.PI) hDiff += Math.PI * 2;
         v.steerAngle = THREE.MathUtils.damp(v.steerAngle, THREE.MathUtils.clamp(hDiff * 1.4, -0.5, 0.5), 8, dt);
-        v.heading += THREE.MathUtils.clamp(hDiff, -2.4 * dt, 2.4 * dt);
+        v.heading += THREE.MathUtils.clamp(hDiff, -2.8 * dt, 2.8 * dt);
 
         const isHighwayLoop = v.pathIndex < 2;
         const cruiseSpd = isHighwayLoop
@@ -3921,9 +4580,32 @@ export class ViceEngine {
 
         const nx = v.x + Math.sin(v.heading) * v.speed * dt;
         const nz = v.z + Math.cos(v.heading) * v.speed * dt;
-        const col = this.resolveBuildingCollision(nx, nz, v.kind === 'motorcycle' ? 0.85 : 1.4, Math.max(0, v.y), true, v);
-        v.x = col.x;
-        v.z = col.z;
+        const probeX = nx + Math.sin(v.heading) * 1.8;
+        const probeZ = nz + Math.cos(v.heading) * 1.8;
+        const entersWater =
+          (isWaterAt(nx, nz) && !isBridgeAt(nx, nz)) ||
+          (isWaterAt(probeX, probeZ) && !isBridgeAt(probeX, probeZ));
+
+        if (entersWater) {
+          // Hard guard: never drive NPC cars into canal, harbor, or sea; snap smoothly back toward paved waypoint
+          v.speed = Math.min(v.speed, 3.0);
+          v.heading = desiredHeading;
+          const pullX = wp.x - v.x;
+          const pullZ = wp.z - v.z;
+          const pullLen = Math.hypot(pullX, pullZ) || 1;
+          const safeX = v.x + (pullX / pullLen) * 2.5 * dt;
+          const safeZ = v.z + (pullZ / pullLen) * 2.5 * dt;
+          if (!isWaterAt(safeX, safeZ) || isBridgeAt(safeX, safeZ)) {
+            v.x = safeX;
+            v.z = safeZ;
+          }
+        } else {
+          const col = this.resolveBuildingCollision(nx, nz, v.kind === 'motorcycle' ? 0.85 : 1.4, Math.max(0, v.y), true, v);
+          if (!isWaterAt(col.x, col.z) || isBridgeAt(col.x, col.z)) {
+            v.x = col.x;
+            v.z = col.z;
+          }
+        }
 
         v.vx = Math.sin(v.heading) * v.speed;
         v.vz = Math.cos(v.heading) * v.speed;
@@ -4006,7 +4688,7 @@ export class ViceEngine {
       if (npc.kind === 'civilian') {
         if (npc.panicTimer > 0) {
           npc.panicTimer -= dt;
-          if (npc.panicTimer <= 0 && npc.behavior === 'flee') {
+          if (npc.panicTimer <= 0 && (npc.behavior === 'flee' || npc.behavior === 'seek_shelter' || npc.behavior === 'cheer')) {
             npc.behavior = 'wander';
           }
         }
@@ -4094,6 +4776,34 @@ export class ViceEngine {
           npc.rig.rightLegPivot.rotation.x = -swing;
           npc.rig.leftArmPivot.rotation.x = -swing * 0.85;
           npc.rig.rightArmPivot.rotation.x = swing * 0.85;
+        } else if (npc.behavior === 'seek_shelter') {
+          const shop = SHOPS.reduce((best, s) =>
+            Math.hypot(s.doorX - npc.x, s.doorZ - npc.z) < Math.hypot(best.doorX - npc.x, best.doorZ - npc.z) ? s : best
+          );
+          const toShopAngle = Math.atan2(shop.doorX - npc.x, shop.doorZ - npc.z);
+          const spd = 4.6;
+          const col = this.resolveBuildingCollision(
+            npc.x + Math.sin(toShopAngle) * spd * dt,
+            npc.z + Math.cos(toShopAngle) * spd * dt,
+            0.38,
+            0,
+            false
+          );
+          npc.x = col.x;
+          npc.z = col.z;
+          npc.heading = toShopAngle;
+          const swing = Math.sin(this.elapsedSec * 10) * 0.55;
+          npc.rig.leftLegPivot.rotation.x = swing;
+          npc.rig.rightLegPivot.rotation.x = -swing;
+          npc.rig.leftArmPivot.rotation.x = -1.9;
+          npc.rig.rightArmPivot.rotation.x = -1.9;
+        } else if (npc.behavior === 'cheer') {
+          npc.heading = Math.atan2(dx, dz);
+          npc.rig.leftLegPivot.rotation.x = 0;
+          npc.rig.rightLegPivot.rotation.x = 0;
+          const w = Math.sin(this.elapsedSec * 8 + npc.x) * 0.45;
+          npc.rig.leftArmPivot.rotation.x = -2.4 + w;
+          npc.rig.rightArmPivot.rotation.x = -2.4 - w;
         } else if (npc.activity === 'chat' && npc.chatTargetX !== undefined && npc.chatTargetZ !== undefined) {
           // Conversing pedestrians stand facing partner with subtle lifelike gestures
           npc.heading = Math.atan2(npc.chatTargetX - npc.x, npc.chatTargetZ - npc.z);
@@ -4166,17 +4876,115 @@ export class ViceEngine {
     }
   }
 
+  private raycastWorldObstacles(origin: THREE.Vector3, dir: THREE.Vector3, maxDist: number): number {
+    const endX = origin.x + dir.x * maxDist;
+    const endZ = origin.z + dir.z * maxDist;
+    const minX = Math.min(origin.x, endX) - 2;
+    const maxX = Math.max(origin.x, endX) + 2;
+    const minZ = Math.min(origin.z, endZ) - 2;
+    const maxZ = Math.max(origin.z, endZ) + 2;
+    const { aabbs, circles } = this.queryNearbyColliders(minX, maxX, minZ, maxZ);
+
+    let closest = maxDist;
+    // Check ground plane y <= 0
+    if (dir.y < -1e-4 && origin.y > 0.05) {
+      const tg = -origin.y / dir.y;
+      if (tg > 0.2 && tg < closest) closest = tg;
+    }
+
+    // Check building walls, interior counters & racks
+    for (const c of aabbs) {
+      const cMinY = c.minY ?? 0;
+      const cMaxY = c.height;
+      let tmin = 0;
+      let tmax = closest;
+
+      if (Math.abs(dir.x) < 1e-6) {
+        if (origin.x < c.minX || origin.x > c.maxX) continue;
+      } else {
+        const invX = 1 / dir.x;
+        let t1 = (c.minX - origin.x) * invX;
+        let t2 = (c.maxX - origin.x) * invX;
+        if (t1 > t2) [t1, t2] = [t2, t1];
+        tmin = Math.max(tmin, t1);
+        tmax = Math.min(tmax, t2);
+        if (tmin > tmax) continue;
+      }
+
+      if (Math.abs(dir.z) < 1e-6) {
+        if (origin.z < c.minZ || origin.z > c.maxZ) continue;
+      } else {
+        const invZ = 1 / dir.z;
+        let t1 = (c.minZ - origin.z) * invZ;
+        let t2 = (c.maxZ - origin.z) * invZ;
+        if (t1 > t2) [t1, t2] = [t2, t1];
+        tmin = Math.max(tmin, t1);
+        tmax = Math.min(tmax, t2);
+        if (tmin > tmax) continue;
+      }
+
+      if (Math.abs(dir.y) < 1e-6) {
+        if (origin.y < cMinY || origin.y > cMaxY) continue;
+      } else {
+        const invY = 1 / dir.y;
+        let t1 = (cMinY - origin.y) * invY;
+        let t2 = (cMaxY - origin.y) * invY;
+        if (t1 > t2) [t1, t2] = [t2, t1];
+        tmin = Math.max(tmin, t1);
+        tmax = Math.min(tmax, t2);
+        if (tmin > tmax) continue;
+      }
+
+      if (tmin > 0.15 && tmin < closest) {
+        closest = tmin;
+      }
+    }
+
+    // Check cylinder pillars & tree trunks
+    const dirXZSq = dir.x * dir.x + dir.z * dir.z;
+    if (dirXZSq > 1e-5) {
+      for (const cc of circles) {
+        const ox = origin.x - cc.x;
+        const oz = origin.z - cc.z;
+        const b = ox * dir.x + oz * dir.z;
+        const c = ox * ox + oz * oz - cc.radius * cc.radius;
+        const disc = b * b - dirXZSq * c;
+        if (disc < 0) continue;
+        const t = (-b - Math.sqrt(disc)) / dirXZSq;
+        if (t > 0.15 && t < closest) {
+          const hitY = origin.y + dir.y * t;
+          if (hitY >= 0 && hitY <= cc.height) {
+            closest = t;
+          }
+        }
+      }
+    }
+
+    return closest;
+  }
+
   private enemyFireAtPlayer(npc: NpcEntity, dist: number) {
     this.audio.playGunshot(npc.weaponId || 'pistol');
     const origin = _rayOrigin.set(npc.x, 1.45, npc.z);
-    const target = _rayDir.set(
+    const target = _v2.set(
       this.playerRig.root.position.x + (Math.random() - 0.5) * 1.4,
       1.2,
       this.playerRig.root.position.z + (Math.random() - 0.5) * 1.4
     );
-    this.spawnTracer(origin, target, 0xef4444);
+    _rayDir.copy(target).sub(origin);
+    const segLen = _rayDir.length();
+    if (segLen < 0.1) return;
+    _rayDir.divideScalar(segLen);
 
-    // Hit chance scales with distance & cover
+    const wallDist = this.raycastWorldObstacles(origin, _rayDir, segLen);
+    if (wallDist < segLen - 0.4) {
+      const wallHit = _v4.copy(origin).addScaledVector(_rayDir, wallDist);
+      this.spawnTracer(origin, wallHit, 0xef4444);
+      this.spawnParticleBurst(wallHit, 0xe2e8f0, 2);
+      return;
+    }
+
+    this.spawnTracer(origin, target, 0xef4444);
     const hitChance = Math.max(0.15, 0.55 - dist * 0.012);
     if (Math.random() < hitChance) {
       this.damagePlayer(npc.kind === 'police' ? 8 : npc.kind === 'civilian' ? 7 : 10);
@@ -4373,18 +5181,20 @@ export class ViceEngine {
       _rayDir.normalize();
 
       const rayOrigin = this.camera.position;
-      let bestDist = def.range;
-      let hitPoint = _v2.copy(rayOrigin).addScaledVector(_rayDir, bestDist);
+      // Check solid walls/pillars/buildings FIRST so bullets NEVER shoot through walls!
+      const wallDist = this.raycastWorldObstacles(rayOrigin, _rayDir, def.range);
+      let bestDist = wallDist;
+      const hitPoint = _v2.copy(rayOrigin).addScaledVector(_rayDir, bestDist);
       let hitNpc: NpcEntity | null = null;
       let hitRangeTarget: RangeTargetEntity | null = null;
       let hitBarrel: ExplosiveBarrelEntity | null = null;
       let hitVehicle: VehicleEntity | null = null;
 
-      // 1. Check NPCs
+      // 1. Check NPCs (only closer than wallDist)
       for (const npc of this.npcs) {
         if (!npc.alive) continue;
         _v3.set(npc.x, 1.05, npc.z);
-        const t = _v3.clone().sub(rayOrigin).dot(_rayDir);
+        const t = _v4.copy(_v3).sub(rayOrigin).dot(_rayDir);
         if (t > 1 && t < bestDist) {
           const closest = _rayOrigin.copy(rayOrigin).addScaledVector(_rayDir, t);
           if (closest.distanceTo(_v3) < 0.78) {
@@ -4399,7 +5209,7 @@ export class ViceEngine {
       for (const rt of this.rangeTargets) {
         if (!rt.alive) continue;
         _v3.set(rt.x, rt.y, rt.z);
-        const t = _v3.clone().sub(rayOrigin).dot(_rayDir);
+        const t = _v4.copy(_v3).sub(rayOrigin).dot(_rayDir);
         if (t > 1 && t < bestDist) {
           const closest = _rayOrigin.copy(rayOrigin).addScaledVector(_rayDir, t);
           if (closest.distanceTo(_v3) < 0.65) {
@@ -4415,7 +5225,7 @@ export class ViceEngine {
       for (const b of this.barrels) {
         if (!b.alive) continue;
         _v3.set(b.x, 0.6, b.z);
-        const t = _v3.clone().sub(rayOrigin).dot(_rayDir);
+        const t = _v4.copy(_v3).sub(rayOrigin).dot(_rayDir);
         if (t > 1 && t < bestDist) {
           const closest = _rayOrigin.copy(rayOrigin).addScaledVector(_rayDir, t);
           if (closest.distanceTo(_v3) < 0.72) {
@@ -4432,7 +5242,7 @@ export class ViceEngine {
       for (const veh of this.vehicles) {
         if (veh === this.currentVehicle || veh.destroyed) continue;
         _v3.set(veh.x, veh.y + 0.85, veh.z);
-        const t = _v3.clone().sub(rayOrigin).dot(_rayDir);
+        const t = _v4.copy(_v3).sub(rayOrigin).dot(_rayDir);
         if (t > 1 && t < bestDist) {
           const closest = _rayOrigin.copy(rayOrigin).addScaledVector(_rayDir, t);
           if (closest.distanceTo(_v3) < 1.65) {
@@ -4726,7 +5536,7 @@ export class ViceEngine {
         }
       }
       if (!exploded) {
-        const col = this.resolveBuildingCollision(r.x, r.z, 0.35);
+        const col = this.resolveBuildingCollision(r.x, r.z, 0.35, Math.max(0, r.y), false);
         if (col.collided) exploded = true;
       }
 
@@ -4857,7 +5667,7 @@ export class ViceEngine {
     const py = this.playerRig.root.position.y;
     const pz = this.playerRig.root.position.z;
 
-    // Firm Vehicle Camera Auto-Follow: when driving/flying/boating, smoothly align camera behind vehicle heading on turns!
+    // Firm Vehicle Camera Auto-Follow + On-Foot Keyboard Auto-Follow (so player can play smoothly with pure keyboard!)
     if (this.currentVehicle && !this.activeCutscene && this.switchSwoopTimer <= 0) {
       const diff = Math.atan2(
         Math.sin(this.currentVehicle.heading - this.camYaw),
@@ -4870,6 +5680,23 @@ export class ViceEngine {
       } else if (!isAiming && (Math.abs(this.currentVehicle.speed) > 1.2 || this.taxiMode === 'passenger')) {
         const followRate = this.taxiMode === 'passenger' ? 5.2 : 6.2;
         this.camYaw += diff * Math.min(1, dt * followRate);
+      }
+    } else if (
+      !this.currentVehicle &&
+      !this.activeCutscene &&
+      this.switchSwoopTimer <= 0 &&
+      this.cameraMode !== 'first_person' &&
+      !isAiming &&
+      this.manualCameraCooldown <= 0
+    ) {
+      const speedXZ = Math.hypot(this.playerVelX, this.playerVelZ);
+      if (speedXZ > 0.8) {
+        const moveHeading = Math.atan2(this.playerVelX, this.playerVelZ);
+        const diff = Math.atan2(
+          Math.sin(moveHeading - this.camYaw),
+          Math.cos(moveHeading - this.camYaw)
+        );
+        this.camYaw += diff * Math.min(1, dt * 2.1);
       }
     }
 
@@ -5177,6 +6004,42 @@ export class ViceEngine {
     return { x: rx, z: rz, collided, hitX, hitZ };
   }
 
+  private isUnderRoofAt(x: number, y: number, z: number): boolean {
+    for (const fs of this.floorSurfaces) {
+      if (
+        x >= fs.minX - 0.8 &&
+        x <= fs.maxX + 0.8 &&
+        z >= fs.minZ - 0.8 &&
+        z <= fs.maxZ + 0.8 &&
+        y < fs.height - 0.1
+      ) {
+        return true;
+      }
+    }
+    const cell = this.colliderGrid.get(
+      `${Math.floor(x / GRID_CELL_SIZE)},${Math.floor(z / GRID_CELL_SIZE)}`
+    );
+    if (cell) {
+      for (const c of cell.aabb) {
+        if (
+          c.isRoofSurface &&
+          x >= c.minX - 0.6 &&
+          x <= c.maxX + 0.6 &&
+          z >= c.minZ - 0.6 &&
+          z <= c.maxZ + 0.6 &&
+          y < c.height - 0.15
+        ) {
+          return true;
+        }
+      }
+    }
+    const ovH = getOverpassDeckHeightAt(x, z, 999);
+    if (ovH !== null && y < ovH - 0.2) return true;
+    const uh = getUnderpassFloorHeightAt(x, z, -2);
+    if (uh !== null && uh < -0.5 && y < 0.25) return true;
+    return false;
+  }
+
   private getGroundHeightAt(x: number, z: number, curY = 0): number {
     let maxH = getBridgeElevationAt(x, z);
     const overpassH = getOverpassDeckHeightAt(x, z, curY);
@@ -5356,9 +6219,17 @@ export class ViceEngine {
       hasParachute: Boolean(this.inventory.hasParachute),
       parachuteDeployed: this.parachuteDeployed,
       godModeActive: this.godModeActive,
+      cheatSessionActive: this.cheatSessionActive,
       gameClockStr: this.getGameClockString(),
       gameTimeNormalized: this.gameTimeNormalized,
       cloudCoverage: this.cloudCoverage,
+      weatherType: this.weatherType,
+      weatherLabel: this.getWeatherLabelSk(this.weatherType),
+      rainIntensity: this.rainIntensity,
+      ambientTempC: Math.round(
+        26 + Math.sin((this.gameTimeNormalized - 0.25) * Math.PI * 2) * 5 - this.rainIntensity * 6
+      ),
+      nearestNpcDialogue: this.nearestNpcDialogue,
       controlCategory: this.getControlCategoryForVehicle(this.currentVehicle),
       equippedWeapon: this.inventory.equippedWeapon,
       ammoInClip: owned?.ammoInClip ?? 0,

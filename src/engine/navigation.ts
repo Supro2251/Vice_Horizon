@@ -18,6 +18,7 @@ export interface BridgeSpan {
   zEnd: number;
   width: number;
   peakElevation: number;
+  angle?: number;
 }
 
 export interface OverpassSpan {
@@ -84,7 +85,7 @@ export const BRIDGE_SPANS: BridgeSpan[] = [
   { id: 'bridge_central', x: 0, zStart: 372, zEnd: 488, width: 22, peakElevation: 5.2 },
   { id: 'bridge_east_mid', x: 240, zStart: 372, zEnd: 488, width: 18, peakElevation: 4.8 },
   { id: 'bridge_coral', x: 520, zStart: 372, zEnd: 488, width: 20, peakElevation: 5.0 },
-  { id: 'bridge_ring_east', x: 960, zStart: 370, zEnd: 492, width: 26, peakElevation: 6.2 },
+  { id: 'bridge_ring_east', x: 960, zStart: 368, zEnd: 492, width: 26, peakElevation: 6.2, angle: -0.2213 },
   // North River crossings
   { id: 'bridge_north_west', x: -360, zStart: -840, zEnd: -740, width: 20, peakElevation: 4.8 },
   { id: 'bridge_north_east', x: 520, zStart: -840, zEnd: -740, width: 20, peakElevation: 4.8 },
@@ -105,9 +106,9 @@ export const OVERPASS_SPANS: OverpassSpan[] = [
     id: 'overpass_airport_express',
     axis: 'z',
     centerX: -620,
-    centerZ: 70,
-    length: 360,
-    rampLen: 72,
+    centerZ: 35,
+    length: 290,
+    rampLen: 62,
     width: 18,
     deckHeight: 7.4,
   },
@@ -145,9 +146,27 @@ export const PARKING_LOTS: ParkingLotDef[] = [
   { id: 'park_airport', name: 'Letiskové parkovisko Terminál', x: -740, z: 580, width: 64, depth: 38, rotation: 0, stallsPerRow: 10 },
 ];
 
+function toBridgeLocal(b: BridgeSpan, x: number, z: number): { lx: number; lz: number; halfSpan: number } {
+  const zMid = (b.zStart + b.zEnd) * 0.5;
+  const halfSpan = (b.zEnd - b.zStart) * 0.5;
+  const dx = x - b.x;
+  const dz = z - zMid;
+  if (!b.angle) {
+    return { lx: dx, lz: dz, halfSpan };
+  }
+  const c = Math.cos(b.angle);
+  const s = Math.sin(b.angle);
+  return {
+    lx: dx * c - dz * s,
+    lz: dx * s + dz * c,
+    halfSpan,
+  };
+}
+
 export function isBridgeAt(x: number, z: number): boolean {
   for (const b of BRIDGE_SPANS) {
-    if (z >= b.zStart && z <= b.zEnd && Math.abs(x - b.x) <= b.width * 0.56) {
+    const { lx, lz, halfSpan } = toBridgeLocal(b, x, z);
+    if (Math.abs(lz) <= halfSpan && Math.abs(lx) <= b.width * 0.56) {
       return true;
     }
   }
@@ -157,10 +176,9 @@ export function isBridgeAt(x: number, z: number): boolean {
 export function getBridgeElevationAt(x: number, z: number): number {
   let maxEl = 0;
   for (const b of BRIDGE_SPANS) {
-    if (z >= b.zStart && z <= b.zEnd && Math.abs(x - b.x) <= b.width * 0.56) {
-      const center = (b.zStart + b.zEnd) * 0.5;
-      const halfSpan = (b.zEnd - b.zStart) * 0.5;
-      const t = 1 - Math.abs(z - center) / halfSpan;
+    const { lx, lz, halfSpan } = toBridgeLocal(b, x, z);
+    if (Math.abs(lz) <= halfSpan && Math.abs(lx) <= b.width * 0.56) {
+      const t = 1 - Math.abs(lz) / halfSpan;
       const el = Math.sin(Math.max(0, t) * Math.PI * 0.5) * b.peakElevation;
       if (el > maxEl) maxEl = el;
     }
@@ -257,13 +275,16 @@ function sampleCircle(cx: number, cz: number, radius: number, count = 36): GpsPo
   return pts;
 }
 
-// Grand 15x Ring Highway (~8.5km full loop)
+// Grand 15x Ring Highway (~8.5km full loop) - routed strictly on land & bridges around Marina Harbor
 const RING_CTRL: [number, number][] = [
   [1040, -90],
   [990, 220],
   [960, 430], // East highway bridge over Vice Canal
-  [900, 620],
-  [650, 980],
+  [936, 539], // North of Marina Harbor
+  [720, 546],
+  [520, 558], // West of Marina Harbor (x <= 560)
+  [516, 790],
+  [508, 1037], // South Coral land corridor
   [240, 1080],
   [-120, 1100],
   [-490, 1060],
@@ -272,21 +293,23 @@ const RING_CTRL: [number, number][] = [
   [-1220, 440],
   [-1100, -40],
   [-960, -480],
+  [-900, -790], // West of North Emerald River (-820..860)
   [-740, -900],
   [-360, -1080],
   [120, -1140],
   [640, -1020],
+  [915, -790], // East of North Emerald River (-820..860)
   [940, -640],
 ];
 
 const NORTH_HIGHWAY_CTRL: [number, number][] = [
-  [-1080, -180],
+  [-1053, -206],
   [-740, -480],
   [-360, -680],
   [0, -680],
   [360, -660],
   [680, -460],
-  [1010, -190],
+  [1030, -211],
 ];
 
 const S_BOULEVARD_WEST_CTRL: [number, number][] = [
@@ -316,10 +339,11 @@ const TRAIL_NW_FOREST_CTRL: [number, number][] = [
   [-920, -940],
   [-680, -960],
   [-520, -840],
+  [-360, -840],
 ];
 
 const TRAIL_NE_MEADOW_CTRL: [number, number][] = [
-  [520, -640],
+  [520, -660],
   [720, -860],
   [940, -940],
   [1080, -740],
@@ -395,13 +419,14 @@ export const ROAD_SEGMENTS: RoadSegmentDef[] = [
     width: 18,
     points: [
       { x: -360, z: -1080 },
+      { x: -360, z: -840 },
       { x: -360, z: -790 },
       { x: -360, z: -680 },
       { x: -360, z: -290 },
       { x: -360, z: -60 },
       { x: -360, z: 220 },
       { x: -360, z: 540 },
-      { x: -360, z: 1060 },
+      { x: -350, z: 1074 },
     ],
   },
   {
@@ -426,7 +451,7 @@ export const ROAD_SEGMENTS: RoadSegmentDef[] = [
       { x: 0, z: 220 },
       { x: 0, z: 430 },
       { x: 0, z: 540 },
-      { x: 0, z: 1090 },
+      { x: 10, z: 1100 },
     ],
   },
   {
@@ -450,8 +475,9 @@ export const ROAD_SEGMENTS: RoadSegmentDef[] = [
     isHighway: false,
     width: 17,
     points: [
-      { x: 520, z: -1020 },
+      { x: 528, z: -1070 },
       { x: 520, z: -790 },
+      { x: 520, z: -660 },
       { x: 520, z: -560 },
       { x: 520, z: -290 },
       { x: 520, z: -116 },
@@ -467,7 +493,7 @@ export const ROAD_SEGMENTS: RoadSegmentDef[] = [
       { x: 520, z: 220 },
       { x: 520, z: 430 },
       { x: 520, z: 540 },
-      { x: 520, z: 980 },
+      { x: 508, z: 1037 },
     ],
   },
   // East-West Cross Streets
@@ -477,12 +503,13 @@ export const ROAD_SEGMENTS: RoadSegmentDef[] = [
     isHighway: false,
     width: 17,
     points: [
+      { x: -863, z: -705 },
       { x: -640, z: -680 },
       { x: -360, z: -680 },
       { x: 0, z: -680 },
       { x: 240, z: -660 },
       { x: 520, z: -660 },
-      { x: 860, z: -640 },
+      { x: 940, z: -640 },
     ],
   },
   {
@@ -491,12 +518,13 @@ export const ROAD_SEGMENTS: RoadSegmentDef[] = [
     isHighway: false,
     width: 17,
     points: [
+      { x: -1036, z: -263 },
       { x: -960, z: -290 },
       { x: -360, z: -290 },
       { x: 0, z: -290 },
       { x: 240, z: -290 },
       { x: 520, z: -290 },
-      { x: 960, z: -290 },
+      { x: 1021, z: -284 },
     ],
   },
   {
@@ -505,7 +533,7 @@ export const ROAD_SEGMENTS: RoadSegmentDef[] = [
     isHighway: false,
     width: 17,
     points: [
-      { x: -1140, z: 220 },
+      { x: -1166, z: 201 },
       { x: -620, z: 220 },
       { x: -360, z: 220 },
       { x: 0, z: 220 },
@@ -520,12 +548,13 @@ export const ROAD_SEGMENTS: RoadSegmentDef[] = [
     isHighway: false,
     width: 18,
     points: [
-      { x: -1240, z: 540 },
+      { x: -1243, z: 549 },
       { x: -760, z: 540 },
       { x: -360, z: 540 },
       { x: 0, z: 540 },
       { x: 240, z: 540 },
-      { x: 560, z: 540 },
+      { x: 520, z: 540 },
+      { x: 936, z: 539 },
     ],
   },
   // Dirt Trails through Forests & Meadows
@@ -572,8 +601,8 @@ const ROAD_GRAPH: Map<string, GraphNode> = (() => {
   addNode('ring_e', 1040, -90);
   addNode('ring_es', 990, 220);
   addNode('ring_bridge', 960, 430);
-  addNode('ring_se', 900, 620);
-  addNode('ring_s_coral', 650, 980);
+  addNode('ring_se', 936, 539);
+  addNode('ring_s_coral', 508, 1037);
   addNode('ring_s_mid', 240, 1080);
   addNode('ring_s_cent', 0, 1090);
   addNode('ring_sw', -490, 1060);
@@ -651,8 +680,9 @@ const ROAD_GRAPH: Map<string, GraphNode> = (() => {
   connect('ring_e', 'ring_es', [[1020, 70]]);
   connect('ring_es', 'ring_bridge');
   connect('ring_bridge', 'ring_se');
-  connect('ring_se', 'ring_s_coral', [[800, 820]]);
-  connect('ring_s_coral', 'ring_s_mid', [[440, 1050]]);
+  connect('ring_se', 'co_marina', [[720, 546]]);
+  connect('co_marina', 'ring_s_coral', [[516, 790]]);
+  connect('ring_s_coral', 'ring_s_mid', [[380, 1065]]);
   connect('ring_s_mid', 'ring_s_cent');
   connect('ring_s_cent', 'ring_sw', [[-280, 1090]]);
   connect('ring_sw', 'ring_w_airport', [[-920, 1080], [-1260, 860]]);
@@ -740,6 +770,8 @@ const ROAD_GRAPH: Map<string, GraphNode> = (() => {
   connect('w_marina', 'c_marina');
   connect('c_marina', 'e_marina');
   connect('e_marina', 'co_marina');
+  connect('co_marina', 'ring_se', [[720, 546]]);
+  connect('w_civic', 'ring_nw');
 
   return nodes;
 })();
@@ -846,59 +878,81 @@ export function computeGpsRoute(
   return route;
 }
 
-// Smooth Closed Traffic Loops across the 15x Island
+function sampleRoadPoly(ctrl: [number, number][], stepMeters = 22): GpsPoint[] {
+  const pts: GpsPoint[] = [];
+  for (let i = 0; i < ctrl.length; i++) {
+    const [ax, az] = ctrl[i];
+    const [bx, bz] = ctrl[(i + 1) % ctrl.length];
+    const dist = Math.hypot(bx - ax, bz - az);
+    const steps = Math.max(1, Math.ceil(dist / stepMeters));
+    for (let s = 0; s < steps; s++) {
+      const t = s / steps;
+      pts.push({ x: ax + (bx - ax) * t, z: az + (bz - az) * t });
+    }
+  }
+  return pts;
+}
+
+// Smooth Closed Traffic Loops across the 15x Island (strictly on paved roads & bridges, never entering water)
 export const TRAFFIC_LOOP_PATHS: GpsPoint[][] = [
   sampleSpline(RING_CTRL, 10, true),
   sampleSpline([...RING_CTRL].reverse(), 10, true),
-  sampleSpline(
-    [
-      [-1050, -160],
-      [-740, -480],
-      [-360, -680],
-      [0, -680],
-      [360, -660],
-      [680, -460],
-      [920, -240],
-      [520, -290],
-      [0, -290],
-      [-360, -290],
-      [-720, -240],
-    ],
-    7,
-    true
-  ),
-  sampleSpline(
-    [
-      [0, -130],
-      [60, -70],
-      [240, 40],
-      [240, 430],
-      [240, 540],
-      [520, 540],
-      [520, 430],
-      [520, -24],
-      [474, -70],
-      [240, -290],
-      [0, -290],
-    ],
-    7,
-    true
-  ),
-  sampleSpline(
-    [
-      [-360, -680],
-      [0, -680],
-      [0, -130],
-      [-60, -70],
-      [-240, -110],
-      [-360, -60],
-      [-360, 540],
-      [-760, 540],
-      [-1140, 220],
-      [-720, 40],
-      [-360, -290],
-    ],
-    7,
-    true
-  ),
+  // North Civic & Midtown District Loop
+  sampleRoadPoly([
+    [-360, -680],
+    [0, -680],
+    [240, -660],
+    [520, -660],
+    [520, -290],
+    [240, -290],
+    [0, -290],
+    [-360, -290],
+  ]),
+  // East Midtown & Coral Bridges Loop (crosses Vice Canal via Midtown Bridge & Coral Bridge)
+  sampleRoadPoly([
+    [240, -290],
+    [240, 40],
+    [240, 220],
+    [240, 430],
+    [240, 540],
+    [520, 540],
+    [520, 430],
+    [520, 220],
+    [520, -24],
+    [566, -70],
+    [520, -116],
+    [520, -290],
+  ]),
+  // Central Downtown & South Canal Bridges Loop (crosses Vice Canal via Central & Midtown Bridges)
+  sampleRoadPoly([
+    [-360, -290],
+    [0, -290],
+    [0, -130],
+    [60, -70],
+    [0, -10],
+    [0, 220],
+    [0, 430],
+    [0, 540],
+    [0, 1090],
+    [240, 1080],
+    [240, 540],
+    [240, 430],
+    [240, 220],
+    [0, 220],
+    [-360, 220],
+    [-360, -60],
+  ]),
+  // West Airport Boulevard & Canal Promenade Loop
+  sampleRoadPoly([
+    [-1166, 201],
+    [-620, 220],
+    [-360, 220],
+    [0, 220],
+    [0, 430],
+    [0, 540],
+    [-360, 540],
+    [-760, 540],
+    [-1243, 549],
+    [-1220, 440],
+  ]),
 ];

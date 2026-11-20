@@ -11,16 +11,21 @@ import {
   Sliders,
   Sparkles,
   Upload,
+  UserPlus,
+  Users,
+  Trash2,
   Volume2,
   X,
 } from 'lucide-react';
 import {
+  FriendRecord,
   GameSettings,
   GameStats,
   GamepadButtonAction,
   GraphicsPreset,
   HudThemeId,
   KeyAction,
+  OnlinePlayerInfo,
   StickControlConfig,
   VehicleControlCategory,
 } from '../types/game';
@@ -30,6 +35,11 @@ import { formatKeyCode, PLAYSTATION_GLYPHS, XBOX_GLYPHS } from '../engine/input'
 interface SettingsAndModsModalProps {
   settings: GameSettings;
   user: User | null;
+  myNickname?: string;
+  myFriendCode?: string;
+  friends?: FriendRecord[];
+  onlineUids?: string[];
+  onlinePlayers?: OnlinePlayerInfo[];
   cloudStatus: string | null;
   cloudBusy: boolean;
   stats: GameStats;
@@ -38,13 +48,18 @@ interface SettingsAndModsModalProps {
   controllerName: string;
   gameClockStr: string;
   gameTimeNormalized: number;
+  cheatSessionActive?: boolean;
   initialTab?: 'graphics' | 'audio' | 'controls' | 'mods' | 'cloud';
   onUpdateSettings: (next: GameSettings) => void;
   onSetTimeOfDay: (normalized: number) => void;
+  onRestartCleanSession?: () => void;
   onSignIn: () => void;
   onSignOut: () => void;
   onSaveCloud: () => void;
   onLoadCloud: () => void;
+  onUpdateNickname?: (nickname: string) => Promise<void>;
+  onAddFriend?: (query: string) => Promise<void>;
+  onRemoveFriend?: (uid: string) => Promise<void>;
   onClose: () => void;
 }
 
@@ -100,6 +115,11 @@ const CONTROL_CATEGORIES: { id: 'all' | VehicleControlCategory; label: string }[
 export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
   settings,
   user,
+  myNickname = '',
+  myFriendCode = 'VH-OFFLINE',
+  friends = [],
+  onlineUids = [],
+  onlinePlayers = [],
   cloudStatus,
   cloudBusy,
   stats,
@@ -108,13 +128,18 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
   controllerName,
   gameClockStr,
   gameTimeNormalized,
+  cheatSessionActive = false,
   initialTab = 'graphics',
   onUpdateSettings,
   onSetTimeOfDay,
+  onRestartCleanSession,
   onSignIn,
   onSignOut,
   onSaveCloud,
   onLoadCloud,
+  onUpdateNickname,
+  onAddFriend,
+  onRemoveFriend,
   onClose,
 }) => {
   const [tab, setTab] = useState<'graphics' | 'audio' | 'controls' | 'mods' | 'cloud'>(initialTab);
@@ -123,6 +148,14 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
   const [rebindingPad, setRebindingPad] = useState<GamepadButtonAction | null>(null);
   const [modJsonText, setModJsonText] = useState('');
   const [modFeedback, setModFeedback] = useState<string | null>(null);
+  const [nickDraft, setNickDraft] = useState(myNickname);
+  const [friendSearch, setFriendSearch] = useState('');
+  const [mpFeedback, setMpFeedback] = useState<string | null>(null);
+  const [mpBusy, setMpBusy] = useState(false);
+
+  useEffect(() => {
+    setNickDraft(myNickname);
+  }, [myNickname]);
 
   useEffect(() => {
     setTab(initialTab);
@@ -362,7 +395,7 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
             { id: 'audio' as const, label: 'Zvuk', icon: Volume2 },
             { id: 'controls' as const, label: 'Klávesnica a PS4/PS5 Controller', icon: Gamepad2 },
             { id: 'mods' as const, label: 'UI a Modifikácie', icon: Sparkles },
-            { id: 'cloud' as const, label: 'Cloud uloženie', icon: Cloud },
+            { id: 'cloud' as const, label: 'Účet & Multiplayer', icon: Cloud },
           ].map((item) => {
             const Icon = item.icon;
             const active = tab === item.id;
@@ -1145,6 +1178,59 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
                       title="Manuálny posuv času v hre"
                     />
                   </div>
+
+                  <div className="pt-2 space-y-2 border-t border-white/10">
+                    <div className="text-xs text-slate-300">Počasie v meste (plynulé prechody)</div>
+                    <div className="grid grid-cols-4 gap-1.5">
+                      {(
+                        [
+                          { id: 'auto', label: 'Auto' },
+                          { id: 'clear', label: 'Jasno' },
+                          { id: 'partly_cloudy', label: 'Oblačno' },
+                          { id: 'overcast', label: 'Zamračené' },
+                          { id: 'rain', label: 'Dážď' },
+                          { id: 'storm', label: 'Búrka' },
+                          { id: 'foggy', label: 'Hmla' },
+                        ] as const
+                      ).map((w) => {
+                        const active = (settings.gameplayMods.weatherOverride || 'auto') === w.id;
+                        return (
+                          <button
+                            key={w.id}
+                            onClick={() =>
+                              onUpdateSettings({
+                                ...settings,
+                                gameplayMods: { ...settings.gameplayMods, weatherOverride: w.id },
+                              })
+                            }
+                            className={`py-1.5 rounded-lg text-[11px] border ${
+                              active
+                                ? 'bg-white text-slate-950 border-white font-semibold'
+                                : 'bg-slate-950 text-slate-300 border-white/10'
+                            }`}
+                          >
+                            {w.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {cheatSessionActive && (
+                    <div className="p-3 rounded-lg bg-rose-500/15 border border-rose-400/35 space-y-2">
+                      <div className="text-[11px] text-rose-200 font-semibold">
+                        Aktívne cheaty/modifikácie zamkli misie a ukladanie postupu.
+                      </div>
+                      {onRestartCleanSession && (
+                        <button
+                          onClick={onRestartCleanSession}
+                          className="w-full py-1.5 rounded-lg text-xs font-bold bg-rose-500 hover:bg-rose-400 text-white"
+                        >
+                          Reštartovať reláciu bez cheatov
+                        </button>
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -1250,6 +1336,197 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
 
                 {cloudStatus && (
                   <div className="text-xs text-sky-400 font-medium">{cloudStatus}</div>
+                )}
+              </div>
+
+              {/* Multiplayer & Friends by Nickname */}
+              <div className="p-5 rounded-xl bg-slate-900/70 border border-white/10 space-y-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <Users className="w-4 h-4 text-sky-400" />
+                      <h4 className="font-display text-base font-bold text-white">
+                        Multiplayer & Priatelia (Nickname)
+                      </h4>
+                    </div>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      Pridaj si prihlásených kamarátov podľa nickname. Keď sa pripoja do hry, automaticky ich stretneš priamo v meste bez pozvánky!
+                    </p>
+                  </div>
+                  {user && (
+                    <span className="px-2.5 py-1 rounded-lg bg-slate-800 font-mono-tabular text-xs text-sky-300 shrink-0">
+                      {myFriendCode}
+                    </span>
+                  )}
+                </div>
+
+                {!user ? (
+                  <div className="p-3.5 rounded-lg bg-slate-950/60 border border-white/10 text-xs text-slate-300">
+                    Najprv sa prihlás cez Google vyššie, aby si si nastavil svoj Nickname a mohol pridávať prihlásených kamarátov.
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {onUpdateNickname && (
+                      <form
+                        onSubmit={async (e) => {
+                          e.preventDefault();
+                          setMpBusy(true);
+                          setMpFeedback(null);
+                          try {
+                            await onUpdateNickname(nickDraft);
+                            setMpFeedback('Tvoj nickname bol aktualizovaný.');
+                          } catch (err) {
+                            setMpFeedback(err instanceof Error ? err.message : 'Chyba ukladania nickname.');
+                          } finally {
+                            setMpBusy(false);
+                          }
+                        }}
+                        className="flex items-center gap-2"
+                      >
+                        <input
+                          type="text"
+                          value={nickDraft}
+                          onChange={(e) => setNickDraft(e.target.value)}
+                          placeholder="Tvoj verejný Nickname (2–24 znakov)"
+                          maxLength={24}
+                          className="flex-1 px-3 py-2 rounded-lg bg-slate-950 border border-white/15 text-xs text-white focus:outline-none focus:border-sky-400"
+                        />
+                        <button
+                          type="submit"
+                          disabled={mpBusy}
+                          className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-white disabled:opacity-50"
+                        >
+                          Uložiť nickname
+                        </button>
+                      </form>
+                    )}
+
+                    {onAddFriend && (
+                      <form
+                        onSubmit={async (e) => {
+                          e.preventDefault();
+                          if (!friendSearch.trim()) return;
+                          setMpBusy(true);
+                          setMpFeedback(null);
+                          try {
+                            await onAddFriend(friendSearch.trim());
+                            setFriendSearch('');
+                            setMpFeedback('Kamarát pridaný! Ak je online, hneď ho uvidíš na mape aj v meste.');
+                          } catch (err) {
+                            setMpFeedback(err instanceof Error ? err.message : 'Hráč s týmto nickname sa nenašiel.');
+                          } finally {
+                            setMpBusy(false);
+                          }
+                        }}
+                        className="flex items-center gap-2"
+                      >
+                        <input
+                          type="text"
+                          value={friendSearch}
+                          onChange={(e) => setFriendSearch(e.target.value)}
+                          placeholder="Zadaj nickname prihláseného kamaráta..."
+                          className="flex-1 px-3 py-2 rounded-lg bg-slate-950 border border-white/15 text-xs text-white focus:outline-none focus:border-sky-400"
+                        />
+                        <button
+                          type="submit"
+                          disabled={mpBusy}
+                          className="px-3.5 py-2 rounded-lg text-xs font-bold text-slate-950 flex items-center gap-1.5 disabled:opacity-50"
+                          style={{ backgroundColor: accent }}
+                        >
+                          <UserPlus className="w-3.5 h-3.5" />
+                          Pridať kamaráta
+                        </button>
+                      </form>
+                    )}
+
+                    {mpFeedback && (
+                      <div className="text-xs text-sky-400 font-medium">{mpFeedback}</div>
+                    )}
+
+                    {onlinePlayers.filter((p) => p.uid !== user.uid && !friends.some((f) => f.uid === p.uid)).length > 0 && (
+                      <div className="p-3 rounded-lg bg-emerald-950/25 border border-emerald-500/25 space-y-2">
+                        <div className="text-[11px] font-semibold text-emerald-300">
+                          Aktuálne prihlásení hráči online:
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          {onlinePlayers
+                            .filter((p) => p.uid !== user.uid && !friends.some((f) => f.uid === p.uid))
+                            .map((p) => (
+                              <button
+                                key={p.uid}
+                                type="button"
+                                disabled={mpBusy}
+                                onClick={async () => {
+                                  if (!onAddFriend) return;
+                                  setMpBusy(true);
+                                  try {
+                                    await onAddFriend(p.displayName);
+                                    setMpFeedback(`Pridaný hráč ${p.displayName}.`);
+                                  } catch (err) {
+                                    setMpFeedback(err instanceof Error ? err.message : 'Chyba pridania.');
+                                  } finally {
+                                    setMpBusy(false);
+                                  }
+                                }}
+                                className="px-2.5 py-1.5 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/35 text-xs text-emerald-200 flex items-center gap-1.5"
+                              >
+                                <UserPlus className="w-3 h-3" />
+                                {p.displayName}
+                              </button>
+                            ))}
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="space-y-1.5">
+                      <div className="text-xs font-semibold text-slate-400">
+                        Tvoji priatelia ({friends.length})
+                      </div>
+                      {friends.length === 0 ? (
+                        <div className="text-xs text-slate-500">
+                          Zatiaľ nemáš pridaných žiadnych priateľov.
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          {friends.map((f) => {
+                            const isOnline = onlineUids.includes(f.uid);
+                            return (
+                              <div
+                                key={f.uid}
+                                className="p-2.5 rounded-lg bg-slate-950/70 border border-white/10 flex items-center justify-between gap-2"
+                              >
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <span
+                                    className={`w-2 h-2 rounded-full shrink-0 ${
+                                      isOnline ? 'bg-emerald-400' : 'bg-slate-600'
+                                    }`}
+                                  />
+                                  <div className="min-w-0">
+                                    <div className="text-xs font-semibold text-white truncate">
+                                      {f.nickname || f.displayName}
+                                    </div>
+                                    <div className="text-[10px] text-slate-400">
+                                      {isOnline ? 'Online v hre' : 'Offline'} · {f.friendCode}
+                                    </div>
+                                  </div>
+                                </div>
+                                {onRemoveFriend && (
+                                  <button
+                                    type="button"
+                                    onClick={() => onRemoveFriend(f.uid)}
+                                    className="p-1 text-slate-500 hover:text-rose-400"
+                                    title="Odstrániť priateľa"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  </div>
                 )}
               </div>
 

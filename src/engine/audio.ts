@@ -13,7 +13,8 @@ export class ProceduralAudioEngine {
   private engineSubOsc: OscillatorNode | null = null;
   private engineFilter: BiquadFilterNode | null = null;
   private sirenOsc: OscillatorNode | null = null;
-  private screechSource: AudioBufferSourceNode | null = null;
+  private screechOsc1: OscillatorNode | null = null;
+  private screechOsc2: OscillatorNode | null = null;
   private screechFilter: BiquadFilterNode | null = null;
   private screechGain: GainNode | null = null;
 
@@ -85,22 +86,29 @@ export class ProceduralAudioEngine {
       this.sirenOsc.start();
       (this.sirenOsc as unknown as { _volNode: GainNode })._volNode = sirenVol;
 
-      // Setup continuous tire screech / drift noise loop
+      // Setup clean harmonic tire screech synth (no white-noise background hiss)
       this.screechFilter = this.ctx.createBiquadFilter();
       this.screechFilter.type = 'bandpass';
       this.screechFilter.frequency.value = 1280;
-      this.screechFilter.Q.value = 4.2;
+      this.screechFilter.Q.value = 5.0;
 
       this.screechGain = this.ctx.createGain();
       this.screechGain.gain.value = 0.0;
 
-      this.screechSource = this.ctx.createBufferSource();
-      this.screechSource.buffer = this.noiseBuffer;
-      this.screechSource.loop = true;
-      this.screechSource.connect(this.screechFilter);
+      this.screechOsc1 = this.ctx.createOscillator();
+      this.screechOsc1.type = 'triangle';
+      this.screechOsc1.frequency.value = 980;
+      this.screechOsc1.connect(this.screechFilter);
+
+      this.screechOsc2 = this.ctx.createOscillator();
+      this.screechOsc2.type = 'sine';
+      this.screechOsc2.frequency.value = 1315;
+      this.screechOsc2.connect(this.screechFilter);
+
       this.screechFilter.connect(this.screechGain);
       this.screechGain.connect(this.sfxGain);
-      this.screechSource.start();
+      this.screechOsc1.start();
+      this.screechOsc2.start();
 
       this.applySettings(this.settings);
     }
@@ -127,7 +135,8 @@ export class ProceduralAudioEngine {
     speedKmh: number,
     wantedStars: number,
     timeSec: number,
-    driftIntensity = 0
+    driftIntensity = 0,
+    rainIntensity = 0
   ) {
     if (!this.ctx || this.ctx.state !== 'running') return;
     const now = this.ctx.currentTime;
@@ -146,12 +155,18 @@ export class ProceduralAudioEngine {
       }
     }
 
-    if (this.screechGain && this.screechFilter) {
-      const clampedDrift = inVehicle && !this.settings.muted ? Math.max(0, Math.min(1, driftIntensity)) : 0;
-      const targetVol = clampedDrift * 0.14;
-      const targetFreq = 1120 + clampedDrift * 480 + Math.sin(timeSec * 19) * 45;
-      this.screechGain.gain.setTargetAtTime(targetVol, now, 0.05);
-      this.screechFilter.frequency.setTargetAtTime(targetFreq, now, 0.05);
+    if (this.screechGain && this.screechFilter && this.screechOsc1 && this.screechOsc2) {
+      const clampedDrift = inVehicle && !this.settings.muted && driftIntensity > 0.08 ? Math.min(1, driftIntensity) : 0;
+      if (clampedDrift > 0) {
+        const targetVol = clampedDrift * 0.085;
+        const targetFreq = 1040 + clampedDrift * 380 + Math.sin(timeSec * 19) * 38;
+        this.screechOsc1.frequency.setTargetAtTime(targetFreq * 0.78, now, 0.04);
+        this.screechOsc2.frequency.setTargetAtTime(targetFreq * 1.04, now, 0.04);
+        this.screechFilter.frequency.setTargetAtTime(targetFreq, now, 0.05);
+        this.screechGain.gain.setTargetAtTime(targetVol, now, 0.04);
+      } else {
+        this.screechGain.gain.setTargetAtTime(0.0, now, 0.02);
+      }
     }
 
     if (this.sirenOsc) {
@@ -165,6 +180,28 @@ export class ProceduralAudioEngine {
         sirenVol.gain.setTargetAtTime(0.0, now, 0.15);
       }
     }
+  }
+
+  public playThunder() {
+    if (!this.ctx || !this.sfxGain || !this.noiseBuffer || this.settings.muted) return;
+    if (this.ctx.state === 'suspended') return;
+    const now = this.ctx.currentTime;
+    const noise = this.ctx.createBufferSource();
+    noise.buffer = this.noiseBuffer;
+    noise.loop = true;
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(220, now);
+    filter.frequency.exponentialRampToValueAtTime(48, now + 1.4);
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.01, now);
+    g.gain.linearRampToValueAtTime(0.42, now + 0.08);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 1.5);
+    noise.connect(filter);
+    filter.connect(g);
+    g.connect(this.sfxGain);
+    noise.start(now);
+    noise.stop(now + 1.55);
   }
 
   public playGunshot(weaponId: WeaponId) {
@@ -372,7 +409,8 @@ export class ProceduralAudioEngine {
       this.engineOsc?.stop();
       this.engineSubOsc?.stop();
       this.sirenOsc?.stop();
-      this.screechSource?.stop();
+      this.screechOsc1?.stop();
+      this.screechOsc2?.stop();
       this.ctx?.close();
     } catch {
       // Ignore cleanup errors

@@ -129,22 +129,74 @@ export function computeFriendCode(uid: string): string {
   return `VH-${uid.slice(0, 6).toUpperCase()}`;
 }
 
-export async function ensurePublicUserCard(user: User): Promise<void> {
+export async function ensurePublicUserCard(user: User, preferredNickname?: string): Promise<string> {
   const uid = user.uid;
-  const displayName = (user.displayName || user.email?.split('@')[0] || 'Hráč').slice(0, 80);
+  const fallbackName = (user.displayName || user.email?.split('@')[0] || 'Hráč').trim().slice(0, 32) || 'Hráč';
   const friendCode = computeFriendCode(uid);
   const emailLower = (user.email || '').trim().toLowerCase().slice(0, 160);
+  let resolvedNick = (preferredNickname || '').trim().slice(0, 32);
+
   try {
+    if (!resolvedNick) {
+      const existingSnap = await getDoc(doc(db, 'publicUsers', uid));
+      if (existingSnap.exists()) {
+        const d = existingSnap.data();
+        if (typeof d.nickname === 'string' && d.nickname.trim().length >= 2) {
+          resolvedNick = d.nickname.trim().slice(0, 32);
+        }
+      }
+    }
+    if (!resolvedNick) {
+      resolvedNick = fallbackName.length >= 2 ? fallbackName : `${fallbackName}_VH`;
+    }
     await setDoc(doc(db, 'publicUsers', uid), {
       uid,
-      displayName,
+      displayName: resolvedNick,
+      nickname: resolvedNick,
+      nicknameLower: resolvedNick.toLowerCase(),
       emailLower,
       friendCode,
       updatedAt: serverTimestamp(),
     });
   } catch {
-    // non-fatal if unverified
+    if (!resolvedNick) resolvedNick = fallbackName;
   }
+  return resolvedNick;
+}
+
+export async function updatePlayerNickname(user: User, rawNickname: string): Promise<string> {
+  const clean = rawNickname.trim().replace(/\s+/g, ' ');
+  if (clean.length < 2 || clean.length > 24) {
+    throw new Error('Nickname musí mať 2 až 24 znakov.');
+  }
+  const lower = clean.toLowerCase();
+  const col = collection(db, 'publicUsers');
+  try {
+    const dupSnap = await getDocs(query(col, where('nicknameLower', '==', lower), limit(3)));
+    for (const docSnap of dupSnap.docs) {
+      if (docSnap.id !== user.uid) {
+        throw new Error('Tento nickname už používa iný hráč. Zvoľ iný.');
+      }
+    }
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('nickname už používa')) throw err;
+  }
+
+  const saved = await ensurePublicUserCard(user, clean);
+  try {
+    const userRef = doc(db, 'users', user.uid);
+    const userSnap = await getDoc(userRef);
+    if (userSnap.exists()) {
+      await setDoc(
+        userRef,
+        { displayName: saved, nickname: saved, updatedAt: serverTimestamp() },
+        { merge: true }
+      );
+    }
+  } catch {
+    // non-fatal if profile not created yet
+  }
+  return saved;
 }
 
 export async function fetchFriends(user: User): Promise<FriendRecord[]> {
@@ -153,9 +205,11 @@ export async function fetchFriends(user: User): Promise<FriendRecord[]> {
     const list: FriendRecord[] = [];
     snap.forEach((d) => {
       const data = d.data();
+      const disp = String(data.nickname || data.displayName || 'Hráč');
       list.push({
         uid: String(data.uid || d.id),
-        displayName: String(data.displayName || 'Hráč'),
+        displayName: disp,
+        nickname: typeof data.nickname === 'string' ? data.nickname : disp,
         email: typeof data.email === 'string' ? data.email : undefined,
         friendCode: String(data.friendCode || computeFriendCode(d.id)),
         addedAt: String(data.addedAt || new Date().toISOString()),
@@ -170,7 +224,7 @@ export async function fetchFriends(user: User): Promise<FriendRecord[]> {
 export async function addFriendByQuery(user: User, inputQuery: string): Promise<FriendRecord> {
   const clean = inputQuery.trim();
   if (!clean) {
-    throw new Error('Zadaj e-mail alebo kód priateľa (napr. VH-XXXXXX).');
+    throw new Error('Zadaj nickname kamaráta (alebo VH-kód / e-mail).');
   }
   const upper = clean.toUpperCase();
   const lower = clean.toLowerCase();
@@ -187,12 +241,32 @@ export async function addFriendByQuery(user: User, inputQuery: string): Promise<
     const snap = await getDocs(q);
     if (!snap.empty) foundDoc = snap.docs[0].data();
   } else {
-    const byUid = await getDoc(doc(db, 'publicUsers', clean));
-    if (byUid.exists()) foundDoc = byUid.data();
+    // 1. Exact case-insensitive match by nicknameLower
+    const qNick = query(col, where('nicknameLower', '==', lower), limit(1));
+    const nickSnap = await getDocs(qNick);
+    if (!nickSnap.empty) {
+      foundDoc = nickSnap.docs[0].data();
+    } else {
+      // 2. Direct UID fallback or case-insensitive scan over signed-in directory cards (for users registered before nicknameLower)
+      const byUid = await getDoc(doc(db, 'publicUsers', clean));
+      if (byUid.exists()) {
+        foundDoc = byUid.data();
+      } else {
+        const dirSnap = await getDocs(query(col, limit(100)));
+        for (const d of dirSnap.docs) {
+          const data = d.data();
+          const n = String(data.nickname || data.displayName || '').trim().toLowerCase();
+          if (n === lower || (lower.length >= 3 && n.includes(lower))) {
+            foundDoc = data;
+            break;
+          }
+        }
+      }
+    }
   }
 
   if (!foundDoc) {
-    throw new Error('Hráč sa nenašiel. Musí sa aspoň raz prihlásiť do Vice Horizon.');
+    throw new Error('Hráč s týmto nickname sa nenašiel. Musí byť prihlásený vo Vice Horizon.');
   }
 
   const friendUid = String(foundDoc.uid);
@@ -200,9 +274,11 @@ export async function addFriendByQuery(user: User, inputQuery: string): Promise<
     throw new Error('Nemôžeš pridať sám seba do priateľov.');
   }
 
+  const friendNick = String(foundDoc.nickname || foundDoc.displayName || 'Kamarát');
   const record: FriendRecord = {
     uid: friendUid,
-    displayName: String(foundDoc.displayName || 'Kamarát'),
+    displayName: friendNick,
+    nickname: friendNick,
     email: typeof foundDoc.emailLower === 'string' ? foundDoc.emailLower : undefined,
     friendCode: String(foundDoc.friendCode || computeFriendCode(friendUid)),
     addedAt: new Date().toISOString(),
@@ -212,6 +288,7 @@ export async function addFriendByQuery(user: User, inputQuery: string): Promise<
     uid: record.uid,
     ownerId: user.uid,
     displayName: record.displayName,
+    nickname: friendNick.slice(0, 32),
     email: record.email || '',
     friendCode: record.friendCode,
     addedAt: record.addedAt,
@@ -250,9 +327,14 @@ export async function saveGameToCloud(user: User, payload: CloudSavePayload): Pr
     const existingUserSnap = await getDoc(userRef);
 
     const displayName = (user.displayName || user.email?.split('@')[0] || 'Hráč').slice(0, 80);
+    let currentNickname = displayName.slice(0, 32);
+    if (existingUserSnap.exists() && typeof existingUserSnap.data().nickname === 'string') {
+      currentNickname = existingUserSnap.data().nickname.slice(0, 32);
+    }
     const baseProfile: Record<string, unknown> = {
       uid,
       displayName,
+      nickname: currentNickname,
       activeCharacterId: payload.activeCharacterId,
       cash: clamp(Math.round(payload.cash), 0, 999999999),
       totalEliminations: clamp(Math.round(payload.stats.totalEliminations), 0, 1000000),
@@ -268,6 +350,7 @@ export async function saveGameToCloud(user: User, payload: CloudSavePayload): Pr
     } else {
       batch.update(userRef, {
         displayName: baseProfile.displayName,
+        nickname: baseProfile.nickname,
         activeCharacterId: baseProfile.activeCharacterId,
         cash: baseProfile.cash,
         totalEliminations: baseProfile.totalEliminations,
