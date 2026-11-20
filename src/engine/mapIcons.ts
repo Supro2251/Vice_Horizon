@@ -200,6 +200,35 @@ export function drawShopMapIcon(
       ctx.fill();
       break;
     }
+    case 'shooting_range': {
+      // Concentric bulls-eye target
+      ctx.beginPath();
+      ctx.arc(0, 0, s * 0.92, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(0, 0, s * 0.52, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(0, 0, s * 0.22, 0, Math.PI * 2);
+      ctx.fill();
+      break;
+    }
+    case 'lounge': {
+      // Neon cocktail glass icon
+      ctx.beginPath();
+      ctx.moveTo(-s * 0.85, -s * 0.68);
+      ctx.lineTo(s * 0.85, -s * 0.68);
+      ctx.lineTo(0, s * 0.14);
+      ctx.closePath();
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(0, s * 0.14);
+      ctx.lineTo(0, s * 0.9);
+      ctx.moveTo(-s * 0.5, s * 0.9);
+      ctx.lineTo(s * 0.5, s * 0.9);
+      ctx.stroke();
+      break;
+    }
   }
 
   ctx.restore();

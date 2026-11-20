@@ -5,6 +5,7 @@ export interface RoadSegmentDef {
   id: string;
   name: string;
   isHighway: boolean;
+  isDirtTrail?: boolean;
   width: number;
   closed?: boolean;
   points: GpsPoint[];
@@ -19,22 +20,57 @@ export interface BridgeSpan {
   peakElevation: number;
 }
 
-// 5x Island Dimensions (~820m x 820m landmass surrounded by endless open ocean)
-export const ISLAND_BASE_RADIUS = 408;
-export const OUT_OF_BOUNDS_SEA_RADIUS = 565;
+export interface OverpassSpan {
+  id: string;
+  axis: 'x' | 'z';
+  centerX: number;
+  centerZ: number;
+  length: number;
+  rampLen: number;
+  width: number;
+  deckHeight: number;
+}
+
+export interface UnderpassSpan {
+  id: string;
+  axis: 'x' | 'z';
+  centerX: number;
+  centerZ: number;
+  length: number;
+  rampLen: number;
+  width: number;
+  depth: number;
+}
+
+export interface ParkingLotDef {
+  id: string;
+  name: string;
+  x: number;
+  z: number;
+  width: number;
+  depth: number;
+  rotation: number;
+  stallsPerRow: number;
+}
+
+// 15x Island Playable Area (~3.04km x 3.04km landmass, ~4.1km sea horizon)
+export const ISLAND_BASE_RADIUS = 1520;
+export const OUT_OF_BOUNDS_SEA_RADIUS = 2050;
 
 export function getIslandCoastRadius(angle: number): number {
-  const airportPeninsula = 42 * Math.exp(-Math.pow(angle - 2.38, 2) / 0.28);
+  const airportPeninsula = 185 * Math.exp(-Math.pow(angle - 2.42, 2) / 0.24);
+  const northCape = 120 * Math.exp(-Math.pow(angle + 1.55, 2) / 0.3);
   return (
     ISLAND_BASE_RADIUS +
     airportPeninsula +
-    26 * Math.sin(angle * 2 - 0.4) +
-    18 * Math.cos(angle * 3 + 0.7) +
-    10 * Math.sin(angle * 5)
+    northCape +
+    95 * Math.sin(angle * 2 - 0.4) +
+    64 * Math.cos(angle * 3 + 0.7) +
+    36 * Math.sin(angle * 5)
   );
 }
 
-export function getIslandOutlinePoints(segments = 96): GpsPoint[] {
+export function getIslandOutlinePoints(segments = 120): GpsPoint[] {
   const pts: GpsPoint[] = [];
   for (let i = 0; i < segments; i++) {
     const ang = (i / segments) * Math.PI * 2;
@@ -45,15 +81,73 @@ export function getIslandOutlinePoints(segments = 96): GpsPoint[] {
 }
 
 export const BRIDGE_SPANS: BridgeSpan[] = [
-  { id: 'bridge_central', x: 0, zStart: 118, zEnd: 158, width: 17, peakElevation: 2.3 },
-  { id: 'bridge_east_mid', x: 95, zStart: 118, zEnd: 158, width: 15, peakElevation: 2.1 },
-  { id: 'bridge_coral', x: 185, zStart: 118, zEnd: 158, width: 16, peakElevation: 2.2 },
-  { id: 'bridge_ring_east', x: 304, zStart: 116, zEnd: 160, width: 22, peakElevation: 2.6 },
+  { id: 'bridge_central', x: 0, zStart: 372, zEnd: 488, width: 22, peakElevation: 5.2 },
+  { id: 'bridge_east_mid', x: 240, zStart: 372, zEnd: 488, width: 18, peakElevation: 4.8 },
+  { id: 'bridge_coral', x: 520, zStart: 372, zEnd: 488, width: 20, peakElevation: 5.0 },
+  { id: 'bridge_ring_east', x: 960, zStart: 370, zEnd: 492, width: 26, peakElevation: 6.2 },
+  // North River crossings
+  { id: 'bridge_north_west', x: -360, zStart: -840, zEnd: -740, width: 20, peakElevation: 4.8 },
+  { id: 'bridge_north_east', x: 520, zStart: -840, zEnd: -740, width: 20, peakElevation: 4.8 },
+];
+
+export const OVERPASS_SPANS: OverpassSpan[] = [
+  {
+    id: 'overpass_midtown_skyway',
+    axis: 'x',
+    centerX: 0,
+    centerZ: -255,
+    length: 340,
+    rampLen: 70,
+    width: 18,
+    deckHeight: 7.4,
+  },
+  {
+    id: 'overpass_airport_express',
+    axis: 'z',
+    centerX: -620,
+    centerZ: 70,
+    length: 360,
+    rampLen: 72,
+    width: 18,
+    deckHeight: 7.4,
+  },
+];
+
+export const UNDERPASS_SPANS: UnderpassSpan[] = [
+  {
+    id: 'underpass_downtown_tunnel',
+    axis: 'z',
+    centerX: -195,
+    centerZ: -390,
+    length: 250,
+    rampLen: 55,
+    width: 17,
+    depth: 5.2,
+  },
+  {
+    id: 'underpass_coral_tunnel',
+    axis: 'x',
+    centerX: 380,
+    centerZ: 195,
+    length: 230,
+    rampLen: 50,
+    width: 16,
+    depth: 4.8,
+  },
+];
+
+export const PARKING_LOTS: ParkingLotDef[] = [
+  { id: 'park_downtown', name: 'Centrálne parkovisko Plaza', x: -120, z: -180, width: 46, depth: 34, rotation: 0, stallsPerRow: 8 },
+  { id: 'park_market', name: 'Parkovisko Ocean Market', x: -315, z: -265, width: 42, depth: 30, rotation: 0, stallsPerRow: 7 },
+  { id: 'park_hospital', name: 'Parkovisko Nemocnica & VCPD', x: -240, z: -610, width: 54, depth: 34, rotation: 0, stallsPerRow: 9 },
+  { id: 'park_coral', name: 'Plážové parkovisko Coral', x: 790, z: -110, width: 48, depth: 32, rotation: 0, stallsPerRow: 8 },
+  { id: 'park_marina', name: 'Prístavné parkovisko Marina', x: 460, z: 680, width: 46, depth: 32, rotation: 0, stallsPerRow: 8 },
+  { id: 'park_airport', name: 'Letiskové parkovisko Terminál', x: -740, z: 580, width: 64, depth: 38, rotation: 0, stallsPerRow: 10 },
 ];
 
 export function isBridgeAt(x: number, z: number): boolean {
   for (const b of BRIDGE_SPANS) {
-    if (z >= b.zStart && z <= b.zEnd && Math.abs(x - b.x) <= b.width * 0.52) {
+    if (z >= b.zStart && z <= b.zEnd && Math.abs(x - b.x) <= b.width * 0.56) {
       return true;
     }
   }
@@ -61,15 +155,57 @@ export function isBridgeAt(x: number, z: number): boolean {
 }
 
 export function getBridgeElevationAt(x: number, z: number): number {
+  let maxEl = 0;
   for (const b of BRIDGE_SPANS) {
     if (z >= b.zStart && z <= b.zEnd && Math.abs(x - b.x) <= b.width * 0.56) {
       const center = (b.zStart + b.zEnd) * 0.5;
       const halfSpan = (b.zEnd - b.zStart) * 0.5;
       const t = 1 - Math.abs(z - center) / halfSpan;
-      return Math.sin(Math.max(0, t) * Math.PI * 0.5) * b.peakElevation;
+      const el = Math.sin(Math.max(0, t) * Math.PI * 0.5) * b.peakElevation;
+      if (el > maxEl) maxEl = el;
     }
   }
-  return 0;
+  return maxEl;
+}
+
+export function getOverpassDeckHeightAt(x: number, z: number, curY: number): number | null {
+  for (const ov of OVERPASS_SPANS) {
+    const along = ov.axis === 'x' ? Math.abs(x - ov.centerX) : Math.abs(z - ov.centerZ);
+    const cross = ov.axis === 'x' ? Math.abs(z - ov.centerZ) : Math.abs(x - ov.centerX);
+    const halfLen = ov.length * 0.5;
+    if (along <= halfLen && cross <= ov.width * 0.52) {
+      const flatHalf = halfLen - ov.rampLen;
+      const rampH =
+        along <= flatHalf
+          ? ov.deckHeight
+          : ov.deckHeight * Math.max(0, 1 - (along - flatHalf) / ov.rampLen);
+      // Only snap onto elevated deck if entity is near/above deck or on the entry ramp
+      if (along > flatHalf - 6 || curY >= rampH - 2.4) {
+        return rampH;
+      }
+    }
+  }
+  return null;
+}
+
+export function getUnderpassFloorHeightAt(x: number, z: number, curY: number): number | null {
+  for (const un of UNDERPASS_SPANS) {
+    const along = un.axis === 'x' ? Math.abs(x - un.centerX) : Math.abs(z - un.centerZ);
+    const cross = un.axis === 'x' ? Math.abs(z - un.centerZ) : Math.abs(x - un.centerX);
+    const halfLen = un.length * 0.5;
+    if (along <= halfLen && cross <= un.width * 0.52) {
+      const flatHalf = halfLen - un.rampLen;
+      const depth =
+        along <= flatHalf
+          ? -un.depth
+          : -un.depth * Math.max(0, 1 - (along - flatHalf) / un.rampLen);
+      // Only drop into tunnel if entity is below surface lid or on entry ramp
+      if (along > flatHalf - 8 || curY < 0.8) {
+        return depth;
+      }
+    }
+  }
+  return null;
 }
 
 export function isIslandLandAt(x: number, z: number): boolean {
@@ -82,16 +218,17 @@ export function isOnBeachAt(x: number, z: number): boolean {
   const ang = Math.atan2(z, x);
   const coastR = getIslandCoastRadius(ang);
   const r = Math.hypot(x, z);
-  return r >= coastR - 28 && r <= coastR + 2;
+  return r >= coastR - 72 && r <= coastR + 6;
 }
 
 export function isWaterAt(x: number, z: number): boolean {
-  // Open Ocean surrounding the entire island
   if (!isIslandLandAt(x, z)) return true;
   // Southeast Marina Harbor Basin
-  if (x >= 208 && x <= 395 && z >= 215 && z <= 315) return true;
-  // Vice Canal cutting East-West across southern mid-island (excluding bridges)
-  if (x >= -108 && x <= 420 && z >= 124 && z <= 152 && !isBridgeAt(x, z)) return true;
+  if (x >= 560 && x <= 1280 && z >= 620 && z <= 1120) return true;
+  // Vice Canal East-West waterway
+  if (x >= -340 && x <= 1560 && z >= 392 && z <= 468 && !isBridgeAt(x, z)) return true;
+  // North Emerald River
+  if (x >= -820 && x <= 860 && z >= -815 && z <= -765 && !isBridgeAt(x, z)) return true;
   return false;
 }
 
@@ -99,7 +236,6 @@ export function isOutOfBoundsSeaAt(x: number, z: number): boolean {
   return Math.hypot(x, z) > OUT_OF_BOUNDS_SEA_RADIUS;
 }
 
-// Helper to sample smooth Catmull-Rom curves into dense polylines
 function sampleSpline(
   ctrl: [number, number][],
   samplesPerSeg: number,
@@ -107,7 +243,7 @@ function sampleSpline(
 ): GpsPoint[] {
   const vecs = ctrl.map(([x, z]) => new THREE.Vector3(x, 0, z));
   const curve = new THREE.CatmullRomCurve3(vecs, closed, 'catmullrom', 0.45);
-  const total = Math.max(8, ctrl.length * samplesPerSeg);
+  const total = Math.max(10, ctrl.length * samplesPerSeg);
   const raw = curve.getPoints(total);
   return raw.map((p) => ({ x: p.x, z: p.z }));
 }
@@ -121,56 +257,81 @@ function sampleCircle(cx: number, cz: number, radius: number, count = 36): GpsPo
   return pts;
 }
 
-// Build Curved Highways, S-Avenues, Roundabouts, and Urban Streets
+// Grand 15x Ring Highway (~8.5km full loop)
 const RING_CTRL: [number, number][] = [
-  [306, -20],
-  [292, 85],
-  [304, 138], // East highway bridge over Vice Canal
-  [272, 202],
-  [185, 292],
-  [65, 315],
-  [-55, 315],
-  [-185, 292],
-  [-288, 286],
-  [-332, 220],
-  [-325, 110],
-  [-325, -15],
-  [-295, -145],
-  [-210, -255],
-  [-85, -305],
-  [55, -308],
-  [188, -268],
-  [276, -165],
+  [1040, -90],
+  [990, 220],
+  [960, 430], // East highway bridge over Vice Canal
+  [900, 620],
+  [650, 980],
+  [240, 1080],
+  [-120, 1100],
+  [-490, 1060],
+  [-920, 1080],
+  [-1260, 860], // Airport perimeter west
+  [-1220, 440],
+  [-1100, -40],
+  [-960, -480],
+  [-740, -900],
+  [-360, -1080],
+  [120, -1140],
+  [640, -1020],
+  [940, -640],
 ];
 
 const NORTH_HIGHWAY_CTRL: [number, number][] = [
-  [-318, -55],
-  [-235, -162],
-  [-130, -208],
-  [0, -206],
-  [135, -192],
-  [230, -140],
-  [298, -60],
+  [-1080, -180],
+  [-740, -480],
+  [-360, -680],
+  [0, -680],
+  [360, -660],
+  [680, -460],
+  [1010, -190],
 ];
 
 const S_BOULEVARD_WEST_CTRL: [number, number][] = [
-  [-325, -15],
-  [-230, 12],
-  [-140, -22],
-  [-82, -48],
-  [-36, -20],
+  [-1100, -40],
+  [-720, 40],
+  [-460, -60],
+  [-240, -110],
+  [-60, -70],
 ];
 
 const S_BOULEVARD_EAST_CTRL: [number, number][] = [
-  [36, -20],
-  [95, 16],
-  [159, -20],
+  [60, -70],
+  [240, 40],
+  [474, -70],
 ];
 
 const S_BOULEVARD_COAST_CTRL: [number, number][] = [
-  [211, -20],
-  [262, -28],
-  [306, -20],
+  [566, -70],
+  [790, -85],
+  [1040, -90],
+];
+
+const TRAIL_NW_FOREST_CTRL: [number, number][] = [
+  [-740, -480],
+  [-860, -640],
+  [-1020, -760],
+  [-920, -940],
+  [-680, -960],
+  [-520, -840],
+];
+
+const TRAIL_NE_MEADOW_CTRL: [number, number][] = [
+  [520, -640],
+  [720, -860],
+  [940, -940],
+  [1080, -740],
+  [940, -640],
+];
+
+const TRAIL_SW_PALMS_CTRL: [number, number][] = [
+  [-490, 1060],
+  [-420, 860],
+  [-280, 740],
+  [-160, 880],
+  [-120, 1100],
 ];
 
 export const ROAD_SEGMENTS: RoadSegmentDef[] = [
@@ -178,52 +339,52 @@ export const ROAD_SEGMENTS: RoadSegmentDef[] = [
     id: 'coastal_ring_highway',
     name: 'Diaľničný okruh Leonida',
     isHighway: true,
-    width: 22,
+    width: 26,
     closed: true,
-    points: sampleSpline(RING_CTRL, 6, true),
+    points: sampleSpline(RING_CTRL, 8, true),
   },
   {
     id: 'north_foothill_highway',
     name: 'Severná horská diaľnica',
     isHighway: true,
-    width: 19,
+    width: 22,
     points: sampleSpline(NORTH_HIGHWAY_CTRL, 6, false),
   },
   {
     id: 'roundabout_central',
     name: 'Kruhový objazd Slnečné námestie',
     isHighway: false,
-    width: 16,
+    width: 18,
     closed: true,
-    points: sampleCircle(0, -20, 36, 36),
+    points: sampleCircle(0, -70, 60, 36),
   },
   {
     id: 'roundabout_coral',
     name: 'Kruhový objazd Coral Plaza',
     isHighway: false,
-    width: 14,
+    width: 16,
     closed: true,
-    points: sampleCircle(185, -20, 26, 30),
+    points: sampleCircle(520, -70, 46, 30),
   },
   {
     id: 's_boulevard_west',
     name: 'Západná S-trieda',
     isHighway: false,
-    width: 16,
+    width: 18,
     points: sampleSpline(S_BOULEVARD_WEST_CTRL, 6, false),
   },
   {
     id: 's_boulevard_east',
     name: 'Centrálna S-trieda',
     isHighway: false,
-    width: 16,
+    width: 18,
     points: sampleSpline(S_BOULEVARD_EAST_CTRL, 6, false),
   },
   {
     id: 's_boulevard_coast',
-    name: 'Pobrežný bulvár',
+    name: 'Pobrežný bulvár Coral',
     isHighway: false,
-    width: 15,
+    width: 17,
     points: sampleSpline(S_BOULEVARD_COAST_CTRL, 5, false),
   },
   // North-South Arterials
@@ -231,151 +392,170 @@ export const ROAD_SEGMENTS: RoadSegmentDef[] = [
     id: 'ave_west_midtown',
     name: 'Bayshore Avenue',
     isHighway: false,
-    width: 16,
+    width: 18,
     points: [
-      { x: -140, z: -288 },
-      { x: -140, z: -206 },
-      { x: -140, z: -102 },
-      { x: -140, z: -22 },
-      { x: -140, z: 75 },
-      { x: -140, z: 202 },
-      { x: -140, z: 298 },
+      { x: -360, z: -1080 },
+      { x: -360, z: -790 },
+      { x: -360, z: -680 },
+      { x: -360, z: -290 },
+      { x: -360, z: -60 },
+      { x: -360, z: 220 },
+      { x: -360, z: 540 },
+      { x: -360, z: 1060 },
     ],
   },
   {
     id: 'ave_central_north',
     name: 'Central Avenue Sever',
     isHighway: false,
-    width: 16,
+    width: 18,
     points: [
-      { x: 0, z: -308 },
-      { x: 0, z: -206 },
-      { x: 0, z: -102 },
-      { x: 0, z: -56 },
+      { x: 0, z: -1140 },
+      { x: 0, z: -680 },
+      { x: 0, z: -290 },
+      { x: 0, z: -130 },
     ],
   },
   {
     id: 'ave_central_south',
     name: 'Central Avenue Juh',
     isHighway: false,
-    width: 16,
+    width: 18,
     points: [
-      { x: 0, z: 16 },
-      { x: 0, z: 75 },
-      { x: 0, z: 138 },
-      { x: 0, z: 202 },
-      { x: 0, z: 315 },
+      { x: 0, z: -10 },
+      { x: 0, z: 220 },
+      { x: 0, z: 430 },
+      { x: 0, z: 540 },
+      { x: 0, z: 1090 },
     ],
   },
   {
     id: 'ave_east_mid',
     name: 'Midtown Bridge Road',
     isHighway: false,
-    width: 14,
+    width: 16,
     points: [
-      { x: 95, z: -198 },
-      { x: 95, z: -102 },
-      { x: 95, z: 16 },
-      { x: 95, z: 75 },
-      { x: 95, z: 138 },
-      { x: 95, z: 202 },
-      { x: 95, z: 310 },
+      { x: 240, z: -660 },
+      { x: 240, z: -290 },
+      { x: 240, z: 40 },
+      { x: 240, z: 220 },
+      { x: 240, z: 430 },
+      { x: 240, z: 540 },
+      { x: 240, z: 1080 },
     ],
   },
   {
     id: 'ave_coral_north',
     name: 'Coral Avenue Sever',
     isHighway: false,
-    width: 15,
+    width: 17,
     points: [
-      { x: 185, z: -268 },
-      { x: 185, z: -165 },
-      { x: 185, z: -102 },
-      { x: 185, z: -46 },
+      { x: 520, z: -1020 },
+      { x: 520, z: -790 },
+      { x: 520, z: -560 },
+      { x: 520, z: -290 },
+      { x: 520, z: -116 },
     ],
   },
   {
     id: 'ave_coral_south',
     name: 'Coral Avenue Juh',
     isHighway: false,
-    width: 15,
+    width: 17,
     points: [
-      { x: 185, z: 6 },
-      { x: 185, z: 75 },
-      { x: 185, z: 138 },
-      { x: 185, z: 202 },
-      { x: 185, z: 292 },
+      { x: 520, z: -24 },
+      { x: 520, z: 220 },
+      { x: 520, z: 430 },
+      { x: 520, z: 540 },
+      { x: 520, z: 980 },
     ],
   },
-  // Cross Streets
+  // East-West Cross Streets
   {
     id: 'street_civic_north',
     name: 'Nemocničná ulica',
     isHighway: false,
-    width: 15,
+    width: 17,
     points: [
-      { x: -255, z: -206 },
-      { x: -140, z: -206 },
-      { x: 0, z: -206 },
-      { x: 95, z: -198 },
-      { x: 245, z: -198 },
+      { x: -640, z: -680 },
+      { x: -360, z: -680 },
+      { x: 0, z: -680 },
+      { x: 240, z: -660 },
+      { x: 520, z: -660 },
+      { x: 860, z: -640 },
     ],
   },
   {
     id: 'street_midtown',
     name: 'Midtown Market Street',
     isHighway: false,
-    width: 15,
+    width: 17,
     points: [
-      { x: -292, z: -102 },
-      { x: -140, z: -102 },
-      { x: 0, z: -102 },
-      { x: 95, z: -102 },
-      { x: 185, z: -102 },
-      { x: 288, z: -102 },
+      { x: -960, z: -290 },
+      { x: -360, z: -290 },
+      { x: 0, z: -290 },
+      { x: 240, z: -290 },
+      { x: 520, z: -290 },
+      { x: 960, z: -290 },
     ],
   },
   {
     id: 'street_canal_north',
     name: 'Promenáda pri kanáli',
     isHighway: false,
-    width: 15,
+    width: 17,
     points: [
-      { x: -315, z: 75 },
-      { x: -225, z: 75 },
-      { x: -140, z: 75 },
-      { x: 0, z: 75 },
-      { x: 95, z: 75 },
-      { x: 185, z: 75 },
-      { x: 294, z: 75 },
+      { x: -1140, z: 220 },
+      { x: -620, z: 220 },
+      { x: -360, z: 220 },
+      { x: 0, z: 220 },
+      { x: 240, z: 220 },
+      { x: 520, z: 220 },
+      { x: 990, z: 220 },
     ],
   },
   {
     id: 'street_airport_north',
     name: 'Airport Boulevard',
     isHighway: false,
-    width: 15,
+    width: 18,
     points: [
-      { x: -326, z: 174 },
-      { x: -235, z: 174 },
-      { x: -140, z: 174 },
+      { x: -1240, z: 540 },
+      { x: -760, z: 540 },
+      { x: -360, z: 540 },
+      { x: 0, z: 540 },
+      { x: 240, z: 540 },
+      { x: 560, z: 540 },
     ],
   },
+  // Dirt Trails through Forests & Meadows
   {
-    id: 'street_marina_south',
-    name: 'Marina & Airport Road',
+    id: 'trail_nw_forest',
+    name: 'Borovicový lesný chodník',
     isHighway: false,
-    width: 15,
-    points: [
-      { x: -140, z: 202 },
-      { x: 0, z: 202 },
-      { x: 95, z: 202 },
-      { x: 200, z: 202 },
-    ],
+    isDirtTrail: true,
+    width: 9.5,
+    points: sampleSpline(TRAIL_NW_FOREST_CTRL, 6, false),
+  },
+  {
+    id: 'trail_ne_meadow',
+    name: 'Lúčna cesta Emerald Hills',
+    isHighway: false,
+    isDirtTrail: true,
+    width: 9.5,
+    points: sampleSpline(TRAIL_NE_MEADOW_CTRL, 6, false),
+  },
+  {
+    id: 'trail_sw_palms',
+    name: 'Palmová pobrežná cestička',
+    isHighway: false,
+    isDirtTrail: true,
+    width: 9.5,
+    points: sampleSpline(TRAIL_SW_PALMS_CTRL, 6, false),
   },
 ];
 
-// Graph Nodes & Curved Polyline Edges for Interactive GPS Navigation
+// Graph Nodes & Edges for 15x Interactive GPS Navigation
 interface GraphNode {
   id: string;
   x: number;
@@ -385,67 +565,69 @@ interface GraphNode {
 
 const ROAD_GRAPH: Map<string, GraphNode> = (() => {
   const nodes = new Map<string, GraphNode>();
-
   const addNode = (id: string, x: number, z: number) => {
     nodes.set(id, { id, x, z, edges: [] });
   };
 
-  // Ring & Highway junction nodes
-  addNode('ring_e', 306, -20);
-  addNode('ring_es', 292, 85);
-  addNode('ring_bridge', 304, 138);
-  addNode('ring_se', 272, 202);
-  addNode('ring_s_coral', 185, 292);
-  addNode('ring_s_mid', 65, 315);
-  addNode('ring_s_cent', 0, 315);
-  addNode('ring_sw', -185, 292);
-  addNode('ring_w_airport', -332, 220);
-  addNode('ring_w_south', -325, 110);
-  addNode('ring_w', -325, -15);
-  addNode('ring_wn', -295, -145);
-  addNode('ring_nw', -210, -255);
-  addNode('ring_n_west', -140, -288);
-  addNode('ring_n_cent', 0, -308);
-  addNode('ring_n_east', 185, -268);
-  addNode('ring_ne', 276, -165);
+  addNode('ring_e', 1040, -90);
+  addNode('ring_es', 990, 220);
+  addNode('ring_bridge', 960, 430);
+  addNode('ring_se', 900, 620);
+  addNode('ring_s_coral', 650, 980);
+  addNode('ring_s_mid', 240, 1080);
+  addNode('ring_s_cent', 0, 1090);
+  addNode('ring_sw', -490, 1060);
+  addNode('ring_w_airport', -1240, 540);
+  addNode('ring_w_south', -1140, 220);
+  addNode('ring_w', -1100, -40);
+  addNode('ring_wn', -960, -480);
+  addNode('ring_nw', -740, -900);
+  addNode('ring_n_west', -360, -1080);
+  addNode('ring_n_cent', 0, -1140);
+  addNode('ring_n_east', 520, -1020);
+  addNode('ring_ne', 940, -640);
 
   // Roundabouts
-  addNode('rc_n', 0, -56);
-  addNode('rc_s', 0, 16);
-  addNode('rc_w', -36, -20);
-  addNode('rc_e', 36, -20);
+  addNode('rc_n', 0, -130);
+  addNode('rc_s', 0, -10);
+  addNode('rc_w', -60, -70);
+  addNode('rc_e', 60, -70);
 
-  addNode('rco_n', 185, -46);
-  addNode('rco_s', 185, 6);
-  addNode('rco_w', 159, -20);
-  addNode('rco_e', 211, -20);
+  addNode('rco_n', 520, -116);
+  addNode('rco_s', 520, -24);
+  addNode('rco_w', 474, -70);
+  addNode('rco_e', 566, -70);
 
-  // Inner city intersections
-  addNode('w_civic', -140, -206);
-  addNode('w_mid', -140, -102);
-  addNode('w_s', -140, -22);
-  addNode('w_canal', -140, 75);
-  addNode('w_marina', -140, 202);
+  // West avenue
+  addNode('w_civic', -360, -680);
+  addNode('w_mid', -360, -290);
+  addNode('w_s', -360, -60);
+  addNode('w_canal', -360, 220);
+  addNode('w_marina', -360, 540);
 
-  addNode('c_civic', 0, -206);
-  addNode('c_mid', 0, -102);
-  addNode('c_canal', 0, 75);
-  addNode('c_marina', 0, 202);
+  // Central avenue
+  addNode('c_civic', 0, -680);
+  addNode('c_mid', 0, -290);
+  addNode('c_canal', 0, 220);
+  addNode('c_marina', 0, 540);
 
-  addNode('e_civic', 95, -198);
-  addNode('e_mid', 95, -102);
-  addNode('e_sb', 95, 16);
-  addNode('e_canal', 95, 75);
-  addNode('e_marina', 95, 202);
+  // East mid avenue
+  addNode('e_civic', 240, -660);
+  addNode('e_mid', 240, -290);
+  addNode('e_sb', 240, 40);
+  addNode('e_canal', 240, 220);
+  addNode('e_marina', 240, 540);
 
-  addNode('co_civic', 185, -165);
-  addNode('co_mid', 185, -102);
-  addNode('co_canal', 185, 75);
-  addNode('co_marina', 185, 202);
+  // Coral avenue
+  addNode('co_civic', 520, -660);
+  addNode('co_mid', 520, -290);
+  addNode('co_canal', 520, 220);
+  addNode('co_marina', 520, 540);
 
-  addNode('nh_w', -235, -162);
-  addNode('nh_e', 230, -140);
-  addNode('sh_far_e', 245, -198);
+  // Airport & Foothills
+  addNode('air_gate', -760, 540);
+  addNode('nh_w', -740, -480);
+  addNode('nh_e', 680, -460);
 
   const connect = (aId: string, bId: string, viaCtrl?: [number, number][]) => {
     const na = nodes.get(aId);
@@ -465,53 +647,52 @@ const ROAD_GRAPH: Map<string, GraphNode> = (() => {
     nb.edges.push({ to: aId, cost, via: [...pts].reverse() });
   };
 
-  // Ring Highway Connections (smooth curved segments)
-  connect('ring_e', 'ring_es', [[302, 32]]);
+  // Coastal Ring
+  connect('ring_e', 'ring_es', [[1020, 70]]);
   connect('ring_es', 'ring_bridge');
-  connect('ring_bridge', 'ring_se', [[292, 174]]);
-  connect('ring_se', 'ring_s_coral', [[236, 256]]);
-  connect('ring_s_coral', 'ring_s_mid', [[128, 310]]);
+  connect('ring_bridge', 'ring_se');
+  connect('ring_se', 'ring_s_coral', [[800, 820]]);
+  connect('ring_s_coral', 'ring_s_mid', [[440, 1050]]);
   connect('ring_s_mid', 'ring_s_cent');
-  connect('ring_s_cent', 'ring_sw', [[-95, 312]]);
-  connect('ring_sw', 'ring_w_airport', [[-288, 286]]);
-  connect('ring_w_airport', 'ring_w_south', [[-332, 165]]);
-  connect('ring_w_south', 'ring_w', [[-330, 48]]);
-  connect('ring_w', 'ring_wn', [[-318, -82]]);
-  connect('ring_wn', 'ring_nw', [[-260, -210]]);
-  connect('ring_nw', 'ring_n_west', [[-176, -276]]);
-  connect('ring_n_west', 'ring_n_cent', [[-75, -306]]);
-  connect('ring_n_cent', 'ring_n_east', [[98, -296]]);
-  connect('ring_n_east', 'ring_ne', [[238, -225]]);
-  connect('ring_ne', 'ring_e', [[298, -96]]);
+  connect('ring_s_cent', 'ring_sw', [[-280, 1090]]);
+  connect('ring_sw', 'ring_w_airport', [[-920, 1080], [-1260, 860]]);
+  connect('ring_w_airport', 'ring_w_south', [[-1220, 400]]);
+  connect('ring_w_south', 'ring_w');
+  connect('ring_w', 'ring_wn', [[-1040, -260]]);
+  connect('ring_wn', 'ring_nw');
+  connect('ring_nw', 'ring_n_west');
+  connect('ring_n_west', 'ring_n_cent');
+  connect('ring_n_cent', 'ring_n_east', [[280, -1100]]);
+  connect('ring_n_east', 'ring_ne', [[780, -860]]);
+  connect('ring_ne', 'ring_e', [[1020, -360]]);
 
-  // North Foothill Highway
-  connect('ring_w', 'nh_w', [[-312, -62]]);
-  connect('nh_w', 'w_civic', [[-188, -190]]);
+  // North Highway
+  connect('ring_w', 'nh_w', [[-960, -220]]);
+  connect('nh_w', 'w_civic');
   connect('w_civic', 'c_civic');
   connect('c_civic', 'e_civic');
   connect('e_civic', 'co_civic');
   connect('co_civic', 'nh_e');
-  connect('nh_e', 'ring_e', [[285, -80]]);
-  connect('e_civic', 'sh_far_e');
-  connect('sh_far_e', 'ring_ne');
+  connect('nh_e', 'ring_e', [[880, -320]]);
+  connect('co_civic', 'ring_ne');
 
-  // Roundabouts arcs
-  connect('rc_n', 'rc_e', [[26, -46]]);
-  connect('rc_e', 'rc_s', [[26, 6]]);
-  connect('rc_s', 'rc_w', [[-26, 6]]);
-  connect('rc_w', 'rc_n', [[-26, -46]]);
+  // Roundabouts
+  connect('rc_n', 'rc_e', [[42, -112]]);
+  connect('rc_e', 'rc_s', [[42, -28]]);
+  connect('rc_s', 'rc_w', [[-42, -28]]);
+  connect('rc_w', 'rc_n', [[-42, -112]]);
 
-  connect('rco_n', 'rco_e', [[204, -39]]);
-  connect('rco_e', 'rco_s', [[204, -1]]);
-  connect('rco_s', 'rco_w', [[166, -1]]);
-  connect('rco_w', 'rco_n', [[166, -39]]);
+  connect('rco_n', 'rco_e', [[554, -104]]);
+  connect('rco_e', 'rco_s', [[554, -36]]);
+  connect('rco_s', 'rco_w', [[486, -36]]);
+  connect('rco_w', 'rco_n', [[486, -104]]);
 
   // S-Boulevard
-  connect('ring_w', 'w_s', [[-230, 12]]);
-  connect('w_s', 'rc_w', [[-82, -48]]);
-  connect('rc_e', 'e_sb', [[68, 4]]);
-  connect('e_sb', 'rco_w', [[128, 4]]);
-  connect('rco_e', 'ring_e', [[262, -28]]);
+  connect('ring_w', 'w_s', [[-720, 40]]);
+  connect('w_s', 'rc_w', [[-240, -110]]);
+  connect('rc_e', 'e_sb', [[150, 10]]);
+  connect('e_sb', 'rco_w', [[360, 10]]);
+  connect('rco_e', 'ring_e', [[790, -85]]);
 
   // N-S Avenues
   connect('ring_n_west', 'w_civic');
@@ -541,20 +722,21 @@ const ROAD_GRAPH: Map<string, GraphNode> = (() => {
   connect('co_canal', 'co_marina');
   connect('co_marina', 'ring_s_coral');
 
-  // Cross-streets
+  // Cross Streets
+  connect('ring_wn', 'w_mid', [[-660, -340]]);
   connect('w_mid', 'c_mid');
   connect('c_mid', 'e_mid');
   connect('e_mid', 'co_mid');
-  connect('co_mid', 'ring_ne', [[260, -108]]);
-  connect('w_mid', 'ring_wn', [[-245, -106]]);
+  connect('co_mid', 'ring_e', [[820, -250]]);
 
-  connect('ring_w_south', 'w_canal', [[-235, 78]]);
+  connect('ring_w_south', 'w_canal', [[-620, 220]]);
   connect('w_canal', 'c_canal');
   connect('c_canal', 'e_canal');
   connect('e_canal', 'co_canal');
   connect('co_canal', 'ring_es');
 
-  connect('ring_w_airport', 'w_marina', [[-326, 174], [-235, 174], [-140, 174]]);
+  connect('ring_w_airport', 'air_gate');
+  connect('air_gate', 'w_marina');
   connect('w_marina', 'c_marina');
   connect('c_marina', 'e_marina');
   connect('e_marina', 'co_marina');
@@ -582,14 +764,13 @@ export function computeGpsRoute(
   targetZ: number
 ): GpsPoint[] {
   const directDist = Math.hypot(targetX - startX, targetZ - startZ);
-  if (directDist < 34) {
+  if (directDist < 65) {
     return [
       { x: startX, z: startZ },
       { x: targetX, z: targetZ },
     ];
   }
 
-  // Direct route if player or destination is out on open ocean
   if (!isIslandLandAt(startX, startZ) || !isIslandLandAt(targetX, targetZ)) {
     return [
       { x: startX, z: startZ },
@@ -656,7 +837,7 @@ export function computeGpsRoute(
   for (const chain of edgeChains) {
     for (const pt of chain) {
       const last = route[route.length - 1];
-      if (!last || Math.hypot(pt.x - last.x, pt.z - last.z) > 1.5) {
+      if (!last || Math.hypot(pt.x - last.x, pt.z - last.z) > 2.5) {
         route.push(pt);
       }
     }
@@ -665,65 +846,59 @@ export function computeGpsRoute(
   return route;
 }
 
-// Smooth Closed Traffic Loops for Autonomous Curved Driving (Highway, Inner S-Loop, Cross-Bridge Loop)
+// Smooth Closed Traffic Loops across the 15x Island
 export const TRAFFIC_LOOP_PATHS: GpsPoint[][] = [
-  // Loop 1: Coastal Ring Highway (Clockwise)
-  sampleSpline(RING_CTRL, 8, true),
-  // Loop 2: Coastal Ring Highway (Counter-Clockwise)
-  sampleSpline([...RING_CTRL].reverse(), 8, true),
-  // Loop 3: North Highway + Midtown Loop
+  sampleSpline(RING_CTRL, 10, true),
+  sampleSpline([...RING_CTRL].reverse(), 10, true),
   sampleSpline(
     [
-      [-310, -45],
-      [-235, -162],
-      [-140, -206],
-      [0, -206],
-      [135, -192],
-      [230, -140],
-      [285, -65],
-      [270, -20],
-      [185, -102],
-      [0, -102],
-      [-140, -102],
-      [-240, -100],
+      [-1050, -160],
+      [-740, -480],
+      [-360, -680],
+      [0, -680],
+      [360, -660],
+      [680, -460],
+      [920, -240],
+      [520, -290],
+      [0, -290],
+      [-360, -290],
+      [-720, -240],
     ],
-    6,
+    7,
     true
   ),
-  // Loop 4: Central Bridges & Marina Loop
   sampleSpline(
     [
-      [0, -56],
-      [28, -42],
-      [95, 16],
-      [95, 138],
-      [95, 202],
-      [185, 202],
-      [185, 138],
-      [185, 6],
-      [159, -20],
-      [95, -102],
-      [0, -102],
+      [0, -130],
+      [60, -70],
+      [240, 40],
+      [240, 430],
+      [240, 540],
+      [520, 540],
+      [520, 430],
+      [520, -24],
+      [474, -70],
+      [240, -290],
+      [0, -290],
     ],
-    6,
+    7,
     true
   ),
-  // Loop 5: West Downtown & Airport Loop
   sampleSpline(
     [
-      [-140, -206],
-      [0, -206],
-      [0, -56],
-      [-36, -20],
-      [-82, -48],
-      [-140, -22],
-      [-140, 202],
-      [-245, 202],
-      [-285, 120],
-      [-230, 12],
-      [-140, -102],
+      [-360, -680],
+      [0, -680],
+      [0, -130],
+      [-60, -70],
+      [-240, -110],
+      [-360, -60],
+      [-360, 540],
+      [-760, 540],
+      [-1140, 220],
+      [-720, 40],
+      [-360, -290],
     ],
-    6,
+    7,
     true
   ),
 ];

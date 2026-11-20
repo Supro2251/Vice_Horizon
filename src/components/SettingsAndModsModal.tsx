@@ -21,6 +21,8 @@ import {
   GraphicsPreset,
   HudThemeId,
   KeyAction,
+  StickControlConfig,
+  VehicleControlCategory,
 } from '../types/game';
 import { DEFAULT_SETTINGS, HUD_THEME_PRESETS } from '../data/defaults';
 import { formatKeyCode, PLAYSTATION_GLYPHS, XBOX_GLYPHS } from '../engine/input';
@@ -34,8 +36,11 @@ interface SettingsAndModsModalProps {
   controllerConnected: boolean;
   controllerType: 'playstation' | 'xbox' | 'none';
   controllerName: string;
+  gameClockStr: string;
+  gameTimeNormalized: number;
   initialTab?: 'graphics' | 'audio' | 'controls' | 'mods' | 'cloud';
   onUpdateSettings: (next: GameSettings) => void;
+  onSetTimeOfDay: (normalized: number) => void;
   onSignIn: () => void;
   onSignOut: () => void;
   onSaveCloud: () => void;
@@ -61,6 +66,7 @@ const KEY_ACTION_LABELS: { action: KeyAction; label: string }[] = [
   { action: 'missions', label: 'Misie' },
   { action: 'openMap', label: 'Otvoriť mapu mesta a GPS' },
   { action: 'toggleDock', label: 'Otvoriť / Zavrieť spodnú lištu' },
+  { action: 'phone', label: 'Vytiahnuť telefón (Priatelia / Cheaty)' },
   { action: 'horn', label: 'Klaksón' },
 ];
 
@@ -76,7 +82,19 @@ const PAD_ACTION_LABELS: { action: GamepadButtonAction; label: string }[] = [
   { action: 'characterWheel', label: 'Prepnutie postáv' },
   { action: 'openMap', label: 'Otvoriť mapu mesta a GPS' },
   { action: 'toggleDock', label: 'Otvoriť / Zavrieť spodnú lištu' },
+  { action: 'phone', label: 'Telefón' },
   { action: 'pause', label: 'Menu / Pauza' },
+];
+
+const CONTROL_CATEGORIES: { id: 'all' | VehicleControlCategory; label: string }[] = [
+  { id: 'all', label: 'Globálne (Všetko)' },
+  { id: 'foot', label: 'Pešo' },
+  { id: 'car', label: 'Auto' },
+  { id: 'motorcycle', label: 'Motorka' },
+  { id: 'boat', label: 'Čln / Loď' },
+  { id: 'plane', label: 'Lietadlo' },
+  { id: 'fighter_jet', label: 'Stíhačka' },
+  { id: 'helicopter', label: 'Vrtuľník' },
 ];
 
 export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
@@ -88,8 +106,11 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
   controllerConnected,
   controllerType,
   controllerName,
+  gameClockStr,
+  gameTimeNormalized,
   initialTab = 'graphics',
   onUpdateSettings,
+  onSetTimeOfDay,
   onSignIn,
   onSignOut,
   onSaveCloud,
@@ -97,6 +118,7 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
   onClose,
 }) => {
   const [tab, setTab] = useState<'graphics' | 'audio' | 'controls' | 'mods' | 'cloud'>(initialTab);
+  const [selectedControlCat, setSelectedControlCat] = useState<'all' | VehicleControlCategory>('all');
   const [rebindingKey, setRebindingKey] = useState<KeyAction | null>(null);
   const [rebindingPad, setRebindingPad] = useState<GamepadButtonAction | null>(null);
   const [modJsonText, setModJsonText] = useState('');
@@ -107,6 +129,96 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
   }, [initialTab]);
 
   const accent = settings.hudMod.accentColor;
+
+  const applyRebindKey = (action: KeyAction, code: string) => {
+    if (selectedControlCat === 'all') {
+      onUpdateSettings({
+        ...settings,
+        controls: {
+          ...settings.controls,
+          keyBindings: {
+            ...settings.controls.keyBindings,
+            [action]: code,
+          },
+        },
+      });
+    } else {
+      const prevOverrides = settings.controls.vehicleOverrides || {};
+      const catProfile = prevOverrides[selectedControlCat] || { keyBindings: {}, gamepadBindings: {} };
+      onUpdateSettings({
+        ...settings,
+        controls: {
+          ...settings.controls,
+          vehicleOverrides: {
+            ...prevOverrides,
+            [selectedControlCat]: {
+              ...catProfile,
+              keyBindings: {
+                ...catProfile.keyBindings,
+                [action]: code,
+              },
+            },
+          },
+        },
+      });
+    }
+  };
+
+  const applyRebindPad = (action: GamepadButtonAction, btn: number) => {
+    if (selectedControlCat === 'all') {
+      onUpdateSettings({
+        ...settings,
+        controls: {
+          ...settings.controls,
+          gamepadBindings: {
+            ...settings.controls.gamepadBindings,
+            [action]: btn,
+          },
+        },
+      });
+    } else {
+      const prevOverrides = settings.controls.vehicleOverrides || {};
+      const catProfile = prevOverrides[selectedControlCat] || { keyBindings: {}, gamepadBindings: {} };
+      onUpdateSettings({
+        ...settings,
+        controls: {
+          ...settings.controls,
+          vehicleOverrides: {
+            ...prevOverrides,
+            [selectedControlCat]: {
+              ...catProfile,
+              gamepadBindings: {
+                ...catProfile.gamepadBindings,
+                [action]: btn,
+              },
+            },
+          },
+        },
+      });
+    }
+  };
+
+  const updateVehicleStickConfig = (patch: Partial<StickControlConfig>) => {
+    if (selectedControlCat === 'all') return;
+    const prevOverrides = settings.controls.vehicleOverrides || {};
+    const catProfile = prevOverrides[selectedControlCat] || { keyBindings: {}, gamepadBindings: {} };
+    onUpdateSettings({
+      ...settings,
+      controls: {
+        ...settings.controls,
+        vehicleOverrides: {
+          ...prevOverrides,
+          [selectedControlCat]: {
+            ...catProfile,
+            stickConfig: {
+              ...(catProfile.stickConfig || {}),
+              ...patch,
+            },
+          },
+        },
+      },
+    });
+  };
 
   // Listen for keyboard/mouse rebinding
   useEffect(() => {
@@ -119,33 +231,14 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
         setRebindingKey(null);
         return;
       }
-      onUpdateSettings({
-        ...settings,
-        controls: {
-          ...settings.controls,
-          keyBindings: {
-            ...settings.controls.keyBindings,
-            [rebindingKey]: e.code,
-          },
-        },
-      });
+      applyRebindKey(rebindingKey, e.code);
       setRebindingKey(null);
     };
 
     const onMouse = (e: MouseEvent) => {
       e.preventDefault();
       e.stopPropagation();
-      const code = `Mouse${e.button}`;
-      onUpdateSettings({
-        ...settings,
-        controls: {
-          ...settings.controls,
-          keyBindings: {
-            ...settings.controls.keyBindings,
-            [rebindingKey]: code,
-          },
-        },
-      });
+      applyRebindKey(rebindingKey, `Mouse${e.button}`);
       setRebindingKey(null);
     };
 
@@ -155,7 +248,7 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
       window.removeEventListener('keydown', onKey, true);
       window.removeEventListener('mousedown', onMouse, true);
     };
-  }, [rebindingKey, settings, onUpdateSettings]);
+  }, [rebindingKey, selectedControlCat, settings]);
 
   // Poll Gamepad button for controller rebinding
   useEffect(() => {
@@ -169,16 +262,7 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
         if (!p || !p.connected) continue;
         for (let b = 0; b < p.buttons.length; b++) {
           if (p.buttons[b].pressed || p.buttons[b].value > 0.6) {
-            onUpdateSettings({
-              ...settings,
-              controls: {
-                ...settings.controls,
-                gamepadBindings: {
-                  ...settings.controls.gamepadBindings,
-                  [rebindingPad]: b,
-                },
-              },
-            });
+            applyRebindPad(rebindingPad, b);
             setRebindingPad(null);
             return;
           }
@@ -190,7 +274,7 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
       active = false;
       clearInterval(interval);
     };
-  }, [rebindingPad, settings, onUpdateSettings]);
+  }, [rebindingPad, selectedControlCat, settings]);
 
   const applyGraphicsPreset = (preset: GraphicsPreset) => {
     const presets: Record<GraphicsPreset, Partial<GameSettings['graphics']>> = {
@@ -687,27 +771,163 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
                 </div>
               </div>
 
+              {/* Per-Vehicle Profile Selector */}
+              <div className="p-4 rounded-xl bg-slate-900/60 border border-white/10 space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <div className="text-xs font-semibold text-white">Profil ovládania podľa vozidla</div>
+                    <div className="text-[11px] text-slate-400">
+                      Nastav si špeciálne klávesy alebo tlačidlá ovládača samostatne pre auto, loď, lietadlo či vrtuľník.
+                    </div>
+                  </div>
+                  {selectedControlCat !== 'all' && settings.controls.vehicleOverrides?.[selectedControlCat] && (
+                    <button
+                      onClick={() => {
+                        const nextOverrides = { ...(settings.controls.vehicleOverrides || {}) };
+                        delete nextOverrides[selectedControlCat];
+                        onUpdateSettings({
+                          ...settings,
+                          controls: { ...settings.controls, vehicleOverrides: nextOverrides },
+                        });
+                      }}
+                      className="px-2.5 py-1 rounded bg-rose-500/15 text-rose-300 text-[11px] hover:bg-rose-500/25"
+                    >
+                      Zrušiť vlastný profil
+                    </button>
+                  )}
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {CONTROL_CATEGORIES.map((cat) => {
+                    const active = selectedControlCat === cat.id;
+                    const hasCustom =
+                      cat.id !== 'all' && Boolean(settings.controls.vehicleOverrides?.[cat.id]);
+                    return (
+                      <button
+                        key={cat.id}
+                        onClick={() => setSelectedControlCat(cat.id)}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
+                          active
+                            ? 'bg-white text-slate-950 border-white font-semibold'
+                            : 'bg-slate-950 text-slate-300 border-white/10 hover:border-white/25'
+                        }`}
+                      >
+                        {cat.label}
+                        {hasCustom ? ' *' : ''}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {selectedControlCat !== 'all' && (() => {
+                  const defaultCatStick: StickControlConfig = {
+                    moveStick: 'left',
+                    pitchInvert: selectedControlCat === 'plane' || selectedControlCat === 'fighter_jet',
+                    yawSource:
+                      selectedControlCat === 'plane' || selectedControlCat === 'fighter_jet'
+                        ? 'bumpers'
+                        : 'left_x',
+                  };
+                  const curStick: StickControlConfig = {
+                    ...defaultCatStick,
+                    ...(settings.controls.vehicleOverrides?.[selectedControlCat]?.stickConfig || {}),
+                  };
+                  return (
+                    <div className="pt-3 mt-2 border-t border-white/10 grid grid-cols-1 md:grid-cols-3 gap-3">
+                      <div className="space-y-1">
+                        <span className="text-[11px] text-slate-400">Hlavná páčka pohybu / náklonu</span>
+                        <div className="grid grid-cols-2 gap-1.5">
+                          {(
+                            [
+                              { id: 'left', label: 'Ľavá páčka' },
+                              { id: 'right', label: 'Pravá páčka' },
+                            ] as const
+                          ).map((opt) => (
+                            <button
+                              key={opt.id}
+                              onClick={() => updateVehicleStickConfig({ moveStick: opt.id })}
+                              className={`py-1.5 px-2 rounded-lg text-[11px] font-medium border ${
+                                curStick.moveStick === opt.id
+                                  ? 'bg-white text-slate-950 border-white font-semibold'
+                                  : 'bg-slate-950 text-slate-300 border-white/10'
+                              }`}
+                            >
+                              {opt.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="space-y-1">
+                        <span className="text-[11px] text-slate-400">Zdroj smerovky / zatáčania</span>
+                        <div className="grid grid-cols-3 gap-1">
+                          {(
+                            [
+                              { id: 'bumpers', label: 'L1 / R1' },
+                              { id: 'left_x', label: 'Ľavá X' },
+                              { id: 'right_x', label: 'Pravá X' },
+                            ] as const
+                          ).map((opt) => (
+                            <button
+                              key={opt.id}
+                              onClick={() => updateVehicleStickConfig({ yawSource: opt.id })}
+                              className={`py-1.5 px-1.5 rounded-lg text-[11px] font-medium border ${
+                                curStick.yawSource === opt.id
+                                  ? 'bg-white text-slate-950 border-white font-semibold'
+                                  : 'bg-slate-950 text-slate-300 border-white/10'
+                              }`}
+                            >
+                              {opt.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <label className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-slate-950/80 border border-white/10 cursor-pointer self-end">
+                        <div>
+                          <div className="text-[11px] font-medium text-slate-200">Páčka dole = nos hore</div>
+                          <div className="text-[10px] text-slate-400">Invertovaná výškovka letu</div>
+                        </div>
+                        <input
+                          type="checkbox"
+                          checked={curStick.pitchInvert}
+                          onChange={(e) => updateVehicleStickConfig({ pitchInvert: e.target.checked })}
+                          className="w-4 h-4 accent-amber-500"
+                        />
+                      </label>
+                    </div>
+                  );
+                })()}
+              </div>
+
               {/* Remapping Tables */}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                 <div className="space-y-2">
-                  <h3 className="text-xs font-semibold text-slate-300">Mapovanie klávesnice a myši</h3>
+                  <h3 className="text-xs font-semibold text-slate-300">
+                    Mapovanie klávesnice a myši ({CONTROL_CATEGORIES.find((c) => c.id === selectedControlCat)?.label})
+                  </h3>
                   <div className="rounded-xl border border-white/10 divide-y divide-white/5 bg-slate-900/50">
                     {KEY_ACTION_LABELS.map((item) => {
                       const waiting = rebindingKey === item.action;
+                      const overrideCode =
+                        selectedControlCat !== 'all'
+                          ? settings.controls.vehicleOverrides?.[selectedControlCat]?.keyBindings?.[item.action]
+                          : undefined;
+                      const effectiveCode = overrideCode ?? settings.controls.keyBindings[item.action];
                       return (
                         <div
                           key={item.action}
                           className="px-3.5 py-2 flex items-center justify-between text-xs"
                         >
-                          <span className="text-slate-300">{item.label}</span>
+                          <span className="text-slate-300">
+                            {item.label}
+                            {overrideCode ? <span className="ml-1.5 text-[10px] text-sky-400">(vlastné)</span> : null}
+                          </span>
                           <button
                             onClick={() => setRebindingKey(item.action)}
                             className="px-2.5 py-1 rounded bg-slate-800 border border-white/10 font-mono-tabular text-white hover:border-white/30 min-w-[84px] text-center"
                             style={waiting ? { borderColor: accent, color: accent } : undefined}
                           >
-                            {waiting
-                              ? 'Stlač kláves...'
-                              : formatKeyCode(settings.controls.keyBindings[item.action])}
+                            {waiting ? 'Stlač kláves...' : formatKeyCode(effectiveCode)}
                           </button>
                         </div>
                       );
@@ -717,18 +937,25 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
 
                 <div className="space-y-2">
                   <h3 className="text-xs font-semibold text-slate-300">
-                    Mapovanie PS4 / PS5 ovládača (DualShock / DualSense)
+                    Mapovanie PS4 / PS5 ovládača ({CONTROL_CATEGORIES.find((c) => c.id === selectedControlCat)?.label})
                   </h3>
                   <div className="rounded-xl border border-white/10 divide-y divide-white/5 bg-slate-900/50">
                     {PAD_ACTION_LABELS.map((item) => {
                       const waiting = rebindingPad === item.action;
-                      const btnIdx = settings.controls.gamepadBindings[item.action];
+                      const overrideBtn =
+                        selectedControlCat !== 'all'
+                          ? settings.controls.vehicleOverrides?.[selectedControlCat]?.gamepadBindings?.[item.action]
+                          : undefined;
+                      const btnIdx = overrideBtn ?? settings.controls.gamepadBindings[item.action];
                       return (
                         <div
                           key={item.action}
                           className="px-3.5 py-2 flex items-center justify-between text-xs"
                         >
-                          <span className="text-slate-300">{item.label}</span>
+                          <span className="text-slate-300">
+                            {item.label}
+                            {overrideBtn !== undefined ? <span className="ml-1.5 text-[10px] text-sky-400">(vlastné)</span> : null}
+                          </span>
                           <button
                             onClick={() => setRebindingPad(item.action)}
                             className="px-2.5 py-1 rounded bg-slate-800 border border-white/10 font-mono-tabular text-white hover:border-white/30 min-w-[92px] text-center"
@@ -873,13 +1100,19 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
                     </label>
                   ))}
 
-                  <div className="pt-2 space-y-1.5">
-                    <span className="text-xs text-slate-300">Denná doba a atmosféra</span>
-                    <div className="grid grid-cols-3 gap-1.5">
+                  <div className="pt-2 space-y-2">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-slate-300">Denná doba a atmosféra</span>
+                      <span className="font-mono-tabular text-amber-300 font-semibold">
+                        Čas v hre: {gameClockStr}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-4 gap-1.5">
                       {(
                         [
-                          { id: 'sunset', label: 'Západ slnka' },
-                          { id: 'noon', label: 'Poludnie' },
+                          { id: 'auto', label: 'Auto (3×)' },
+                          { id: 'sunset', label: 'Západ' },
+                          { id: 'noon', label: 'Deň' },
                           { id: 'night', label: 'Noc' },
                         ] as const
                       ).map((tod) => (
@@ -901,6 +1134,16 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
                         </button>
                       ))}
                     </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.01}
+                      value={gameTimeNormalized}
+                      onChange={(e) => onSetTimeOfDay(Number(e.target.value))}
+                      className="w-full accent-amber-500"
+                      title="Manuálny posuv času v hre"
+                    />
                   </div>
                 </div>
               </div>

@@ -4,6 +4,7 @@ import {
   DEFAULT_CHARACTERS,
   DEFAULT_INVENTORY,
   DEFAULT_MISSIONS,
+  DEFAULT_SAVED_GARAGE,
   DEFAULT_SETTINGS,
   DEFAULT_STATS,
   WEAPON_CATALOG,
@@ -12,24 +13,31 @@ import {
   CharacterAppearance,
   CharacterId,
   CharacterState,
+  FriendRecord,
   GameSettings,
   GameStats,
   HudTelemetry,
   InventoryState,
+  MissionInvite,
   MissionProgressRecord,
+  RemotePlayerState,
+  SavedGarageState,
   WeaponId,
 } from './types/game';
 import { ViceEngine } from './engine/ViceEngine';
 import { ROAD_SEGMENTS } from './engine/navigation';
 import {
+  addFriendByQuery,
+  computeFriendCode,
+  fetchFriends,
   loadGameFromCloud,
+  removeFriend,
   saveGameToCloud,
   signInWithGoogle,
   signOutUser,
   subscribeToAuth,
   testFirestoreConnection,
 } from './services/firebase';
-import { Wrench, X } from 'lucide-react';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { GameHUD } from './components/GameHUD';
 import { CharacterWheel } from './components/CharacterWheel';
@@ -38,19 +46,21 @@ import { WardrobeModal } from './components/WardrobeModal';
 import { MissionsModal } from './components/MissionsModal';
 import { MapModal } from './components/MapModal';
 import { SettingsAndModsModal } from './components/SettingsAndModsModal';
+import { CutsceneOverlay } from './components/CutsceneOverlay';
+import { PhoneOverlay } from './components/PhoneOverlay';
+import { TaxiModal } from './components/TaxiModal';
+import { TuningGarageModal } from './components/TuningGarageModal';
 
-type ActiveModal = 'none' | 'character' | 'inventory' | 'wardrobe' | 'missions' | 'map' | 'garage' | 'settings';
-
-const GARAGE_COLORS = [
-  { name: 'Koralová oranžová', hex: '#f97316' },
-  { name: 'Vice tyrkysová', hex: '#06b6d4' },
-  { name: 'Karmínová červená', hex: '#e11d48' },
-  { name: 'Polnočná modrá', hex: '#1d4ed8' },
-  { name: 'Smaragdová zelená', hex: '#10b981' },
-  { name: 'Obsidiánová čierna', hex: '#18181b' },
-  { name: 'Zlatá metalíza', hex: '#eab308' },
-  { name: 'Platinová biela', hex: '#f8fafc' },
-];
+type ActiveModal =
+  | 'none'
+  | 'character'
+  | 'inventory'
+  | 'wardrobe'
+  | 'missions'
+  | 'map'
+  | 'garage'
+  | 'taxi'
+  | 'settings';
 
 const INITIAL_TELEMETRY: HudTelemetry = {
   fps: 60,
@@ -60,18 +70,39 @@ const INITIAL_TELEMETRY: HudTelemetry = {
   maxArmor: 100,
   stamina: 100,
   cash: 2500,
+  skills: { driving: 55, shooting: 50, flying: 45, stamina: 55 },
   wantedStars: 0,
   wantedEvading: false,
   evasionProgress: 0,
+  policeDispatchTimer: 0,
+  policeDispatchReason: null,
+  autoAimLocked: false,
   inVehicle: false,
   vehicleKind: null,
   vehicleBrand: '',
   vehicleName: '',
+  vehicleHealthPct: 100,
+  vehicleBurning: false,
+  nearbyRepairCost: 0,
+  nearbyTuningAvailable: false,
   speedKmh: 0,
   altitudeM: 0,
   inWater: false,
   handbrake: false,
   isDrifting: false,
+  taxiMode: 'none',
+  taxiFareCash: 0,
+  taxiDestinationLabel: null,
+  hangarCount: 0,
+  garageCount: 0,
+  parkedFacilityNotice: null,
+  hasParachute: false,
+  parachuteDeployed: false,
+  godModeActive: false,
+  gameClockStr: '17:15',
+  gameTimeNormalized: 0.72,
+  cloudCoverage: 0.42,
+  controlCategory: 'foot',
   equippedWeapon: 'pistol',
   ammoInClip: 15,
   reserveAmmo: 90,
@@ -80,18 +111,21 @@ const INITIAL_TELEMETRY: HudTelemetry = {
   cameraMode: 'third_person',
   district: 'Coral Strip',
   nearbyPrompt: null,
+  activeSidePrompt: null,
   activeMissionTitle: null,
   activeObjectiveLabel: null,
   missionTimerRemaining: null,
   missionNotification: null,
+  activeCutscene: null,
+  remotePlayersCount: 0,
   controllerConnected: false,
   controllerType: 'none',
   controllerName: '',
   hitMarkerActive: false,
   damageFlashActive: false,
   stuntMessage: null,
-  playerX: 162,
-  playerZ: -52,
+  playerX: 465,
+  playerZ: -110,
   playerHeading: -Math.PI / 2,
   minimapBlips: [],
   gpsWaypoint: null,
@@ -108,6 +142,8 @@ const LOCAL_SAVE_KEY = 'vice_horizon_local_save_v1';
 function ViceHorizonApp() {
   const canvasMountRef = useRef<HTMLDivElement | null>(null);
   const engineRef = useRef<ViceEngine | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  const shopNoticeTimerRef = useRef<number | null>(null);
 
   const [initialLocal] = useState(() => {
     try {
@@ -146,26 +182,68 @@ function ViceHorizonApp() {
   const [stats, setStats] = useState<GameStats>(() =>
     initialLocal?.stats ? initialLocal.stats : { ...DEFAULT_STATS }
   );
-  const [settings, setSettings] = useState<GameSettings>(() =>
-    initialLocal?.settings ? initialLocal.settings : structuredClone(DEFAULT_SETTINGS)
-  );
+  const [settings, setSettings] = useState<GameSettings>(() => {
+    if (!initialLocal?.settings) return structuredClone(DEFAULT_SETTINGS);
+    const saved = initialLocal.settings;
+    return {
+      graphics: { ...DEFAULT_SETTINGS.graphics, ...(saved.graphics || {}) },
+      audio: { ...DEFAULT_SETTINGS.audio, ...(saved.audio || {}) },
+      controls: {
+        ...DEFAULT_SETTINGS.controls,
+        ...(saved.controls || {}),
+        keyBindings: {
+          ...DEFAULT_SETTINGS.controls.keyBindings,
+          ...(saved.controls?.keyBindings || {}),
+        },
+        gamepadBindings: {
+          ...DEFAULT_SETTINGS.controls.gamepadBindings,
+          ...(saved.controls?.gamepadBindings || {}),
+        },
+        vehicleOverrides: {
+          ...DEFAULT_SETTINGS.controls.vehicleOverrides,
+          ...(saved.controls?.vehicleOverrides || {}),
+        },
+      },
+      hudMod: { ...DEFAULT_SETTINGS.hudMod, ...(saved.hudMod || {}) },
+      gameplayMods: { ...DEFAULT_SETTINGS.gameplayMods, ...(saved.gameplayMods || {}) },
+    };
+  });
   const [missionsProgress, setMissionsProgress] = useState<Record<string, MissionProgressRecord>>(() =>
     initialLocal?.missions ? initialLocal.missions : structuredClone(DEFAULT_MISSIONS)
   );
+  const [savedGarage, setSavedGarage] = useState<SavedGarageState>(() =>
+    initialLocal?.savedGarage ? initialLocal.savedGarage : structuredClone(DEFAULT_SAVED_GARAGE)
+  );
+  const [discoveredSideIds, setDiscoveredSideIds] = useState<string[]>(() =>
+    Array.isArray(initialLocal?.discoveredSideIds) ? initialLocal.discoveredSideIds : []
+  );
+
   const [activeMissionId, setActiveMissionId] = useState<string | null>(null);
   const [telemetry, setTelemetry] = useState<HudTelemetry>(INITIAL_TELEMETRY);
 
   const [activeModal, setActiveModal] = useState<ActiveModal>('none');
+  const [phoneOpen, setPhoneOpen] = useState(false);
   const [wardrobeMode, setWardrobeMode] = useState<'wardrobe' | 'barber' | 'tattoo' | 'safehouse'>('wardrobe');
   const [settingsInitialTab, setSettingsInitialTab] = useState<'graphics' | 'audio' | 'controls' | 'mods' | 'cloud'>('graphics');
   const [inventoryTab, setInventoryTab] = useState<'weapons' | 'gear' | 'loot'>('weapons');
-  const [garageFeedback, setGarageFeedback] = useState<string | null>(null);
   const [dockOpen, setDockOpen] = useState(false);
+  const [shopNotice, setShopNotice] = useState<string | null>(null);
+
   const [user, setUser] = useState<User | null>(null);
   const [cloudStatus, setCloudStatus] = useState<string | null>(null);
   const [cloudBusy, setCloudBusy] = useState(false);
+  const [friends, setFriends] = useState<FriendRecord[]>([]);
+  const [onlineUids, setOnlineUids] = useState<string[]>([]);
+  const [remotePlayers, setRemotePlayers] = useState<RemotePlayerState[]>([]);
+  const [incomingInvite, setIncomingInvite] = useState<MissionInvite | null>(null);
 
-  // Refs for latest state inside autosave / callbacks
+  const showNotice = useCallback((msg: string) => {
+    setShopNotice(msg);
+    if (shopNoticeTimerRef.current) window.clearTimeout(shopNoticeTimerRef.current);
+    shopNoticeTimerRef.current = window.setTimeout(() => setShopNotice(null), 4600);
+  }, []);
+
+  // Refs for latest state inside autosave / callbacks / WebSocket ticks
   const stateRef = useRef({
     characters,
     activeCharacterId,
@@ -174,6 +252,11 @@ function ViceHorizonApp() {
     stats,
     settings,
     missionsProgress,
+    savedGarage,
+    discoveredSideIds,
+    activeMissionId,
+    telemetry,
+    friends,
   });
   stateRef.current = {
     characters,
@@ -183,6 +266,11 @@ function ViceHorizonApp() {
     stats,
     settings,
     missionsProgress,
+    savedGarage,
+    discoveredSideIds,
+    activeMissionId,
+    telemetry,
+    friends,
   };
 
   // Validate Firestore connection & subscribe to Auth
@@ -193,7 +281,8 @@ function ViceHorizonApp() {
       if (u) {
         setCloudBusy(true);
         try {
-          const loaded = await loadGameFromCloud(u);
+          const [loaded, friendList] = await Promise.all([loadGameFromCloud(u), fetchFriends(u)]);
+          setFriends(friendList);
           if (loaded) {
             setCharacters(loaded.characters);
             setActiveCharacterId(loaded.activeCharacterId);
@@ -202,11 +291,13 @@ function ViceHorizonApp() {
             setStats(loaded.stats);
             setSettings(loaded.settings);
             setMissionsProgress(loaded.missions);
+            if (loaded.garage) setSavedGarage(loaded.garage);
 
             if (engineRef.current) {
               engineRef.current.updateCharactersExternal(loaded.characters, loaded.activeCharacterId);
               engineRef.current.updateInventoryExternal(loaded.inventory, loaded.cash);
               engineRef.current.applySettings(loaded.settings);
+              if (loaded.garage) engineRef.current.setSavedGarage(loaded.garage);
             }
             setCloudStatus('Herný postup načítaný z cloudu.');
           } else {
@@ -218,11 +309,130 @@ function ViceHorizonApp() {
           setCloudBusy(false);
         }
       } else {
+        setFriends([]);
+        setOnlineUids([]);
+        setRemotePlayers([]);
+        engineRef.current?.updateRemotePlayers([]);
         setCloudStatus(null);
       }
     });
     return () => unsub();
   }, []);
+
+  // Live Multiplayer Friends & Co-op WebSocket (/ws)
+  useEffect(() => {
+    if (!user) return;
+    let closedByEffect = false;
+    let reconnectTimer: number | null = null;
+    let syncTimer: number | null = null;
+    let pingTimer: number | null = null;
+
+    const connect = () => {
+      if (closedByEffect) return;
+      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const ws = new WebSocket(`${proto}//${window.location.host}/ws`);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        ws.send(
+          JSON.stringify({
+            type: 'hello',
+            uid: user.uid,
+            displayName: user.displayName || user.email?.split('@')[0] || 'Hráč',
+            friends: stateRef.current.friends.map((f) => f.uid),
+          })
+        );
+
+        syncTimer = window.setInterval(() => {
+          if (ws.readyState !== WebSocket.OPEN) return;
+          const s = stateRef.current;
+          const t = s.telemetry;
+          const ch = s.characters[s.activeCharacterId];
+          const playerPayload: RemotePlayerState = {
+            uid: user.uid,
+            displayName: user.displayName || user.email?.split('@')[0] || 'Hráč',
+            characterId: s.activeCharacterId,
+            x: t.playerX,
+            y: t.inVehicle ? t.altitudeM : 0,
+            z: t.playerZ,
+            heading: t.playerHeading,
+            vehicleKind: t.inVehicle ? t.vehicleKind : null,
+            vehicleColor: '#38bdf8',
+            health: t.health,
+            activeMissionId: s.activeMissionId,
+            appearance: ch.appearance,
+            updatedAt: Date.now(),
+          };
+          ws.send(JSON.stringify({ type: 'player_state', player: playerPayload }));
+        }, 120);
+
+        pingTimer = window.setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'ping' }));
+          }
+        }, 20000);
+      };
+
+      ws.onmessage = (evt) => {
+        try {
+          const data = JSON.parse(String(evt.data));
+          if (data.type === 'presence' && Array.isArray(data.onlineUids)) {
+            setOnlineUids(data.onlineUids);
+            setRemotePlayers((prev) => {
+              const onlineSet = new Set<string>(data.onlineUids);
+              const next = prev.filter((p) => onlineSet.has(p.uid));
+              engineRef.current?.updateRemotePlayers(next);
+              return next;
+            });
+          } else if (data.type === 'player_state' && data.player?.uid) {
+            const rp = data.player as RemotePlayerState;
+            setRemotePlayers((prev) => {
+              const idx = prev.findIndex((x) => x.uid === rp.uid);
+              const next = idx >= 0 ? prev.map((x, i) => (i === idx ? rp : x)) : [...prev, rp];
+              engineRef.current?.updateRemotePlayers(next);
+              return next;
+            });
+          } else if (data.type === 'mission_invite' && data.missionId) {
+            setIncomingInvite(data as MissionInvite);
+          } else if (data.type === 'mission_accept') {
+            showNotice(`${data.byName || 'Kamarát'} prijal pozvánku do misie!`);
+          }
+        } catch {
+          // ignore malformed messages
+        }
+      };
+
+      ws.onclose = () => {
+        if (syncTimer) window.clearInterval(syncTimer);
+        if (pingTimer) window.clearInterval(pingTimer);
+        if (!closedByEffect) {
+          reconnectTimer = window.setTimeout(connect, 3500);
+        }
+      };
+    };
+
+    connect();
+    return () => {
+      closedByEffect = true;
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      if (syncTimer) window.clearInterval(syncTimer);
+      if (pingTimer) window.clearInterval(pingTimer);
+      try {
+        wsRef.current?.close();
+      } catch {
+        // ignore
+      }
+      wsRef.current = null;
+    };
+  }, [user, showNotice]);
+
+  // Keep WebSocket friend filter synchronized when friends list updates
+  useEffect(() => {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'update_friends', friends: friends.map((f) => f.uid) }));
+    }
+  }, [friends]);
 
   // Mount Three.js Engine once
   useEffect(() => {
@@ -246,6 +456,14 @@ function ViceHorizonApp() {
           setActiveCharacterId(activeId);
         },
         onStatsChange: (s) => setStats(s),
+        onGarageChange: (g) => setSavedGarage(g),
+        onSideMissionDiscovered: (m) => {
+          setDiscoveredSideIds((prev) => (prev.includes(m.id) ? prev : [...prev, m.id]));
+        },
+        onTaxiMenuRequested: () => {
+          setPhoneOpen(false);
+          setActiveModal('taxi');
+        },
         onMissionComplete: (missionId, elapsedSec) => {
           setActiveMissionId(null);
           setMissionsProgress((prev) => {
@@ -268,6 +486,7 @@ function ViceHorizonApp() {
           });
         },
         onShopInteract: (shop) => {
+          setPhoneOpen(false);
           if (shop.category === 'weapons') {
             setInventoryTab('weapons');
             setActiveModal('inventory');
@@ -294,12 +513,18 @@ function ViceHorizonApp() {
           } else if (shop.category === 'fire_station') {
             engine.visitFireStation();
           } else if (shop.category === 'garage') {
-            setGarageFeedback(null);
             setActiveModal('garage');
+          } else if (shop.category === 'shooting_range') {
+            showNotice('Ammu-Nation Strelnica: Zasiahni červené terče pre tréning presnosti a odmenu!');
+          } else if (shop.category === 'lounge') {
+            showNotice('Malibu Neon Lounge: Vitaj vo VIP klube! Použi výťah na strešnú terasu.');
           }
         },
       }
     );
+
+    engine.setSavedGarage(stateRef.current.savedGarage);
+    engine.setMissionsProgress(stateRef.current.missionsProgress);
 
     engine.input.onActionTriggered = (action) => {
       if (action === 'inventory') {
@@ -314,6 +539,12 @@ function ViceHorizonApp() {
         setActiveModal((m) => (m === 'missions' ? 'none' : 'missions'));
       } else if (action === 'openMap') {
         setActiveModal((m) => (m === 'map' ? 'none' : 'map'));
+      } else if (action === 'phone') {
+        setPhoneOpen((prev) => {
+          const next = !prev;
+          if (next) engine.input.exitPointerLock();
+          return next;
+        });
       } else if (action === 'toggleDock') {
         setDockOpen((prev) => {
           const next = !prev;
@@ -339,6 +570,7 @@ function ViceHorizonApp() {
 
     const onEsc = (e: KeyboardEvent) => {
       if (e.code === 'Escape') {
+        setPhoneOpen(false);
         setActiveModal((cur) => (cur !== 'none' ? 'none' : 'none'));
       } else if (e.code === 'KeyO') {
         setActiveModal((cur) => (cur === 'settings' ? 'none' : 'settings'));
@@ -353,7 +585,7 @@ function ViceHorizonApp() {
       engine.dispose();
       engineRef.current = null;
     };
-  }, []);
+  }, [showNotice]);
 
   // Sync sequential story mission locks to 3D world beacons
   useEffect(() => {
@@ -387,6 +619,8 @@ function ViceHorizonApp() {
     setCloudBusy(true);
     try {
       const s = stateRef.current;
+      const syncedGarage = engineRef.current?.syncGarageBeforeSave() || s.savedGarage;
+      setSavedGarage(syncedGarage);
       await saveGameToCloud(user, {
         activeCharacterId: s.activeCharacterId,
         cash: s.cash,
@@ -395,6 +629,7 @@ function ViceHorizonApp() {
         inventory: s.inventory,
         settings: s.settings,
         missions: s.missionsProgress,
+        garage: syncedGarage,
       });
       setCloudStatus(`Uložené do cloudu (${new Date().toLocaleTimeString('sk-SK')}).`);
     } catch (err) {
@@ -417,10 +652,12 @@ function ViceHorizonApp() {
         setStats(loaded.stats);
         setSettings(loaded.settings);
         setMissionsProgress(loaded.missions);
+        if (loaded.garage) setSavedGarage(loaded.garage);
 
         engineRef.current?.updateCharactersExternal(loaded.characters, loaded.activeCharacterId);
         engineRef.current?.updateInventoryExternal(loaded.inventory, loaded.cash);
         engineRef.current?.applySettings(loaded.settings);
+        if (loaded.garage) engineRef.current?.setSavedGarage(loaded.garage);
         setCloudStatus(`Načítané z cloudu (${new Date().toLocaleTimeString('sk-SK')}).`);
       } else {
         setCloudStatus('V cloude zatiaľ nie je uložený žiadny postup.');
@@ -437,6 +674,7 @@ function ViceHorizonApp() {
     const localTimer = window.setInterval(() => {
       try {
         const s = stateRef.current;
+        const syncedGarage = engineRef.current?.syncGarageBeforeSave() || s.savedGarage;
         localStorage.setItem(
           LOCAL_SAVE_KEY,
           JSON.stringify({
@@ -447,6 +685,8 @@ function ViceHorizonApp() {
             inventory: s.inventory,
             settings: s.settings,
             missions: s.missionsProgress,
+            savedGarage: syncedGarage,
+            discoveredSideIds: s.discoveredSideIds,
           })
         );
       } catch {
@@ -598,7 +838,7 @@ function ViceHorizonApp() {
       <div ref={canvasMountRef} className="absolute inset-0 w-full h-full" />
 
       {/* Game HUD */}
-      {activeModal === 'none' && (
+      {activeModal === 'none' && !telemetry.activeCutscene && (
         <GameHUD
           telemetry={telemetry}
           activeCharacter={activeCharacter}
@@ -617,12 +857,66 @@ function ViceHorizonApp() {
             if (m === 'wardrobe') setWardrobeMode('wardrobe');
             setActiveModal(m);
           }}
+          onTogglePhone={() =>
+            setPhoneOpen((prev) => {
+              const next = !prev;
+              if (next) engineRef.current?.input.exitPointerLock();
+              return next;
+            })
+          }
           onOpenCloud={() => {
             setSettingsInitialTab('cloud');
             setActiveModal('settings');
           }}
           onRequestLock={() => engineRef.current?.input.requestPointerLock()}
         />
+      )}
+
+      {/* Shop / Facility Notice Toast */}
+      {shopNotice && !telemetry.activeCutscene && (
+        <div className="fixed top-20 left-1/2 -translate-x-1/2 z-30 px-5 py-2.5 rounded-xl bg-slate-950/90 border border-white/15 text-xs font-semibold text-white shadow-xl">
+          {shopNotice}
+        </div>
+      )}
+
+      {/* Live Co-op Mission Invite Toast */}
+      {incomingInvite && (
+        <div className="fixed bottom-24 right-6 z-40 w-80 p-4 rounded-2xl bg-[#0b101b]/95 border border-emerald-500/40 shadow-2xl space-y-2.5">
+          <div className="text-[11px] font-bold uppercase tracking-wider text-emerald-400">
+            Pozvánka do Co-op misie
+          </div>
+          <div className="text-xs text-slate-200">
+            <span className="font-semibold text-white">{incomingInvite.fromName}</span> ťa pozýva na misiu{' '}
+            <span className="font-semibold text-amber-300">{incomingInvite.missionTitle}</span>.
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={() => {
+                if (wsRef.current?.readyState === WebSocket.OPEN) {
+                  wsRef.current.send(
+                    JSON.stringify({
+                      type: 'mission_accept',
+                      fromUid: incomingInvite.fromUid,
+                      missionId: incomingInvite.missionId,
+                    })
+                  );
+                }
+                setActiveMissionId(incomingInvite.missionId);
+                engineRef.current?.startMission(incomingInvite.missionId);
+                setIncomingInvite(null);
+              }}
+              className="flex-1 py-1.5 rounded-lg text-xs font-bold text-slate-950 bg-emerald-400 hover:bg-emerald-300"
+            >
+              Prijať a spustiť
+            </button>
+            <button
+              onClick={() => setIncomingInvite(null)}
+              className="px-3 py-1.5 rounded-lg text-xs font-medium bg-slate-800 text-slate-300 hover:bg-slate-700"
+            >
+              Odmietnuť
+            </button>
+          </div>
+        </div>
       )}
 
       {/* Character Switcher */}
@@ -649,6 +943,7 @@ function ViceHorizonApp() {
           onChangeWeaponSkin={handleChangeWeaponSkin}
           onUseConsumable={handleUseConsumable}
           onBuyConsumable={handleBuyConsumable}
+          onBuyParachute={() => engineRef.current?.buyParachute()}
           onSellContraband={handleSellContraband}
           onClose={() => setActiveModal('none')}
         />
@@ -671,6 +966,7 @@ function ViceHorizonApp() {
       {activeModal === 'missions' && (
         <MissionsModal
           missionsProgress={missionsProgress}
+          discoveredSideIds={discoveredSideIds}
           activeMissionId={activeMissionId}
           accentColor={settings.hudMod.accentColor}
           onStartMission={(id) => {
@@ -704,86 +1000,118 @@ function ViceHorizonApp() {
         />
       )}
 
-      {/* Bayshore Customs Garage Service Modal */}
+      {/* Horizon Cab Destination Modal */}
+      {activeModal === 'taxi' && (
+        <TaxiModal
+          playerX={telemetry.playerX}
+          playerZ={telemetry.playerZ}
+          cash={cash}
+          accentColor={settings.hudMod.accentColor}
+          onSelectDestination={(x, z, label) => {
+            engineRef.current?.startTaxiRideTo(x, z, label);
+            setActiveModal('none');
+          }}
+          onTakeWheel={() => {
+            engineRef.current?.startTaxiDriverShift();
+            setActiveModal('none');
+          }}
+          onClose={() => setActiveModal('none')}
+        />
+      )}
+
+      {/* Bayshore Customs Drive-In Tuning & Repair Garage */}
       {activeModal === 'garage' && (
-        <div className="fixed inset-0 z-30 flex items-center justify-center bg-slate-950/80 p-6">
-          <div className="w-full max-w-md bg-[#0b101b] border border-white/12 rounded-2xl shadow-2xl overflow-hidden">
-            <div className="px-6 py-4 border-b border-white/10 flex items-center justify-between">
-              <div className="flex items-center gap-2.5">
-                <Wrench className="w-5 h-5" style={{ color: settings.hudMod.accentColor }} />
-                <div>
-                  <h2 className="font-display text-xl font-bold text-white">Bayshore Customs Servis</h2>
-                  <p className="text-xs text-slate-400">Oprava karosérie a prelakovanie vozidla</p>
-                </div>
-              </div>
-              <button
-                onClick={() => setActiveModal('none')}
-                className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-white/10"
-                aria-label="Zavrieť"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
+        <TuningGarageModal
+          cash={cash}
+          telemetry={telemetry}
+          accentColor={settings.hudMod.accentColor}
+          onRepairOrRepaint={(colorHex) => {
+            const cost = colorHex ? 350 : Math.max(40, telemetry.nearbyRepairCost || 40);
+            if (cash < cost) return false;
+            const ok = Boolean(engineRef.current?.repairAndRepaintVehicle(colorHex));
+            if (ok) {
+              const nextCash = cash - cost;
+              setCash(nextCash);
+              engineRef.current?.updateInventoryExternal(inventory, nextCash);
+            }
+            return ok;
+          }}
+          onUpgrade={(type) =>
+            engineRef.current?.upgradeCurrentVehicle(type) || {
+              ok: false,
+              message: 'Najprv vstúp do servisu vozidlom.',
+            }
+          }
+          onClose={() => setActiveModal('none')}
+        />
+      )}
 
-            <div className="p-6 space-y-5">
-              <div className="flex items-center justify-between text-xs text-slate-300">
-                <span>Dostupná hotovosť:</span>
-                <span className="font-mono-tabular text-base font-bold text-emerald-400">
-                  ${cash.toLocaleString('sk-SK')}
-                </span>
-              </div>
+      {/* Smartphone Overlay (Emergency Dispatch, Taxi, Friends, Hangar/Garage, Cheats) */}
+      {phoneOpen && activeModal === 'none' && !telemetry.activeCutscene && (
+        <PhoneOverlay
+          user={user}
+          myFriendCode={user ? computeFriendCode(user.uid) : 'VH-OFFLINE'}
+          friends={friends}
+          onlineUids={onlineUids}
+          remotePlayers={remotePlayers}
+          activeMissionId={activeMissionId}
+          savedGarage={savedGarage}
+          gameClockStr={telemetry.gameClockStr}
+          accentColor={settings.hudMod.accentColor}
+          onSignIn={() => signInWithGoogle().catch((e) => setCloudStatus(String(e)))}
+          onAddFriend={async (q) => {
+            if (!user) throw new Error('Najprv sa prihlás Google účtom.');
+            const rec = await addFriendByQuery(user, q);
+            setFriends((prev) => (prev.some((f) => f.uid === rec.uid) ? prev : [...prev, rec]));
+          }}
+          onRemoveFriend={async (uid) => {
+            if (!user) return;
+            await removeFriend(user, uid);
+            setFriends((prev) => prev.filter((f) => f.uid !== uid));
+          }}
+          onInviteFriend={(friendUid) => {
+            if (!activeMissionId || wsRef.current?.readyState !== WebSocket.OPEN) return;
+            wsRef.current.send(
+              JSON.stringify({
+                type: 'mission_invite',
+                toUid: friendUid,
+                missionId: activeMissionId,
+                missionTitle: telemetry.activeMissionTitle || activeMissionId,
+              })
+            );
+            showNotice('Pozvánka na misiu odoslaná priateľovi.');
+          }}
+          onSetGps={(x, z, label) => engineRef.current?.setGpsWaypoint(x, z, label)}
+          onTeleportToFriend={(player) => {
+            engineRef.current?.teleportTo(player.x + 4, player.z + 4, player.displayName);
+            setPhoneOpen(false);
+          }}
+          onCallTaxi={() => {
+            engineRef.current?.callTaxiPassenger();
+            setPhoneOpen(false);
+          }}
+          onStartTaxiShift={() => {
+            engineRef.current?.startTaxiDriverShift();
+            setPhoneOpen(false);
+          }}
+          onRetrieveVehicle={(facility, idx) => {
+            engineRef.current?.retrieveSavedVehicle(facility, idx);
+          }}
+          onApplyCheat={(code) =>
+            engineRef.current?.applyCheatCode(code) || { ok: false, message: 'Hra nie je pripravená.' }
+          }
+          onClose={() => setPhoneOpen(false)}
+        />
+      )}
 
-              <button
-                disabled={cash < 250}
-                onClick={() => {
-                  const ok = engineRef.current?.repairAndRepaintVehicle();
-                  if (!ok) {
-                    setGarageFeedback('Príď do dielne autom alebo ho najprv zaparkuj pred servisom.');
-                    return;
-                  }
-                  const nextCash = cash - 250;
-                  setCash(nextCash);
-                  engineRef.current?.updateInventoryExternal(inventory, nextCash);
-                  setGarageFeedback('Vozidlo bolo kompletne opravené (-$250).');
-                }}
-                className="w-full py-2.5 px-4 rounded-xl text-xs font-semibold text-slate-950 disabled:opacity-40"
-                style={{ backgroundColor: settings.hudMod.accentColor }}
-              >
-                Kompletná oprava vozidla ($250)
-              </button>
-
-              <div className="space-y-2">
-                <div className="text-xs font-semibold text-slate-300">Nový lak karosérie ($350)</div>
-                <div className="grid grid-cols-4 gap-2.5">
-                  {GARAGE_COLORS.map((c) => (
-                    <button
-                      key={c.hex}
-                      disabled={cash < 350}
-                      onClick={() => {
-                        const ok = engineRef.current?.repairAndRepaintVehicle(c.hex);
-                        if (!ok) {
-                          setGarageFeedback('Príď do dielne vozidlom alebo ho zaparkuj pri bráne.');
-                          return;
-                        }
-                        const nextCash = cash - 350;
-                        setCash(nextCash);
-                        engineRef.current?.updateInventoryExternal(inventory, nextCash);
-                        setGarageFeedback(`Lak "${c.name}" aplikovaný a vozidlo opravené (-$350).`);
-                      }}
-                      title={c.name}
-                      className="h-9 rounded-lg border border-white/20 hover:scale-105 transition-transform disabled:opacity-40"
-                      style={{ backgroundColor: c.hex }}
-                    />
-                  ))}
-                </div>
-              </div>
-
-              {garageFeedback && (
-                <div className="text-xs text-sky-400 font-medium">{garageFeedback}</div>
-              )}
-            </div>
-          </div>
-        </div>
+      {/* Story Cutscene Cinematic Letterbox */}
+      {telemetry.activeCutscene && (
+        <CutsceneOverlay
+          cutscene={telemetry.activeCutscene}
+          accentColor={settings.hudMod.accentColor}
+          onNext={() => engineRef.current?.advanceCutscene()}
+          onSkip={() => engineRef.current?.skipCutscene()}
+        />
       )}
 
       {/* Settings, Controls, Mods, Cloud Save */}
@@ -797,8 +1125,11 @@ function ViceHorizonApp() {
           controllerConnected={telemetry.controllerConnected}
           controllerType={telemetry.controllerType}
           controllerName={telemetry.controllerName}
+          gameClockStr={telemetry.gameClockStr}
+          gameTimeNormalized={telemetry.gameTimeNormalized}
           initialTab={settingsInitialTab}
           onUpdateSettings={handleUpdateSettings}
+          onSetTimeOfDay={(n) => engineRef.current?.setTimeOfDay(n)}
           onSignIn={() => signInWithGoogle().catch((e) => setCloudStatus(String(e)))}
           onSignOut={() => signOutUser().catch(() => {})}
           onSaveCloud={handleSaveCloud}

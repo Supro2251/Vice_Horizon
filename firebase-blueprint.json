@@ -32,6 +32,9 @@
         "stuntJumps": {
           "type": "number"
         },
+        "shootingRangeScore": {
+          "type": "number"
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time"
@@ -45,7 +48,7 @@
     },
     "CharacterSave": {
       "title": "CharacterSave",
-      "description": "Per-character state, 3D coordinates, appearance, and saved custom outfits.",
+      "description": "Per-character wallet, skills, 3D coordinates, appearance, and saved custom outfits.",
       "type": "object",
       "properties": {
         "id": {
@@ -58,40 +61,23 @@
           "maxLength": 128,
           "pattern": "^[a-zA-Z0-9_\\-]+$"
         },
-        "health": {
-          "type": "number"
-        },
-        "armor": {
-          "type": "number"
-        },
-        "posX": {
-          "type": "number"
-        },
-        "posY": {
-          "type": "number"
-        },
-        "posZ": {
-          "type": "number"
-        },
-        "heading": {
-          "type": "number"
-        },
-        "appearance": {
-          "type": "object"
-        },
-        "customOutfits": {
-          "type": "array"
-        },
-        "updatedAt": {
-          "type": "string",
-          "format": "date-time"
-        }
+        "cash": { "type": "number" },
+        "skills": { "type": "object" },
+        "health": { "type": "number" },
+        "armor": { "type": "number" },
+        "posX": { "type": "number" },
+        "posY": { "type": "number" },
+        "posZ": { "type": "number" },
+        "heading": { "type": "number" },
+        "appearance": { "type": "object" },
+        "customOutfits": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "ownerId", "health", "armor", "posX", "posY", "posZ", "heading", "appearance", "customOutfits", "updatedAt"]
     },
     "InventorySave": {
       "title": "InventorySave",
-      "description": "Player weapons, consumables, contraband, and equipped loadout.",
+      "description": "Player weapons, parachute, consumables, contraband, and equipped loadout.",
       "type": "object",
       "properties": {
         "ownerId": {
@@ -100,23 +86,12 @@
           "maxLength": 128,
           "pattern": "^[a-zA-Z0-9_\\-]+$"
         },
-        "equippedWeapon": {
-          "type": "string",
-          "maxLength": 32
-        },
-        "weapons": {
-          "type": "array"
-        },
-        "consumables": {
-          "type": "array"
-        },
-        "contraband": {
-          "type": "array"
-        },
-        "updatedAt": {
-          "type": "string",
-          "format": "date-time"
-        }
+        "equippedWeapon": { "type": "string", "maxLength": 32 },
+        "hasParachute": { "type": "boolean" },
+        "weapons": { "type": "array" },
+        "consumables": { "type": "array" },
+        "contraband": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["ownerId", "equippedWeapon", "weapons", "consumables", "contraband", "updatedAt"]
     },
@@ -131,31 +106,18 @@
           "maxLength": 128,
           "pattern": "^[a-zA-Z0-9_\\-]+$"
         },
-        "graphics": {
-          "type": "object"
-        },
-        "audio": {
-          "type": "object"
-        },
-        "controls": {
-          "type": "object"
-        },
-        "hudMod": {
-          "type": "object"
-        },
-        "gameplayMods": {
-          "type": "object"
-        },
-        "updatedAt": {
-          "type": "string",
-          "format": "date-time"
-        }
+        "graphics": { "type": "object" },
+        "audio": { "type": "object" },
+        "controls": { "type": "object" },
+        "hudMod": { "type": "object" },
+        "gameplayMods": { "type": "object" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["ownerId", "graphics", "audio", "controls", "hudMod", "gameplayMods", "updatedAt"]
     },
     "MissionSave": {
       "title": "MissionSave",
-      "description": "Mission completion state and records.",
+      "description": "Story and discovered side mission progress and completion statistics.",
       "type": "object",
       "properties": {
         "id": {
@@ -172,18 +134,11 @@
         },
         "status": {
           "type": "string",
-          "enum": ["available", "active", "completed"]
+          "enum": ["available", "active", "completed", "discovered"]
         },
-        "completedCount": {
-          "type": "number"
-        },
-        "bestTimeSec": {
-          "type": "number"
-        },
-        "updatedAt": {
-          "type": "string",
-          "format": "date-time"
-        }
+        "completedCount": { "type": "number" },
+        "bestTimeSec": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "ownerId", "status", "completedCount", "bestTimeSec", "updatedAt"]
     },
@@ -198,18 +153,38 @@
           "maxLength": 128,
           "pattern": "^[a-zA-Z0-9_\\-]+$"
         },
-        "hangarVehicles": {
-          "type": "array"
-        },
-        "safehouseVehicles": {
-          "type": "array"
-        },
-        "updatedAt": {
-          "type": "string",
-          "format": "date-time"
-        }
+        "hangarVehicles": { "type": "array" },
+        "safehouseVehicles": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["ownerId", "hangarVehicles", "safehouseVehicles", "updatedAt"]
+    },
+    "PublicUserCard": {
+      "title": "PublicUserCard",
+      "description": "Public directory card so friends can look each other up by friend code or email.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "emailLower": { "type": "string", "maxLength": 160 },
+        "friendCode": { "type": "string", "minLength": 4, "maxLength": 24 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "displayName", "friendCode", "updatedAt"]
+    },
+    "FriendSave": {
+      "title": "FriendSave",
+      "description": "Saved friend entry under a player's friends list for automatic multiplayer joins.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "email": { "type": "string", "maxLength": 160 },
+        "friendCode": { "type": "string", "minLength": 4, "maxLength": 24 },
+        "addedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["uid", "ownerId", "displayName", "friendCode", "addedAt"]
     }
   },
   "firestore": {
@@ -219,11 +194,11 @@
     },
     "/users/{userId}/characters/{characterId}": {
       "schema": { "$ref": "#/entities/CharacterSave" },
-      "description": "Per-character appearance, custom outfits, health/armor, and world coordinates."
+      "description": "Per-character wallet, skills, appearance, custom outfits, health/armor, and 3D coordinates."
     },
     "/users/{userId}/inventory/{slotId}": {
       "schema": { "$ref": "#/entities/InventorySave" },
-      "description": "Player inventory and equipped weapon state."
+      "description": "Player inventory, parachute, and equipped weapon state."
     },
     "/users/{userId}/settings/{profileId}": {
       "schema": { "$ref": "#/entities/SettingsSave" },
@@ -236,6 +211,14 @@
     "/users/{userId}/garage/{slotId}": {
       "schema": { "$ref": "#/entities/GarageSave" },
       "description": "Persisted hangar aircraft and safehouse garage vehicles."
+    },
+    "/users/{userId}/friends/{friendId}": {
+      "schema": { "$ref": "#/entities/FriendSave" },
+      "description": "Player friends roster for automatic multiplayer meets."
+    },
+    "/publicUsers/{userId}": {
+      "schema": { "$ref": "#/entities/PublicUserCard" },
+      "description": "Public friend code directory card for friend discovery."
     }
   }
 }

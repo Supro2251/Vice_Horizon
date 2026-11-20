@@ -27,6 +27,28 @@ export type VehicleKind =
   | 'helicopter'
   | 'fighter_jet';
 
+export type VehicleControlCategory =
+  | 'foot'
+  | 'car'
+  | 'motorcycle'
+  | 'boat'
+  | 'plane'
+  | 'fighter_jet'
+  | 'helicopter';
+
+export interface StickControlConfig {
+  moveStick: 'left' | 'right';
+  pitchInvert: boolean;
+  yawSource: 'bumpers' | 'left_x' | 'right_x';
+}
+
+export interface VehicleUpgrades {
+  engineLevel: 0 | 1 | 2 | 3;
+  turbo: boolean;
+  armorLevel: 0 | 1 | 2;
+  suspensionLevel: 0 | 1 | 2;
+}
+
 export interface StoredVehicleRecord {
   id: string;
   brand: string;
@@ -36,6 +58,7 @@ export interface StoredVehicleRecord {
   x: number;
   z: number;
   heading: number;
+  upgrades?: VehicleUpgrades;
 }
 
 export interface SavedGarageState {
@@ -49,11 +72,15 @@ export type ShopId =
   | 'market_247'
   | 'safehouse'
   | 'customs_garage'
+  | 'customs_east'
+  | 'customs_north'
   | 'hospital'
   | 'police_station'
   | 'fire_station'
   | 'barbershop'
-  | 'tattoo_parlor';
+  | 'tattoo_parlor'
+  | 'shooting_range'
+  | 'malibu_lounge';
 
 export interface ShopDef {
   id: ShopId;
@@ -69,7 +96,9 @@ export interface ShopDef {
     | 'police_station'
     | 'fire_station'
     | 'barber'
-    | 'tattoo';
+    | 'tattoo'
+    | 'shooting_range'
+    | 'lounge';
   x: number;
   z: number;
   doorX: number;
@@ -110,17 +139,27 @@ export interface CustomOutfit {
   appearance: CharacterAppearance;
 }
 
+export interface CharacterSkills {
+  driving: number; // 0..100
+  shooting: number; // 0..100
+  flying: number; // 0..100
+  stamina: number; // 0..100
+}
+
 export interface CharacterState {
   id: CharacterId;
   name: string;
   role: string;
   perkLabel: string;
+  weaknessLabel: string;
   portraitUrl: string;
   district: string;
+  cash: number;
   health: number;
   maxHealth: number;
   armor: number;
   maxArmor: number;
+  skills: CharacterSkills;
   posX: number;
   posY: number;
   posZ: number;
@@ -170,6 +209,7 @@ export interface ContrabandItem {
 
 export interface InventoryState {
   equippedWeapon: WeaponId;
+  hasParachute: boolean;
   weapons: OwnedWeapon[];
   consumables: ConsumableItem[];
   contraband: ContrabandItem[];
@@ -215,7 +255,8 @@ export type KeyAction =
   | 'missions'
   | 'openMap'
   | 'horn'
-  | 'toggleDock';
+  | 'toggleDock'
+  | 'phone';
 
 export type GamepadButtonAction =
   | 'shoot'
@@ -229,11 +270,19 @@ export type GamepadButtonAction =
   | 'characterWheel'
   | 'openMap'
   | 'pause'
-  | 'toggleDock';
+  | 'toggleDock'
+  | 'phone';
+
+export interface VehicleControlProfile {
+  keyBindings: Partial<Record<KeyAction, string>>;
+  gamepadBindings: Partial<Record<GamepadButtonAction, number>>;
+  stickConfig?: Partial<StickControlConfig>;
+}
 
 export interface ControlSettings {
   keyBindings: Record<KeyAction, string>;
   gamepadBindings: Record<GamepadButtonAction, number>;
+  vehicleOverrides?: Partial<Record<VehicleControlCategory, VehicleControlProfile>>;
   mouseSensitivity: number;
   gamepadSensitivity: number;
   deadzone: number;
@@ -262,7 +311,7 @@ export interface GameplayModSettings {
   rapidFire: boolean;
   turboVehicles: boolean;
   noPolice: boolean;
-  timeOfDay: 'sunset' | 'noon' | 'night';
+  timeOfDay: 'auto' | 'sunset' | 'noon' | 'night';
 }
 
 export interface GameSettings {
@@ -284,6 +333,12 @@ export interface MissionStage {
   vehicleRequired?: boolean;
 }
 
+export interface MissionCutsceneLine {
+  speaker: string;
+  text: string;
+  cameraFocus: 'player' | 'target' | 'panoramic';
+}
+
 export interface MissionDef {
   id: string;
   storyOrder: number;
@@ -295,6 +350,11 @@ export interface MissionDef {
   startZ: number;
   wantedOnStart?: number;
   timeLimitSec?: number;
+  difficulty?: 'Ľahká' | 'Stredná' | 'Ťažká' | 'Extrémna';
+  estimatedMinutes?: string;
+  isSideDiscovery?: boolean;
+  cutsceneIntro?: MissionCutsceneLine[];
+  cutsceneOutro?: MissionCutsceneLine[];
   stages: MissionStage[];
 }
 
@@ -330,14 +390,60 @@ export interface MinimapBlip {
     | 'fighter_jet'
     | 'motorcycle'
     | 'mission'
+    | 'side_mission'
     | 'shop'
+    | 'parking'
+    | 'shooting_range'
     | 'pickup'
     | 'passenger'
+    | 'friend'
     | 'player';
   heading?: number;
   label?: string;
   shopCategory?: ShopDef['category'];
   color?: string;
+}
+
+export interface ActiveCutsceneState {
+  title: string;
+  speaker: string;
+  text: string;
+  lineIndex: number;
+  totalLines: number;
+}
+
+export interface FriendRecord {
+  uid: string;
+  displayName: string;
+  email?: string;
+  friendCode: string;
+  addedAt: string;
+}
+
+export interface RemotePlayerState {
+  uid: string;
+  displayName: string;
+  characterId: CharacterId;
+  x: number;
+  y: number;
+  z: number;
+  heading: number;
+  vehicleKind: VehicleKind | null;
+  vehicleColor: string;
+  health: number;
+  activeMissionId: string | null;
+  isShooting?: boolean;
+  appearance?: CharacterAppearance;
+  updatedAt?: number;
+}
+
+export interface MissionInvite {
+  inviteId: string;
+  fromUid: string;
+  fromName: string;
+  missionId: string;
+  missionTitle: string;
+  timestamp: number;
 }
 
 export interface HudTelemetry {
@@ -348,6 +454,7 @@ export interface HudTelemetry {
   maxArmor: number;
   stamina: number;
   cash: number;
+  skills: CharacterSkills;
   wantedStars: number;
   wantedEvading: boolean;
   evasionProgress: number;
@@ -358,6 +465,10 @@ export interface HudTelemetry {
   vehicleKind: VehicleKind | null;
   vehicleBrand: string;
   vehicleName: string;
+  vehicleHealthPct: number;
+  vehicleBurning: boolean;
+  nearbyRepairCost: number;
+  nearbyTuningAvailable: boolean;
   speedKmh: number;
   altitudeM: number;
   inWater: boolean;
@@ -369,6 +480,13 @@ export interface HudTelemetry {
   hangarCount: number;
   garageCount: number;
   parkedFacilityNotice: string | null;
+  hasParachute: boolean;
+  parachuteDeployed: boolean;
+  godModeActive: boolean;
+  gameClockStr: string;
+  gameTimeNormalized: number;
+  cloudCoverage: number;
+  controlCategory: VehicleControlCategory;
   equippedWeapon: WeaponId;
   ammoInClip: number;
   reserveAmmo: number;
@@ -377,10 +495,13 @@ export interface HudTelemetry {
   cameraMode: CameraMode;
   district: string;
   nearbyPrompt: string | null;
+  activeSidePrompt: string | null;
   activeMissionTitle: string | null;
   activeObjectiveLabel: string | null;
   missionTimerRemaining: number | null;
   missionNotification: { title: string; subtitle: string; reward?: number } | null;
+  activeCutscene: ActiveCutsceneState | null;
+  remotePlayersCount: number;
   controllerConnected: boolean;
   controllerType: 'playstation' | 'xbox' | 'none';
   controllerName: string;
@@ -404,4 +525,5 @@ export interface GameStats {
   totalEliminations: number;
   policeEscapes: number;
   stuntJumps: number;
+  shootingRangeScore?: number;
 }

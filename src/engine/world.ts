@@ -3,7 +3,7 @@ import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUti
 import { AIRPORT_HANGAR_ZONE, SAFEHOUSE_GARAGE_ZONE, SHOPS } from '../data/defaults';
 import { GpsPoint, ShopDef } from '../types/game';
 import { ProceduralTextureSet } from './textures';
-import { createExplosiveBarrelMesh, createYachtMesh } from './models';
+import { createExplosiveBarrelMesh, createRangeTargetRig, createYachtMesh } from './models';
 import {
   BRIDGE_SPANS,
   getBridgeElevationAt,
@@ -11,8 +11,11 @@ import {
   getIslandOutlinePoints,
   isOnBeachAt,
   isWaterAt,
+  OVERPASS_SPANS,
+  PARKING_LOTS,
   ROAD_SEGMENTS,
   RoadSegmentDef,
+  UNDERPASS_SPANS,
 } from './navigation';
 
 export interface AABBCollider {
@@ -21,6 +24,8 @@ export interface AABBCollider {
   minZ: number;
   maxZ: number;
   height: number;
+  minY?: number;
+  isRoofSurface?: boolean;
 }
 
 export interface CircleCollider {
@@ -48,14 +53,49 @@ export interface ExplosiveBarrelEntity {
   respawnTimer: number;
 }
 
+export interface RangeTargetEntity {
+  id: string;
+  mesh: THREE.Group;
+  x: number;
+  y: number;
+  z: number;
+  alive: boolean;
+  respawnTimer: number;
+}
+
+export interface ElevatorFloorDef {
+  name: string;
+  y: number;
+}
+
+export interface ElevatorEntity {
+  id: string;
+  label: string;
+  x: number;
+  z: number;
+  radius: number;
+  floors: ElevatorFloorDef[];
+  currentFloorIndex: number;
+  targetFloorIndex: number;
+  currentY: number;
+  cabGroup: THREE.Group;
+}
+
 export interface WorldBuildResult {
   worldGroup: THREE.Group;
   colliders: AABBCollider[];
+  floorSurfaces: AABBCollider[];
   circleColliders: CircleCollider[];
   ramps: StuntRamp[];
   barrels: ExplosiveBarrelEntity[];
+  rangeTargets: RangeTargetEntity[];
+  elevators: ElevatorEntity[];
+  buildingWindowMaterials: THREE.Material[];
+  spinners: THREE.Object3D[];
   oceanMesh: THREE.Mesh;
   skyMat: THREE.ShaderMaterial;
+  cloudGroup: THREE.Group;
+  cloudMaterials: THREE.MeshStandardMaterial[];
   roadSegments: RoadSegmentDef[];
   roadRects: { x: number; z: number; w: number; l: number }[];
   buildingFootprints: { x: number; z: number; w: number; d: number; color: string }[];
@@ -66,17 +106,20 @@ export function getDistrictName(x: number, z: number): string {
   const ang = Math.atan2(z, x);
   const coastR = getIslandCoastRadius(ang);
   const dist = Math.hypot(x, z);
-  if (dist > coastR + 4) return 'Vice Ocean';
-  if (x >= 208 && x <= 395 && z >= 215 && z <= 315) return 'Marina Bay';
-  if (x >= -108 && z >= 124 && z <= 152) return 'Vice Canal';
+  if (dist > coastR + 10) return 'Vice Ocean';
+  if (x >= 560 && x <= 1280 && z >= 620 && z <= 1120) return 'Marina Bay';
+  if (x >= -340 && z >= 392 && z <= 468) return 'Vice Canal';
+  if (x >= -820 && x <= 860 && z >= -815 && z <= -765) return 'Emerald River';
   if (isOnBeachAt(x, z)) return 'Pobrežie Leonida';
-  if (x < -120 && z >= 175) return 'Bayshore Airport';
-  if (x < -140 && z >= 15) return 'Bayshore Industrial';
-  if (z < -180) return 'North Heights';
-  if (x > 110 && z > 145) return 'Marina Docks';
-  if (x > 110 && z < 120) return 'Coral Strip';
-  if (Math.hypot(x, z + 20) < 46) return 'Slnečné námestie';
-  if (x >= -120 && x <= 110 && z >= -180 && z <= 120) return 'Downtown Core';
+  if (x < -520 && z >= 460) return 'Bayshore Airport';
+  if (x < -420 && z >= 40) return 'Bayshore Industrial';
+  if (z < -760 && x < -100) return 'Borovicový les';
+  if (z < -760 && x >= -100) return 'Emerald Hills';
+  if (z < -520) return 'North Heights';
+  if (x > 360 && z > 460) return 'Marina Docks';
+  if (x > 340 && z < 400) return 'Coral Strip';
+  if (Math.hypot(x, z + 70) < 95) return 'Slnečné námestie';
+  if (x >= -420 && x <= 340 && z >= -480 && z <= 380) return 'Downtown Core';
   return 'Midtown Leonida';
 }
 
@@ -97,7 +140,6 @@ function createRoundedRectShape(w: number, d: number, r: number): THREE.Shape {
   return s;
 }
 
-// Sutherland-Hodgman half-plane polygon clip (keeps points where nx*x + nz*z <= c)
 function clipPolygonHalfPlane(
   poly: GpsPoint[],
   nx: number,
@@ -152,14 +194,14 @@ function buildLandmassGeometry(
   return geo;
 }
 
-function resamplePolylineForRoad(points: GpsPoint[], closed?: boolean): GpsPoint[] {
+function resamplePolylineForRoad(points: GpsPoint[], closed?: boolean, stepDist = 6.5): GpsPoint[] {
   const src = closed ? [...points, points[0]] : points;
   const out: GpsPoint[] = [];
   for (let i = 0; i < src.length - 1; i++) {
     const a = src[i];
     const b = src[i + 1];
     const dist = Math.hypot(b.x - a.x, b.z - a.z);
-    const steps = Math.max(1, Math.ceil(dist / 5));
+    const steps = Math.max(1, Math.ceil(dist / stepDist));
     for (let s = 0; s < steps; s++) {
       const t = s / steps;
       out.push({ x: a.x + (b.x - a.x) * t, z: a.z + (b.z - a.z) * t });
@@ -175,9 +217,10 @@ function createCurvedRoadGeometry(
   rawPoints: GpsPoint[],
   width: number,
   closed?: boolean,
-  baseY = 0.028
+  baseY = 0.04,
+  uvRepeatMeters = 22
 ): THREE.BufferGeometry {
-  const pts = resamplePolylineForRoad(rawPoints, closed);
+  const pts = resamplePolylineForRoad(rawPoints, closed, 6.5);
   const hw = width * 0.5;
   const positions: number[] = [];
   const normals: number[] = [];
@@ -197,7 +240,6 @@ function createCurvedRoadGeometry(
     const tlen = Math.hypot(tx, tz) || 1;
     tx /= tlen;
     tz /= tlen;
-    // Right normal
     const nx = -tz;
     const nz = tx;
 
@@ -211,11 +253,11 @@ function createCurvedRoadGeometry(
 
     positions.push(lx, ly, lz, rx, ry, rz);
     normals.push(0, 1, 0, 0, 1, 0);
-    uvs.push(0, arcDist / 20, 1, arcDist / 20);
+    uvs.push(0, arcDist / uvRepeatMeters, 1, arcDist / uvRepeatMeters);
 
     if (i < pts.length - 1) {
       const base = i * 2;
-      indices.push(base, base + 2, base + 1, base + 1, base + 2, base + 3);
+      indices.push(base, base + 1, base + 2, base + 1, base + 3, base + 2);
     }
   }
 
@@ -250,6 +292,77 @@ function distanceToRoadNetwork(x: number, z: number): number {
   return minClearance;
 }
 
+function isPointInsideOtherRoad(x: number, z: number, excludeSegId: string, margin = 1.2): boolean {
+  for (const other of ROAD_SEGMENTS) {
+    if (other.id === excludeSegId || other.isDirtTrail) continue;
+    const pts = other.closed ? [...other.points, other.points[0]] : other.points;
+    const threshold = other.width * 0.5 + margin;
+    for (let i = 0; i < pts.length - 1; i++) {
+      if (pointToSegmentDist(x, z, pts[i].x, pts[i].z, pts[i + 1].x, pts[i + 1].z) < threshold) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function isSidewalkEdgeBlocked(x: number, z: number, segId: string): boolean {
+  if (isWaterAt(x, z) || getBridgeElevationAt(x, z) > 0.05) return true;
+  if (x >= -1385 && x <= -535 && z >= 565 && z <= 1015) return true; // Airport tarmac & runways
+  if (isPointInsideOtherRoad(x, z, segId, 1.4)) return true;
+
+  for (const b of BRIDGE_SPANS) {
+    if (z >= b.zStart - 8 && z <= b.zEnd + 8 && Math.abs(x - b.x) <= b.width * 0.65 + 4) return true;
+  }
+  for (const ov of OVERPASS_SPANS) {
+    const along = ov.axis === 'x' ? Math.abs(x - ov.centerX) : Math.abs(z - ov.centerZ);
+    const cross = ov.axis === 'x' ? Math.abs(z - ov.centerZ) : Math.abs(x - ov.centerX);
+    if (along <= ov.length * 0.5 + 8 && cross <= ov.width * 0.6 + 6) return true;
+  }
+  for (const un of UNDERPASS_SPANS) {
+    const along = un.axis === 'x' ? Math.abs(x - un.centerX) : Math.abs(z - un.centerZ);
+    const cross = un.axis === 'x' ? Math.abs(z - un.centerZ) : Math.abs(x - un.centerX);
+    if (along <= un.length * 0.5 + 8 && cross <= un.width * 0.6 + 6) return true;
+  }
+  for (const p of PARKING_LOTS) {
+    if (Math.abs(x - p.x) < p.width * 0.5 + 2.5 && Math.abs(z - p.z) < p.depth * 0.5 + 2.5) return true;
+  }
+  if (Math.abs(x - SAFEHOUSE_GARAGE_ZONE.x) < 11 && Math.abs(z - SAFEHOUSE_GARAGE_ZONE.z) < 12) return true;
+  for (const s of SHOPS) {
+    if (Math.abs(x - s.x) < 18 && Math.abs(z - s.z) < 16) return true;
+  }
+  return false;
+}
+
+function buildCurvedStripGeometry(
+  leftPts: { x: number; y: number; z: number }[],
+  rightPts: { x: number; y: number; z: number }[],
+  arcDists: number[],
+  uvScaleV: number
+): THREE.BufferGeometry | null {
+  if (leftPts.length < 2) return null;
+  const positions: number[] = [];
+  const uvs: number[] = [];
+  const indices: number[] = [];
+
+  for (let i = 0; i < leftPts.length; i++) {
+    const l = leftPts[i];
+    const r = rightPts[i];
+    positions.push(l.x, l.y, l.z, r.x, r.y, r.z);
+    uvs.push(0, arcDists[i] * uvScaleV, 1, arcDists[i] * uvScaleV);
+    if (i < leftPts.length - 1) {
+      const b = i * 2;
+      indices.push(b, b + 1, b + 2, b + 1, b + 3, b + 2);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geo.setIndex(indices);
+  geo.computeVertexNormals();
+  return geo.toNonIndexed();
+}
+
 function createPalmCrownGeometry(): THREE.BufferGeometry {
   const fronds: THREE.BufferGeometry[] = [];
   const frondCount = 7;
@@ -271,14 +384,19 @@ function createPalmCrownGeometry(): THREE.BufferGeometry {
 export function buildOpenWorld(textures: ProceduralTextureSet): WorldBuildResult {
   const worldGroup = new THREE.Group();
   const colliders: AABBCollider[] = [];
+  const floorSurfaces: AABBCollider[] = [];
   const circleColliders: CircleCollider[] = [];
   const ramps: StuntRamp[] = [];
   const barrels: ExplosiveBarrelEntity[] = [];
+  const rangeTargets: RangeTargetEntity[] = [];
+  const elevators: ElevatorEntity[] = [];
+  const buildingWindowMaterials: THREE.Material[] = [];
+  const spinners: THREE.Object3D[] = [];
   const roadRects: { x: number; z: number; w: number; l: number }[] = [];
   const buildingFootprints: { x: number; z: number; w: number; d: number; color: string }[] = [];
   const shopRings: THREE.Mesh[] = [];
 
-  // 0. Atmospheric Vice Horizon Sky Dome (Encloses 5x Island & Endless Sea)
+  // 0. Atmospheric Vice Horizon Sky Dome (Encloses 15x Island & Endless Sea)
   const skyMat = new THREE.ShaderMaterial({
     side: THREE.BackSide,
     depthWrite: false,
@@ -320,194 +438,529 @@ export function buildOpenWorld(textures: ProceduralTextureSet): WorldBuildResult
       }
     `,
   });
-  const skyDome = new THREE.Mesh(new THREE.SphereGeometry(1250, 32, 20), skyMat);
+  const skyDome = new THREE.Mesh(new THREE.SphereGeometry(2850, 32, 20), skyMat);
   worldGroup.add(skyDome);
 
-  // 1. Endless Ocean Surrounding All Sides of the 5x Island (No visible walls!)
+  // Dynamic Volumetric-Look 3D Sky Clouds (Layered Clusters that wax/wane in coverage)
+  const cloudGroup = new THREE.Group();
+  const cloudMaterials: THREE.MeshStandardMaterial[] = [];
+  const cloudMatA = new THREE.MeshStandardMaterial({
+    color: 0xf8fafc,
+    roughness: 0.95,
+    metalness: 0.0,
+    transparent: true,
+    opacity: 0.68,
+    depthWrite: false,
+  });
+  const cloudMatB = cloudMatA.clone();
+  cloudMaterials.push(cloudMatA, cloudMatB);
+
+  const puffGeo = new THREE.SphereGeometry(1, 10, 8);
+  let cSeed = 8821;
+  const crand = () => {
+    cSeed = (cSeed * 16807) % 2147483647;
+    return (cSeed - 1) / 2147483646;
+  };
+  for (let i = 0; i < 48; i++) {
+    const cluster = new THREE.Group();
+    const cx = (crand() - 0.5) * 3200;
+    const cy = 220 + crand() * 140;
+    const cz = (crand() - 0.5) * 3200;
+    cluster.position.set(cx, cy, cz);
+    const mat = i % 2 === 0 ? cloudMatA : cloudMatB;
+    const puffs = 3 + (i % 3);
+    for (let p = 0; p < puffs; p++) {
+      const puff = new THREE.Mesh(puffGeo, mat);
+      puff.position.set((crand() - 0.5) * 52, (crand() - 0.5) * 10, (crand() - 0.5) * 38);
+      puff.scale.set(28 + crand() * 34, 9 + crand() * 8, 22 + crand() * 28);
+      cluster.add(puff);
+    }
+    cluster.userData.speed = 3.5 + crand() * 5.0;
+    cloudGroup.add(cluster);
+  }
+  worldGroup.add(cloudGroup);
+
+  // 1. Endless Open Ocean (6000m x 6000m)
   const oceanMat = new THREE.MeshPhysicalMaterial({
     map: textures.ocean,
     normalMap: textures.oceanNormal,
-    normalScale: new THREE.Vector2(0.46, 0.46),
-    color: 0x0ea5e9,
-    roughness: 0.07,
-    metalness: 0.22,
-    clearcoat: 1.0,
-    clearcoatRoughness: 0.05,
-    envMapIntensity: 1.45,
+    normalScale: new THREE.Vector2(0.42, 0.42),
+    color: 0x0284c7,
+    roughness: 0.14,
+    metalness: 0.16,
+    clearcoat: 0.85,
+    clearcoatRoughness: 0.1,
+    envMapIntensity: 0.72,
   });
-  textures.ocean.repeat.set(36, 36);
-  textures.oceanNormal.repeat.set(44, 44);
-  const oceanMesh = new THREE.Mesh(new THREE.PlaneGeometry(3000, 3000), oceanMat);
+  textures.ocean.repeat.set(90, 90);
+  textures.oceanNormal.repeat.set(110, 110);
+  const oceanMesh = new THREE.Mesh(new THREE.PlaneGeometry(6000, 6000), oceanMat);
   oceanMesh.rotation.x = -Math.PI / 2;
-  oceanMesh.position.set(0, -0.35, 0);
+  oceanMesh.position.set(0, -0.45, 0);
   oceanMesh.receiveShadow = true;
   worldGroup.add(oceanMesh);
 
-  // 2. 5x Organic Island Landmass (Sandy Coastal Perimeter + Urban Inland + Vice Canal & Marina Bay Cutouts)
-  const sandMat = new THREE.MeshStandardMaterial({
-    map: textures.sand,
+  // 2. Photorealistic 15x Island Landscape (Multi-Scale Grass + Organic Beach Sand Transition + Hills)
+  const terrainMat = new THREE.MeshStandardMaterial({
+    map: textures.meadowGrass,
+    normalMap: textures.grassNormal,
+    normalScale: new THREE.Vector2(0.55, 0.55),
     roughness: 0.94,
     metalness: 0.02,
+    envMapIntensity: 0.45,
   });
-  textures.sand.repeat.set(1, 1);
+  terrainMat.onBeforeCompile = (shader) => {
+    shader.uniforms.uSandTex = { value: textures.sand };
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+varying vec3 vTerrainWorldPos;`
+      )
+      .replace(
+        '#include <project_vertex>',
+        `#include <project_vertex>
+vTerrainWorldPos = ( modelMatrix * vec4( transformed, 1.0 ) ).xyz;`
+      );
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+varying vec3 vTerrainWorldPos;
+uniform sampler2D uSandTex;
 
-  const groundMat = new THREE.MeshStandardMaterial({
-    map: textures.sidewalk,
-    roughness: 0.88,
-    metalness: 0.04,
-  });
-  textures.sidewalk.repeat.set(1, 1);
+float tHash(vec2 p) {
+  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+}
+
+float tNoise(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(
+    mix(tHash(i + vec2(0.0, 0.0)), tHash(i + vec2(1.0, 0.0)), u.x),
+    mix(tHash(i + vec2(0.0, 1.0)), tHash(i + vec2(1.0, 1.0)), u.x),
+    u.y
+  );
+}
+
+float tFbm(vec2 p) {
+  float v = 0.0;
+  float a = 0.5;
+  mat2 rot = mat2(0.8, 0.6, -0.6, 0.8);
+  for (int i = 0; i < 4; i++) {
+    v += a * tNoise(p);
+    p = rot * p * 2.04 + vec2(13.7, 29.3);
+    a *= 0.5;
+  }
+  return v;
+}`
+      )
+      .replace(
+        '#include <map_fragment>',
+        `#include <map_fragment>
+#ifdef USE_MAP
+  vec2 grassUv2 = vec2(
+    vTerrainWorldPos.x * 0.019 - vTerrainWorldPos.z * 0.011,
+    vTerrainWorldPos.x * 0.011 + vTerrainWorldPos.z * 0.019
+  );
+  vec3 grassMacro = texture2D(map, grassUv2).rgb;
+  float patchMix = tFbm(vTerrainWorldPos.xz * 0.016);
+  vec3 grassCol = mix(diffuseColor.rgb, grassMacro, 0.45 * patchMix + 0.15);
+
+  float macroNoise = tFbm(vTerrainWorldPos.xz * 0.0045);
+  float detailNoise = tNoise(vTerrainWorldPos.xz * 0.075);
+  vec3 lushTint = vec3(0.84, 1.08, 0.78);
+  vec3 warmTint = vec3(1.16, 1.05, 0.72);
+  grassCol *= mix(lushTint, warmTint, smoothstep(0.28, 0.75, macroNoise));
+  grassCol *= (0.86 + 0.28 * detailNoise);
+
+  float forestMask = smoothstep(-700.0, -900.0, vTerrainWorldPos.z);
+  grassCol = mix(grassCol, grassCol * vec3(0.76, 0.80, 0.65), forestMask * 0.62);
+
+  float ang = atan(vTerrainWorldPos.z, vTerrainWorldPos.x);
+  float dAir = ang - 2.42;
+  float dCape = ang + 1.55;
+  float airPen = 185.0 * exp(-(dAir * dAir) / 0.24);
+  float nCape = 120.0 * exp(-(dCape * dCape) / 0.30);
+  float coastR = 1520.0 + airPen + nCape
+    + 95.0 * sin(ang * 2.0 - 0.4)
+    + 64.0 * cos(ang * 3.0 + 0.7)
+    + 36.0 * sin(ang * 5.0);
+  float distToCoast = coastR - length(vTerrainWorldPos.xz);
+  float sandNoise = (tFbm(vTerrainWorldPos.xz * 0.022) - 0.5) * 34.0;
+  float elevationMask = 1.0 - smoothstep(2.5, 10.0, vTerrainWorldPos.y);
+  float beachFactor = smoothstep(82.0, 44.0, distToCoast + sandNoise) * elevationMask;
+
+  vec3 sandA = texture2D(uSandTex, vTerrainWorldPos.xz * 0.036).rgb;
+  vec3 sandB = texture2D(uSandTex, vTerrainWorldPos.xz * 0.013 + vec2(0.41, 0.23)).rgb;
+  vec3 sandCol = mix(sandA, sandB, 0.45);
+  float wetSand = smoothstep(24.0, 3.0, distToCoast);
+  sandCol *= mix(1.0, 0.72, wetSand);
+
+  diffuseColor.rgb = mix(grassCol, sandCol, beachFactor);
+#endif`
+      );
+  };
 
   const outerOutline = getIslandOutlinePoints(120);
-  const innerOutline = outerOutline.map((p) => ({ x: p.x * 0.932, z: p.z * 0.932 }));
 
   const splitIslandPolygons = (poly: GpsPoint[]): GpsPoint[][] => {
     const pieces: GpsPoint[][] = [];
-    // North Island (z <= 124)
-    pieces.push(clipPolygonHalfPlane(poly, 0, 1, 124));
-    // West Land Connector around Vice Canal (x <= -108, 124 <= z <= 152)
-    let westConn = clipPolygonHalfPlane(poly, 1, 0, -108);
-    westConn = clipPolygonHalfPlane(westConn, 0, -1, -124);
-    westConn = clipPolygonHalfPlane(westConn, 0, 1, 152);
+    // North of North Emerald River (z <= -815)
+    pieces.push(clipPolygonHalfPlane(poly, 0, 1, -815));
+    // River West Connector (x <= -820, -815 <= z <= -765)
+    let rWest = clipPolygonHalfPlane(poly, 1, 0, -820);
+    rWest = clipPolygonHalfPlane(rWest, 0, -1, 815);
+    rWest = clipPolygonHalfPlane(rWest, 0, 1, -765);
+    pieces.push(rWest);
+    // River East Connector (x >= 860, -815 <= z <= -765)
+    let rEast = clipPolygonHalfPlane(poly, -1, 0, -860);
+    rEast = clipPolygonHalfPlane(rEast, 0, -1, 815);
+    rEast = clipPolygonHalfPlane(rEast, 0, 1, -765);
+    pieces.push(rEast);
+    // Central Band between North River and Vice Canal (-765 <= z <= 392)
+    let centralBand = clipPolygonHalfPlane(poly, 0, -1, 765);
+    centralBand = clipPolygonHalfPlane(centralBand, 0, 1, 392);
+    pieces.push(centralBand);
+    // West Land Connector around Vice Canal (x <= -340, 392 <= z <= 468)
+    let westConn = clipPolygonHalfPlane(poly, 1, 0, -340);
+    westConn = clipPolygonHalfPlane(westConn, 0, -1, -392);
+    westConn = clipPolygonHalfPlane(westConn, 0, 1, 468);
     pieces.push(westConn);
-    // South Island West of Marina (x <= 208, z >= 152)
-    let southWest = clipPolygonHalfPlane(poly, 0, -1, -152);
-    southWest = clipPolygonHalfPlane(southWest, 1, 0, 208);
+    // South Island West of Marina (x <= 560, z >= 468)
+    let southWest = clipPolygonHalfPlane(poly, 0, -1, -468);
+    southWest = clipPolygonHalfPlane(southWest, 1, 0, 560);
     pieces.push(southWest);
-    // South Island East strip above Marina Harbor (x >= 208, 152 <= z <= 215)
-    let southEastNorth = clipPolygonHalfPlane(poly, 0, -1, -152);
-    southEastNorth = clipPolygonHalfPlane(southEastNorth, -1, 0, -208);
-    southEastNorth = clipPolygonHalfPlane(southEastNorth, 0, 1, 215);
-    pieces.push(southEastNorth);
-    // South Island East strip below Marina Harbor (x >= 208, z >= 315)
-    let southEastSouth = clipPolygonHalfPlane(poly, 0, -1, -315);
-    southEastSouth = clipPolygonHalfPlane(southEastSouth, -1, 0, -208);
-    pieces.push(southEastSouth);
+    // South East strip above Marina Harbor (x >= 560, 468 <= z <= 620)
+    let seNorth = clipPolygonHalfPlane(poly, 0, -1, -468);
+    seNorth = clipPolygonHalfPlane(seNorth, -1, 0, -560);
+    seNorth = clipPolygonHalfPlane(seNorth, 0, 1, 620);
+    pieces.push(seNorth);
+    // South East strip below Marina Harbor (x >= 560, z >= 1120)
+    let seSouth = clipPolygonHalfPlane(poly, 0, -1, -1120);
+    seSouth = clipPolygonHalfPlane(seSouth, -1, 0, -560);
+    pieces.push(seSouth);
     return pieces;
   };
 
-  const sandGeos: THREE.BufferGeometry[] = [];
+  const terrainGeos: THREE.BufferGeometry[] = [];
   for (const piece of splitIslandPolygons(outerOutline)) {
-    const g = buildLandmassGeometry(piece, 0.045);
-    if (g) sandGeos.push(g.toNonIndexed());
-  }
-  if (sandGeos.length > 0) {
-    const mergedSand = BufferGeometryUtils.mergeGeometries(sandGeos);
-    const sandMesh = new THREE.Mesh(mergedSand, sandMat);
-    sandMesh.position.y = -0.025;
-    sandMesh.receiveShadow = true;
-    worldGroup.add(sandMesh);
-    sandGeos.forEach((g) => g.dispose());
-  }
-
-  const urbanGeos: THREE.BufferGeometry[] = [];
-  for (const piece of splitIslandPolygons(innerOutline)) {
     const g = buildLandmassGeometry(piece, 0.055);
-    if (g) urbanGeos.push(g.toNonIndexed());
+    if (g) terrainGeos.push(g.toNonIndexed());
   }
-  if (urbanGeos.length > 0) {
-    const mergedUrban = BufferGeometryUtils.mergeGeometries(urbanGeos);
-    const urbanMesh = new THREE.Mesh(mergedUrban, groundMat);
-    urbanMesh.position.y = 0.0;
-    urbanMesh.receiveShadow = true;
-    worldGroup.add(urbanMesh);
-    urbanGeos.forEach((g) => g.dispose());
+  if (terrainGeos.length > 0) {
+    const mergedTerrain = BufferGeometryUtils.mergeGeometries(terrainGeos);
+    const terrainMesh = new THREE.Mesh(mergedTerrain, terrainMat);
+    terrainMesh.position.y = 0.0;
+    terrainMesh.receiveShadow = true;
+    worldGroup.add(terrainMesh);
+    terrainGeos.forEach((g) => g.dispose());
   }
 
-  // Stone Canal & Marina Quay Embankment Walls
+  // Urban Weathered Concrete Material for Sidewalks, Curbs & Downtown Block Plazas
+  const sidewalkTex = textures.sidewalk;
+  const concretePlazaTex = textures.sidewalk.clone();
+  concretePlazaTex.repeat.set(1, 1);
+  concretePlazaTex.needsUpdate = true;
+
+  const sidewalkDeckMat = new THREE.MeshStandardMaterial({
+    map: sidewalkTex,
+    normalMap: textures.sidewalkNormal,
+    normalScale: new THREE.Vector2(0.45, 0.45),
+    color: 0xcbd5e1,
+    roughness: 0.86,
+    metalness: 0.03,
+  });
+
+  const urbanPlazaMat = new THREE.MeshStandardMaterial({
+    map: concretePlazaTex,
+    normalMap: textures.sidewalkNormal,
+    normalScale: new THREE.Vector2(0.38, 0.38),
+    color: 0xbac2cc,
+    roughness: 0.88,
+    metalness: 0.03,
+    polygonOffset: true,
+    polygonOffsetFactor: 1,
+  });
+
+  const curbStoneMat = new THREE.MeshStandardMaterial({
+    color: 0x828993,
+    normalMap: textures.sidewalkNormal,
+    normalScale: new THREE.Vector2(0.32, 0.32),
+    roughness: 0.82,
+    metalness: 0.04,
+  });
+
+  // Stone Canal & Marina Embankment Walls
   const canalWallMat = new THREE.MeshStandardMaterial({ color: 0x475569, roughness: 0.78 });
-  const northCanalWall = new THREE.Mesh(new THREE.BoxGeometry(510, 1.5, 1.0), canalWallMat);
-  northCanalWall.position.set(147, -0.68, 124);
-  const southCanalWall = new THREE.Mesh(new THREE.BoxGeometry(510, 1.5, 1.0), canalWallMat);
-  southCanalWall.position.set(147, -0.68, 152);
-  const westCanalCap = new THREE.Mesh(new THREE.BoxGeometry(1.2, 1.5, 29), canalWallMat);
-  westCanalCap.position.set(-108, -0.68, 138);
-  const marinaWestWall = new THREE.Mesh(new THREE.BoxGeometry(1.4, 1.5, 102), canalWallMat);
-  marinaWestWall.position.set(208, -0.68, 265);
-  const marinaNorthWall = new THREE.Mesh(new THREE.BoxGeometry(156, 1.5, 1.4), canalWallMat);
-  marinaNorthWall.position.set(286, -0.68, 215);
-  worldGroup.add(northCanalWall, southCanalWall, westCanalCap, marinaWestWall, marinaNorthWall);
+  const addEmbankment = (x: number, z: number, w: number, d: number) => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, 1.8, d), canalWallMat);
+    m.position.set(x, -0.75, z);
+    worldGroup.add(m);
+  };
+  addEmbankment(590, 392, 1860, 1.6);
+  addEmbankment(590, 468, 1860, 1.6);
+  addEmbankment(-340, 430, 1.6, 78);
+  addEmbankment(20, -815, 1680, 1.6);
+  addEmbankment(20, -765, 1680, 1.6);
+  addEmbankment(560, 870, 1.8, 504);
+  addEmbankment(920, 620, 720, 1.8);
 
-  // Scenic Roundabout Plazas & Central Water Fountains
-  const plazaGrassMat = new THREE.MeshStandardMaterial({ color: 0x2f6b47, roughness: 0.9 });
+  // Scenic Roundabout Plazas & Central Fountains (Textured Grass Lawns + Granite Rim)
+  const plazaGrassTex = textures.meadowGrass.clone();
+  plazaGrassTex.repeat.set(5, 5);
+  plazaGrassTex.needsUpdate = true;
+  const plazaGrassMat = new THREE.MeshStandardMaterial({
+    map: plazaGrassTex,
+    normalMap: textures.grassNormal,
+    normalScale: new THREE.Vector2(0.48, 0.48),
+    color: 0xd9f2d0,
+    roughness: 0.9,
+  });
   const marbleMat = new THREE.MeshStandardMaterial({ color: 0xe2e8f0, roughness: 0.35, metalness: 0.12 });
   const fountainWaterMat = new THREE.MeshPhysicalMaterial({ color: 0x38bdf8, roughness: 0.08, clearcoat: 1 });
 
   const addRoundaboutPlaza = (cx: number, cz: number, radius: number) => {
-    const grass = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius + 0.4, 0.22, 32), plazaGrassMat);
+    const curbRing = new THREE.Mesh(new THREE.CylinderGeometry(radius + 0.9, radius + 1.2, 0.22, 40), curbStoneMat);
+    curbRing.position.set(cx, 0.09, cz);
+    curbRing.receiveShadow = true;
+    const grass = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius + 0.1, 0.25, 40), plazaGrassMat);
     grass.position.set(cx, 0.11, cz);
     grass.receiveShadow = true;
-    worldGroup.add(grass);
+    worldGroup.add(curbRing, grass);
 
-    const basin = new THREE.Mesh(new THREE.CylinderGeometry(6.8, 7.2, 0.75, 24), marbleMat);
-    basin.position.set(cx, 0.45, cz);
-    const pool = new THREE.Mesh(new THREE.CylinderGeometry(5.9, 5.9, 0.6, 24), fountainWaterMat);
-    pool.position.set(cx, 0.62, cz);
-    const spire = new THREE.Mesh(new THREE.CylinderGeometry(1.1, 1.8, 3.2, 16), marbleMat);
-    spire.position.set(cx, 1.8, cz);
-    const crown = new THREE.Mesh(new THREE.TorusGeometry(2.0, 0.25, 10, 24), marbleMat);
+    const basin = new THREE.Mesh(new THREE.CylinderGeometry(9.2, 9.8, 0.9, 24), marbleMat);
+    basin.position.set(cx, 0.5, cz);
+    const pool = new THREE.Mesh(new THREE.CylinderGeometry(8.1, 8.1, 0.75, 24), fountainWaterMat);
+    pool.position.set(cx, 0.68, cz);
+    const spire = new THREE.Mesh(new THREE.CylinderGeometry(1.4, 2.2, 4.4, 16), marbleMat);
+    spire.position.set(cx, 2.3, cz);
+    const crown = new THREE.Mesh(new THREE.TorusGeometry(2.6, 0.32, 10, 24), marbleMat);
     crown.rotation.x = Math.PI / 2;
-    crown.position.set(cx, 3.2, cz);
+    crown.position.set(cx, 4.2, cz);
     worldGroup.add(basin, pool, spire, crown);
-    circleColliders.push({ x: cx, z: cz, radius: 7.4, height: 3.8 });
+    circleColliders.push({ x: cx, z: cz, radius: 9.9, height: 5.0 });
   };
-  addRoundaboutPlaza(0, -20, 25);
-  addRoundaboutPlaza(185, -20, 16.5);
+  addRoundaboutPlaza(0, -70, 42);
+  addRoundaboutPlaza(520, -70, 30);
 
-  // Rolling Green Foothills in North Heights
-  const hillMat = new THREE.MeshStandardMaterial({ color: 0x2a5c3f, roughness: 0.94 });
+  // Rolling Green Hills in Northern Highlands (Textured with Terrain Grass Shader)
   const northHills: [number, number, number, number][] = [
-    [-255, -270, 38, 16],
-    [-165, -335, 44, 21],
-    [-40, -355, 52, 24],
-    [85, -345, 46, 20],
-    [205, -310, 42, 18],
+    [-980, -1080, 120, 42],
+    [-540, -1240, 145, 58],
+    [-40, -1320, 155, 62],
+    [460, -1220, 140, 52],
+    [940, -1040, 130, 44],
   ];
   for (const [hx, hz, hr, hh] of northHills) {
-    const hill = new THREE.Mesh(new THREE.SphereGeometry(hr, 18, 12, 0, Math.PI * 2, 0, Math.PI * 0.5), hillMat);
+    const hillGeo = new THREE.SphereGeometry(hr, 24, 14, 0, Math.PI * 2, 0, Math.PI * 0.5);
+    const uvAttr = hillGeo.attributes.uv;
+    const posAttr = hillGeo.attributes.position;
+    for (let i = 0; i < posAttr.count; i++) {
+      uvAttr.setXY(i, (hx + posAttr.getX(i) * 1.25) * 0.055, (hz + posAttr.getZ(i) * 0.95) * 0.055);
+    }
+    const hill = new THREE.Mesh(hillGeo, terrainMat);
     hill.scale.set(1.25, hh / hr, 0.95);
-    hill.position.set(hx, -0.5, hz);
+    hill.position.set(hx, -1.0, hz);
     hill.receiveShadow = true;
     worldGroup.add(hill);
     circleColliders.push({ x: hx, z: hz, radius: hr * 0.85, height: hh });
   }
 
-  // 3. Curved Roads, Highways & Roundabouts (Batched into clean continuous meshes!)
-  const streetTex = textures.asphalt.clone();
-  streetTex.needsUpdate = true;
+  // 3. Curved Roads, Multi-Lane Highways, Raised Sidewalks, Curbs, Crosswalks & Forest Dirt Trails
+  const streetTex = textures.asphalt;
   const streetMat = new THREE.MeshStandardMaterial({
     map: streetTex,
     normalMap: textures.asphaltNormal,
-    normalScale: new THREE.Vector2(0.32, 0.32),
-    roughness: 0.62,
-    metalness: 0.1,
+    normalScale: new THREE.Vector2(0.45, 0.45),
+    roughness: 0.64,
+    metalness: 0.08,
     polygonOffset: true,
     polygonOffsetFactor: -1,
     polygonOffsetUnits: -1,
   });
 
   const highwayMat = new THREE.MeshStandardMaterial({
-    map: streetTex,
+    map: textures.highwayAsphalt,
     normalMap: textures.asphaltNormal,
-    normalScale: new THREE.Vector2(0.35, 0.35),
-    color: 0xdbeafe,
-    roughness: 0.55,
-    metalness: 0.16,
+    normalScale: new THREE.Vector2(0.48, 0.48),
+    roughness: 0.58,
+    metalness: 0.12,
     polygonOffset: true,
-    polygonOffsetFactor: -2,
-    polygonOffsetUnits: -2,
+    polygonOffsetFactor: -3,
+    polygonOffsetUnits: -3,
+  });
+
+  const dirtMat = new THREE.MeshStandardMaterial({
+    map: textures.dirtTrail,
+    normalMap: textures.grassNormal,
+    normalScale: new THREE.Vector2(0.28, 0.28),
+    roughness: 0.94,
+    metalness: 0.02,
+    polygonOffset: true,
+    polygonOffsetFactor: -1,
   });
 
   const highwayGeos: THREE.BufferGeometry[] = [];
   const streetGeos: THREE.BufferGeometry[] = [];
+  const trailGeos: THREE.BufferGeometry[] = [];
+  const sidewalkGeos: THREE.BufferGeometry[] = [];
+  const curbGeos: THREE.BufferGeometry[] = [];
+  const crosswalkPlacements: { x: number; z: number; angle: number; roadWidth: number }[] = [];
+
   for (const seg of ROAD_SEGMENTS) {
-    const geo = createCurvedRoadGeometry(seg.points, seg.width, seg.closed, seg.isHighway ? 0.036 : 0.028).toNonIndexed();
-    if (seg.isHighway) {
-      highwayGeos.push(geo);
-    } else {
-      streetGeos.push(geo);
+    const geo = createCurvedRoadGeometry(
+      seg.points,
+      seg.width,
+      seg.closed,
+      seg.isHighway ? 0.05 : seg.isDirtTrail ? 0.036 : 0.042,
+      seg.isHighway ? 26 : 20
+    ).toNonIndexed();
+    if (seg.isDirtTrail) {
+      trailGeos.push(geo);
+      continue;
+    }
+    if (seg.isHighway) highwayGeos.push(geo);
+    else streetGeos.push(geo);
+
+    // Build flanking Concrete Curbs & Raised Sidewalks (or Highway Shoulders) cleanly clipped at intersections
+    const pts = resamplePolylineForRoad(seg.points, seg.closed, 6.5);
+    const swWidth = seg.isHighway ? 2.1 : 3.6;
+    const curbFaceW = 0.28;
+    const curbTopY = seg.isHighway ? 0.08 : 0.11;
+    const gutterY = seg.isHighway ? 0.048 : 0.038;
+    const swOuterY = -0.02;
+    const isRoundabout = seg.id.startsWith('roundabout_');
+    const rbCenter = seg.id === 'roundabout_central' ? { x: 0, z: -70 } : { x: 520, z: -70 };
+
+    const normalsArr: { nx: number; nz: number }[] = [];
+    const arcDists: number[] = [];
+    let arcDist = 0;
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i];
+      const prev = i > 0 ? pts[i - 1] : p;
+      const next = i < pts.length - 1 ? pts[i + 1] : p;
+      if (i > 0) arcDist += Math.hypot(p.x - prev.x, p.z - prev.z);
+      arcDists.push(arcDist);
+      let tx = next.x - prev.x;
+      let tz = next.z - prev.z;
+      const tlen = Math.hypot(tx, tz) || 1;
+      tx /= tlen;
+      tz /= tlen;
+      normalsArr.push({ nx: -tz, nz: tx });
+    }
+
+    const hw = seg.width * 0.5;
+    for (const side of [-1, 1] as const) {
+      const validMask = pts.map((p, i) => {
+        const nx = normalsArr[i].nx * side;
+        const nz = normalsArr[i].nz * side;
+        if (isRoundabout) {
+          const toOutX = p.x - rbCenter.x;
+          const toOutZ = p.z - rbCenter.z;
+          if (nx * toOutX + nz * toOutZ < 0) return false;
+        }
+        const checkX = p.x + nx * (hw + swWidth * 0.52);
+        const checkZ = p.z + nz * (hw + swWidth * 0.52);
+        return !isSidewalkEdgeBlocked(checkX, checkZ, seg.id);
+      });
+
+      // Extract continuous runs of valid sidewalk samples
+      let runStart = -1;
+      for (let i = 0; i <= pts.length; i++) {
+        const isOk = i < pts.length && validMask[i];
+        if (isOk && runStart === -1) {
+          runStart = i;
+        } else if (!isOk && runStart !== -1) {
+          const runEnd = i - 1;
+          if (runEnd - runStart >= 1) {
+            const curbL: { x: number; y: number; z: number }[] = [];
+            const curbR: { x: number; y: number; z: number }[] = [];
+            const swL: { x: number; y: number; z: number }[] = [];
+            const swR: { x: number; y: number; z: number }[] = [];
+            const skirtR: { x: number; y: number; z: number }[] = [];
+            const runArcs: number[] = [];
+
+            for (let k = runStart; k <= runEnd; k++) {
+              const p = pts[k];
+              const nx = normalsArr[k].nx * side;
+              const nz = normalsArr[k].nz * side;
+              const ix = p.x + nx * (hw - 0.04);
+              const iz = p.z + nz * (hw - 0.04);
+              const cx = p.x + nx * (hw + curbFaceW);
+              const cz = p.z + nz * (hw + curbFaceW);
+              const ox = p.x + nx * (hw + curbFaceW + swWidth);
+              const oz = p.z + nz * (hw + curbFaceW + swWidth);
+              const sx = p.x + nx * (hw + curbFaceW + swWidth + 0.14);
+              const sz = p.z + nz * (hw + curbFaceW + swWidth + 0.14);
+
+              curbL.push({ x: ix, y: gutterY, z: iz });
+              curbR.push({ x: cx, y: curbTopY, z: cz });
+              swL.push({ x: cx, y: curbTopY, z: cz });
+              swR.push({ x: ox, y: curbTopY, z: oz });
+              skirtR.push({ x: sx, y: swOuterY, z: sz });
+              runArcs.push(arcDists[k]);
+            }
+
+            // Consistent triangle winding regardless of left (-1) or right (+1) side
+            const cg =
+              side === 1
+                ? buildCurvedStripGeometry(curbL, curbR, runArcs, 0.12)
+                : buildCurvedStripGeometry(curbR, curbL, runArcs, 0.12);
+            if (cg) curbGeos.push(cg);
+
+            const sg =
+              side === 1
+                ? buildCurvedStripGeometry(swL, swR, runArcs, 0.125)
+                : buildCurvedStripGeometry(swR, swL, runArcs, 0.125);
+            if (sg) {
+              if (seg.isHighway) curbGeos.push(sg);
+              else sidewalkGeos.push(sg);
+            }
+
+            const skg =
+              side === 1
+                ? buildCurvedStripGeometry(swR, skirtR, runArcs, 0.12)
+                : buildCurvedStripGeometry(skirtR, swR, runArcs, 0.12);
+            if (skg) curbGeos.push(skg);
+
+            // Spawn a crosswalk at city street intersection transitions
+            if (!seg.isHighway && !isRoundabout && side === 1) {
+              if (runEnd < pts.length - 2) {
+                const p = pts[runEnd];
+                const nx = normalsArr[runEnd].nx;
+                const nz = normalsArr[runEnd].nz;
+                if (!isWaterAt(p.x, p.z) && getBridgeElevationAt(p.x, p.z) === 0 && !isPointInsideOtherRoad(p.x, p.z, seg.id, 0.5)) {
+                  crosswalkPlacements.push({
+                    x: p.x,
+                    z: p.z,
+                    angle: Math.atan2(-nz, nx),
+                    roadWidth: seg.width,
+                  });
+                }
+              }
+              if (runStart > 1) {
+                const p = pts[runStart];
+                const nx = normalsArr[runStart].nx;
+                const nz = normalsArr[runStart].nz;
+                if (!isWaterAt(p.x, p.z) && getBridgeElevationAt(p.x, p.z) === 0 && !isPointInsideOtherRoad(p.x, p.z, seg.id, 0.5)) {
+                  crosswalkPlacements.push({
+                    x: p.x,
+                    z: p.z,
+                    angle: Math.atan2(-nz, nx),
+                    roadWidth: seg.width,
+                  });
+                }
+              }
+            }
+          }
+          runStart = -1;
+        }
+      }
     }
   }
+
   if (streetGeos.length > 0) {
     const m = new THREE.Mesh(BufferGeometryUtils.mergeGeometries(streetGeos), streetMat);
     m.receiveShadow = true;
@@ -520,13 +973,130 @@ export function buildOpenWorld(textures: ProceduralTextureSet): WorldBuildResult
     worldGroup.add(m);
     highwayGeos.forEach((g) => g.dispose());
   }
+  if (trailGeos.length > 0) {
+    const m = new THREE.Mesh(BufferGeometryUtils.mergeGeometries(trailGeos), dirtMat);
+    m.receiveShadow = true;
+    worldGroup.add(m);
+    trailGeos.forEach((g) => g.dispose());
+  }
+  if (sidewalkGeos.length > 0) {
+    const m = new THREE.Mesh(BufferGeometryUtils.mergeGeometries(sidewalkGeos), sidewalkDeckMat);
+    m.receiveShadow = true;
+    worldGroup.add(m);
+    sidewalkGeos.forEach((g) => g.dispose());
+  }
+  if (curbGeos.length > 0) {
+    const m = new THREE.Mesh(BufferGeometryUtils.mergeGeometries(curbGeos), curbStoneMat);
+    m.receiveShadow = true;
+    worldGroup.add(m);
+    curbGeos.forEach((g) => g.dispose());
+  }
 
-  // 4. Arched Bridges over Vice Canal with Solid Guardrails
+  // White Zebra Crosswalks at City Street Intersections (InstancedMesh with polygonOffset)
+  if (crosswalkPlacements.length > 0) {
+    const dedupedCrosswalks: typeof crosswalkPlacements = [];
+    for (const cw of crosswalkPlacements) {
+      if (!dedupedCrosswalks.some((o) => Math.hypot(o.x - cw.x, o.z - cw.z) < 8.5)) {
+        dedupedCrosswalks.push(cw);
+      }
+    }
+    const barGeos: THREE.BufferGeometry[] = [];
+    const barCount = 7;
+    for (let b = 0; b < barCount; b++) {
+      const offset = (b - (barCount - 1) * 0.5) * 2.0;
+      const g = new THREE.PlaneGeometry(0.95, 3.0);
+      g.rotateX(-Math.PI / 2);
+      g.translate(offset, 0.056, 0);
+      barGeos.push(g);
+    }
+    const zebraGeo = BufferGeometryUtils.mergeGeometries(barGeos);
+    barGeos.forEach((g) => g.dispose());
+    const zebraMat = new THREE.MeshStandardMaterial({
+      color: 0xe2e8f0,
+      roughness: 0.78,
+      polygonOffset: true,
+      polygonOffsetFactor: -4,
+      polygonOffsetUnits: -4,
+    });
+    const zebraInst = new THREE.InstancedMesh(zebraGeo, zebraMat, dedupedCrosswalks.length);
+    const dummy = new THREE.Object3D();
+    dedupedCrosswalks.forEach((cw, idx) => {
+      dummy.position.set(cw.x, 0, cw.z);
+      dummy.rotation.set(0, cw.angle, 0);
+      dummy.scale.set(Math.min(1.0, (cw.roadWidth - 3.0) / 14.0), 1, 1);
+      dummy.updateMatrix();
+      zebraInst.setMatrixAt(idx, dummy.matrix);
+    });
+    zebraInst.computeBoundingSphere();
+    worldGroup.add(zebraInst);
+  }
+
+  // Clean Dark Tarmac Intersection Junction Pads (cover overlapping centerlines inside junctions)
+  const junctionCoords: [number, number][] = [
+    [-360, -680], [0, -680], [240, -660], [520, -660],
+    [-360, -290], [0, -290], [240, -290], [520, -290],
+    [-360, 220], [0, 220], [240, 220], [520, 220],
+    [-760, 540], [-360, 540], [0, 540], [240, 540], [520, 540],
+    [-360, -60], [240, 40],
+  ];
+  {
+    const jGeo = new THREE.PlaneGeometry(18.5, 18.5);
+    jGeo.rotateX(-Math.PI / 2);
+    const jMat = new THREE.MeshStandardMaterial({
+      color: 0x1e222a,
+      normalMap: textures.asphaltNormal,
+      normalScale: new THREE.Vector2(0.42, 0.42),
+      roughness: 0.66,
+      metalness: 0.08,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
+    });
+    const jInst = new THREE.InstancedMesh(jGeo, jMat, junctionCoords.length);
+    const dummy = new THREE.Object3D();
+    junctionCoords.forEach(([jx, jz], idx) => {
+      dummy.position.set(jx, 0.045, jz);
+      dummy.rotation.set(0, 0, 0);
+      dummy.scale.set(1, 1, 1);
+      dummy.updateMatrix();
+      jInst.setMatrixAt(idx, dummy.matrix);
+    });
+    jInst.computeBoundingSphere();
+    worldGroup.add(jInst);
+  }
+
+  // Dedicated Paved Parking Lots with Painted Stalls & Curbs
+  const parkingMat = new THREE.MeshStandardMaterial({
+    map: textures.parkingLot,
+    normalMap: textures.asphaltNormal,
+    normalScale: new THREE.Vector2(0.32, 0.32),
+    roughness: 0.68,
+    polygonOffset: true,
+    polygonOffsetFactor: -2,
+  });
+  const curbMat = curbStoneMat;
+  for (const p of PARKING_LOTS) {
+    const lot = new THREE.Mesh(new THREE.PlaneGeometry(p.width, p.depth), parkingMat);
+    lot.rotation.x = -Math.PI / 2;
+    lot.rotation.z = p.rotation;
+    lot.position.set(p.x, 0.044, p.z);
+    lot.receiveShadow = true;
+    worldGroup.add(lot);
+    const backCurb = new THREE.Mesh(new THREE.BoxGeometry(p.width + 0.6, 0.24, 0.65), curbMat);
+    backCurb.position.set(p.x, 0.12, p.z - p.depth * 0.5);
+    const frontCurbL = new THREE.Mesh(new THREE.BoxGeometry(p.width * 0.34, 0.24, 0.65), curbMat);
+    frontCurbL.position.set(p.x - p.width * 0.33, 0.12, p.z + p.depth * 0.5);
+    const frontCurbR = new THREE.Mesh(new THREE.BoxGeometry(p.width * 0.34, 0.24, 0.65), curbMat);
+    frontCurbR.position.set(p.x + p.width * 0.33, 0.12, p.z + p.depth * 0.5);
+    worldGroup.add(backCurb, frontCurbL, frontCurbR);
+  }
+
+  // 4. Bridges, Elevated Overpasses (Nadchody) & Sunken Underpasses (Podchody)
   const deckMat = new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.72 });
   const railMat = new THREE.MeshStandardMaterial({ color: 0x94a3b8, metalness: 0.55, roughness: 0.36 });
   for (const b of BRIDGE_SPANS) {
     const spanLen = b.zEnd - b.zStart;
-    const bridgeSegs = 10;
+    const bridgeSegs = 12;
     const segLen = spanLen / bridgeSegs;
     for (let s = 0; s < bridgeSegs; s++) {
       const zMid = b.zStart + (s + 0.5) * segLen;
@@ -534,21 +1104,21 @@ export function buildOpenWorld(textures: ProceduralTextureSet): WorldBuildResult
       const y0 = getBridgeElevationAt(b.x, b.zStart + s * segLen);
       const y1 = getBridgeElevationAt(b.x, b.zStart + (s + 1) * segLen);
       const slope = Math.atan2(y1 - y0, segLen);
-      const deck = new THREE.Mesh(new THREE.BoxGeometry(b.width + 0.6, 0.38, segLen + 0.3), deckMat);
-      deck.position.set(b.x, yMid - 0.14, zMid);
+      const deck = new THREE.Mesh(new THREE.BoxGeometry(b.width + 0.8, 0.48, segLen + 0.35), deckMat);
+      deck.position.set(b.x, yMid - 0.18, zMid);
       deck.rotation.x = -slope;
       deck.receiveShadow = true;
       worldGroup.add(deck);
     }
     const halfW = b.width * 0.5;
     [-halfW, halfW].forEach((gx) => {
-      const rail = new THREE.Mesh(new THREE.CapsuleGeometry(0.16, spanLen - 1, 4, 8), railMat);
+      const rail = new THREE.Mesh(new THREE.CapsuleGeometry(0.18, spanLen - 1, 4, 8), railMat);
       rail.rotation.x = Math.PI / 2;
       rail.position.set(b.x + gx, b.peakElevation * 0.62 + 1.0, (b.zStart + b.zEnd) * 0.5);
       worldGroup.add(rail);
       colliders.push({
-        minX: b.x + gx - 0.35,
-        maxX: b.x + gx + 0.35,
+        minX: b.x + gx - 0.4,
+        maxX: b.x + gx + 0.4,
         minZ: b.zStart + 0.5,
         maxZ: b.zEnd - 0.5,
         height: b.peakElevation + 2.5,
@@ -556,90 +1126,190 @@ export function buildOpenWorld(textures: ProceduralTextureSet): WorldBuildResult
     });
   }
 
-  // 5. Massive Bayshore International Airport (Twin Runways, Taxiways, Lights, Control Tower, Fuel Depot & 2 Open Hangars)
+  // Elevated Highway Overpasses (Nadchody) with Drive-Up Ramps & Pillars
+  for (const ov of OVERPASS_SPANS) {
+    const ovGroup = new THREE.Group();
+    const flatLen = ov.length - ov.rampLen * 2;
+    const flatDeck = new THREE.Mesh(
+      new THREE.BoxGeometry(
+        ov.axis === 'x' ? flatLen : ov.width,
+        0.75,
+        ov.axis === 'x' ? ov.width : flatLen
+      ),
+      deckMat
+    );
+    flatDeck.position.set(ov.centerX, ov.deckHeight - 0.35, ov.centerZ);
+    flatDeck.castShadow = true;
+    flatDeck.receiveShadow = true;
+    ovGroup.add(flatDeck);
+
+    // Asphalt driving surface on top of overpass
+    const roadTop = new THREE.Mesh(
+      new THREE.PlaneGeometry(ov.axis === 'x' ? flatLen : ov.width - 1.2, ov.axis === 'x' ? ov.width - 1.2 : flatLen),
+      highwayMat
+    );
+    roadTop.rotation.x = -Math.PI / 2;
+    roadTop.position.set(ov.centerX, ov.deckHeight + 0.04, ov.centerZ);
+    ovGroup.add(roadTop);
+
+    // Support pillars spaced so traffic passes freely beneath
+    for (const offset of [-flatLen * 0.42, -flatLen * 0.16, flatLen * 0.16, flatLen * 0.42]) {
+      const px = ov.axis === 'x' ? ov.centerX + offset : ov.centerX;
+      const pz = ov.axis === 'x' ? ov.centerZ : ov.centerZ + offset;
+      for (const side of [-ov.width * 0.38, ov.width * 0.38]) {
+        const sx = ov.axis === 'x' ? px : px + side;
+        const sz = ov.axis === 'x' ? pz + side : pz;
+        const pillar = new THREE.Mesh(new THREE.CylinderGeometry(0.7, 0.85, ov.deckHeight, 12), canalWallMat);
+        pillar.position.set(sx, ov.deckHeight * 0.5, sz);
+        pillar.castShadow = true;
+        ovGroup.add(pillar);
+        circleColliders.push({ x: sx, z: sz, radius: 0.9, height: ov.deckHeight });
+      }
+    }
+
+    // Two Gentle Entry/Exit Ramps
+    const slopeAngle = Math.atan2(ov.deckHeight, ov.rampLen);
+    const slopeLen = Math.hypot(ov.rampLen, ov.deckHeight);
+    [-1, 1].forEach((dir) => {
+      const rampMesh = new THREE.Mesh(
+        new THREE.BoxGeometry(ov.axis === 'x' ? slopeLen : ov.width, 0.65, ov.axis === 'x' ? ov.width : slopeLen),
+        highwayMat
+      );
+      const midOffset = dir * (flatLen * 0.5 + ov.rampLen * 0.5);
+      rampMesh.position.set(
+        ov.axis === 'x' ? ov.centerX + midOffset : ov.centerX,
+        ov.deckHeight * 0.5 - 0.3,
+        ov.axis === 'x' ? ov.centerZ : ov.centerZ + midOffset
+      );
+      if (ov.axis === 'x') rampMesh.rotation.z = -dir * slopeAngle;
+      else rampMesh.rotation.x = dir * slopeAngle;
+      rampMesh.receiveShadow = true;
+      ovGroup.add(rampMesh);
+    });
+    worldGroup.add(ovGroup);
+  }
+
+  // Sunken Underpasses (Podchody) with Tunnel Roof Bridge & Interior Lights
+  const tunnelLightMat = new THREE.MeshBasicMaterial({ color: 0xfbbf24 });
+  for (const un of UNDERPASS_SPANS) {
+    const flatLen = un.length - un.rampLen * 2;
+    const roofDeck = new THREE.Mesh(
+      new THREE.BoxGeometry(
+        un.axis === 'x' ? flatLen * 0.65 : un.width + 4,
+        0.8,
+        un.axis === 'x' ? un.width + 4 : flatLen * 0.65
+      ),
+      deckMat
+    );
+    roofDeck.position.set(un.centerX, 0.35, un.centerZ);
+    roofDeck.receiveShadow = true;
+    worldGroup.add(roofDeck);
+
+    // Interior tunnel floor strip + glowing lights
+    const floorStrip = new THREE.Mesh(
+      new THREE.PlaneGeometry(un.axis === 'x' ? flatLen : un.width, un.axis === 'x' ? un.width : flatLen),
+      streetMat
+    );
+    floorStrip.rotation.x = -Math.PI / 2;
+    floorStrip.position.set(un.centerX, -un.depth + 0.04, un.centerZ);
+    worldGroup.add(floorStrip);
+
+    for (let t = -flatLen * 0.35; t <= flatLen * 0.35; t += 24) {
+      const lamp = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.16, 0.45), tunnelLightMat);
+      lamp.position.set(
+        un.axis === 'x' ? un.centerX + t : un.centerX,
+        -0.12,
+        un.axis === 'x' ? un.centerZ : un.centerZ + t
+      );
+      worldGroup.add(lamp);
+    }
+  }
+
+  // 5. Expanded 15x Bayshore International Airport (Twin 800m Runways, Hangars & Control Tower)
   const asphaltDarkMat = new THREE.MeshStandardMaterial({
-    color: 0x1e293b,
+    color: 0x1e2530,
+    normalMap: textures.asphaltNormal,
+    normalScale: new THREE.Vector2(0.36, 0.36),
     roughness: 0.78,
     polygonOffset: true,
     polygonOffsetFactor: -1,
   });
+  const apronConcreteTex = textures.sidewalk.clone();
+  apronConcreteTex.repeat.set(38, 20);
+  apronConcreteTex.needsUpdate = true;
   const apronMat = new THREE.MeshStandardMaterial({
-    color: 0x263244,
-    roughness: 0.84,
+    map: apronConcreteTex,
+    normalMap: textures.sidewalkNormal,
+    normalScale: new THREE.Vector2(0.28, 0.28),
+    color: 0x4b5563,
+    roughness: 0.85,
     polygonOffset: true,
     polygonOffsetFactor: -2,
   });
 
-  // Main Concrete Apron Deck
-  const apron = new THREE.Mesh(new THREE.PlaneGeometry(176, 98), apronMat);
+  const apron = new THREE.Mesh(new THREE.PlaneGeometry(820, 420), apronMat);
   apron.rotation.x = -Math.PI / 2;
-  apron.position.set(-235, 0.031, 232);
+  apron.position.set(-960, 0.032, 790);
   apron.receiveShadow = true;
   worldGroup.add(apron);
 
-  // Main East-West Runway (166m x 22m at z = 256)
-  const runwayMain = new THREE.Mesh(new THREE.PlaneGeometry(166, 22), asphaltDarkMat);
-  runwayMain.rotation.x = -Math.PI / 2;
-  runwayMain.position.set(-235, 0.038, 256);
-  runwayMain.receiveShadow = true;
-  worldGroup.add(runwayMain);
+  const runway1 = new THREE.Mesh(new THREE.PlaneGeometry(780, 32), asphaltDarkMat);
+  runway1.rotation.x = -Math.PI / 2;
+  runway1.position.set(-960, 0.04, 790);
+  runway1.receiveShadow = true;
+  worldGroup.add(runway1);
 
-  // Crosswind Secondary Runway (88m x 16m at x = -172, z = 228)
-  const runwayCross = new THREE.Mesh(new THREE.PlaneGeometry(16, 86), asphaltDarkMat);
-  runwayCross.rotation.x = -Math.PI / 2;
-  runwayCross.position.set(-172, 0.037, 230);
-  runwayCross.receiveShadow = true;
-  worldGroup.add(runwayCross);
+  const runway2 = new THREE.Mesh(new THREE.PlaneGeometry(720, 28), asphaltDarkMat);
+  runway2.rotation.x = -Math.PI / 2;
+  runway2.position.set(-960, 0.04, 920);
+  runway2.receiveShadow = true;
+  worldGroup.add(runway2);
 
   const stripeMat = new THREE.MeshBasicMaterial({ color: 0xf8fafc });
   const yellowLineMat = new THREE.MeshBasicMaterial({ color: 0xfacc15 });
-  for (let rx = -312; rx <= -160; rx += 11) {
-    const dash = new THREE.Mesh(new THREE.PlaneGeometry(6.2, 0.52), stripeMat);
+  for (let rx = -1320; rx <= -600; rx += 22) {
+    const dash = new THREE.Mesh(new THREE.PlaneGeometry(11, 0.8), stripeMat);
     dash.rotation.x = -Math.PI / 2;
-    dash.position.set(rx, 0.045, 256);
+    dash.position.set(rx, 0.048, 790);
     worldGroup.add(dash);
+    if (rx >= -1290 && rx <= -630) {
+      const dash2 = dash.clone();
+      dash2.position.z = 920;
+      worldGroup.add(dash2);
+    }
   }
-  for (let rz = 192; rz <= 268; rz += 10) {
-    const dash = new THREE.Mesh(new THREE.PlaneGeometry(0.46, 5.4), stripeMat);
-    dash.rotation.x = -Math.PI / 2;
-    dash.position.set(-172, 0.045, rz);
-    worldGroup.add(dash);
-  }
-  // Taxiway yellow guide line connecting Hangars to Runway
-  const taxiGuide = new THREE.Mesh(new THREE.PlaneGeometry(122, 0.45), yellowLineMat);
+  const taxiGuide = new THREE.Mesh(new THREE.PlaneGeometry(460, 0.7), yellowLineMat);
   taxiGuide.rotation.x = -Math.PI / 2;
-  taxiGuide.position.set(-244, 0.044, 228);
+  taxiGuide.position.set(-920, 0.045, 700);
   worldGroup.add(taxiGuide);
 
-  // Instanced Glowing Runway Edge Lights (High FPS!)
-  const runwayLightCoords: [number, number, number][] = [];
-  for (let lx = -314; lx <= -156; lx += 14) {
-    runwayLightCoords.push([lx, 245.5, 0x38bdf8]);
-    runwayLightCoords.push([lx, 266.5, 0x38bdf8]);
+  // Runway lights InstancedMesh
+  const rLightCoords: [number, number, number][] = [];
+  for (let lx = -1330; lx <= -590; lx += 32) {
+    rLightCoords.push([lx, 773, 0x38bdf8], [lx, 807, 0x38bdf8], [lx, 905, 0x38bdf8], [lx, 935, 0x38bdf8]);
   }
-  for (const lz of [249, 253, 259, 263]) {
-    runwayLightCoords.push([-316, lz, 0x22c55e]);
-    runwayLightCoords.push([-154, lz, 0xef4444]);
-  }
-  if (runwayLightCoords.length > 0) {
-    const rLightGeo = new THREE.SphereGeometry(0.24, 8, 6);
-    rLightGeo.translate(0, 0.18, 0);
-    const rLightMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
-    const rLightInst = new THREE.InstancedMesh(rLightGeo, rLightMat, runwayLightCoords.length);
+  if (rLightCoords.length > 0) {
+    const rLightGeo = new THREE.SphereGeometry(0.38, 6, 6);
+    rLightGeo.translate(0, 0.25, 0);
+    const rLightInst = new THREE.InstancedMesh(
+      rLightGeo,
+      new THREE.MeshBasicMaterial({ color: 0xffffff }),
+      rLightCoords.length
+    );
     const dummy = new THREE.Object3D();
-    const c = new THREE.Color();
-    runwayLightCoords.forEach(([lx, lz, hex], idx) => {
+    const col = new THREE.Color();
+    rLightCoords.forEach(([lx, lz, hex], idx) => {
       dummy.position.set(lx, 0, lz);
       dummy.updateMatrix();
       rLightInst.setMatrixAt(idx, dummy.matrix);
-      c.setHex(hex);
-      rLightInst.setColorAt(idx, c);
+      col.setHex(hex);
+      rLightInst.setColorAt(idx, col);
     });
     rLightInst.computeBoundingSphere();
     worldGroup.add(rLightInst);
   }
 
-  // Helper: Open-Front 3-Wall Aircraft Hangar (Open +Z facing Main Runway — Zero Doorway Collider!)
+  // Open-Front 3-Wall Aircraft Hangars (Open +Z facing Main Runways)
   const addOpenHangar = (
     cx: number,
     cz: number,
@@ -654,22 +1324,17 @@ export function buildOpenWorld(textures: ProceduralTextureSet): WorldBuildResult
     const hWallMat = new THREE.MeshStandardMaterial({ color: 0x334155, metalness: 0.55, roughness: 0.42 });
     const hRoofMat = new THREE.MeshStandardMaterial({ color: 0x475569, metalness: 0.62, roughness: 0.36 });
     const bayMat = new THREE.MeshBasicMaterial({ color: trimHex });
-    const thick = 0.8;
+    const thick = 1.2;
 
-    // Back wall (-Z)
     const backWall = new THREE.Mesh(new THREE.BoxGeometry(hw, hh, thick), hWallMat);
     backWall.position.set(0, hh * 0.5, -hd * 0.5 + thick * 0.5);
     backWall.castShadow = true;
-    backWall.receiveShadow = true;
-    // Left wall (-X)
     const leftWall = new THREE.Mesh(new THREE.BoxGeometry(thick, hh, hd), hWallMat);
     leftWall.position.set(-hw * 0.5 + thick * 0.5, hh * 0.5, 0);
     leftWall.castShadow = true;
-    // Right wall (+X)
     const rightWall = new THREE.Mesh(new THREE.BoxGeometry(thick, hh, hd), hWallMat);
     rightWall.position.set(hw * 0.5 - thick * 0.5, hh * 0.5, 0);
     rightWall.castShadow = true;
-    // Curved Barrel-Vault Roof
     const roof = new THREE.Mesh(
       new THREE.CylinderGeometry(hw * 0.5, hw * 0.5, hd, 16, 1, false, 0, Math.PI),
       hRoofMat
@@ -678,134 +1343,325 @@ export function buildOpenWorld(textures: ProceduralTextureSet): WorldBuildResult
     roof.rotation.y = Math.PI / 2;
     roof.scale.set(1, 1, 0.32);
     roof.position.set(0, hh, 0);
-    roof.castShadow = true;
-
-    // Glowing Entrance Strip + Floor Bay Perimeter
-    const lintel = new THREE.Mesh(new THREE.BoxGeometry(hw + 0.4, 0.32, 0.4), bayMat);
-    lintel.position.set(0, hh + 0.15, hd * 0.5);
-    const floorPad = new THREE.Mesh(new THREE.PlaneGeometry(hw - 3.2, hd - 2.6), apronMat);
+    const lintel = new THREE.Mesh(new THREE.BoxGeometry(hw + 0.5, 0.42, 0.5), bayMat);
+    lintel.position.set(0, hh + 0.2, hd * 0.5);
+    const floorPad = new THREE.Mesh(new THREE.PlaneGeometry(hw - 4, hd - 3), apronMat);
     floorPad.rotation.x = -Math.PI / 2;
-    floorPad.position.set(0, 0.042, 0);
-    const bayRing = new THREE.Mesh(new THREE.BoxGeometry(hw - 2.4, 0.05, 0.28), bayMat);
-    bayRing.position.set(0, 0.05, hd * 0.5 - 0.5);
+    floorPad.position.set(0, 0.046, 0);
+    const bayRing = new THREE.Mesh(new THREE.BoxGeometry(hw - 3, 0.06, 0.4), bayMat);
+    bayRing.position.set(0, 0.06, hd * 0.5 - 0.6);
     hg.add(backWall, leftWall, rightWall, roof, lintel, floorPad, bayRing);
-
     if (isPlayerStorage) {
-      const beacon = new THREE.Mesh(new THREE.SphereGeometry(0.45, 10, 8), bayMat);
-      beacon.position.set(0, hh + 2.6, hd * 0.5);
+      const beacon = new THREE.Mesh(new THREE.SphereGeometry(0.65, 10, 8), bayMat);
+      beacon.position.set(0, hh + 3.2, hd * 0.5);
       hg.add(beacon);
     }
-
     worldGroup.add(hg);
-    // Add colliders ONLY for Back, Left, Right walls — Front +Z is completely open to taxi/park inside!
     colliders.push(
-      { minX: cx - hw * 0.5, maxX: cx + hw * 0.5, minZ: cz - hd * 0.5, maxZ: cz - hd * 0.5 + thick + 0.15, height: hh + 2 },
-      { minX: cx - hw * 0.5, maxX: cx - hw * 0.5 + thick + 0.15, minZ: cz - hd * 0.5, maxZ: cz + hd * 0.5, height: hh + 2 },
-      { minX: cx + hw * 0.5 - thick - 0.15, maxX: cx + hw * 0.5, minZ: cz - hd * 0.5, maxZ: cz + hd * 0.5, height: hh + 2 }
+      { minX: cx - hw * 0.5, maxX: cx + hw * 0.5, minZ: cz - hd * 0.5, maxZ: cz - hd * 0.5 + thick + 0.2, height: hh + 2 },
+      { minX: cx - hw * 0.5, maxX: cx - hw * 0.5 + thick + 0.2, minZ: cz - hd * 0.5, maxZ: cz + hd * 0.5, height: hh + 2 },
+      { minX: cx + hw * 0.5 - thick - 0.2, maxX: cx + hw * 0.5, minZ: cz - hd * 0.5, maxZ: cz + hd * 0.5, height: hh + 2 }
     );
   };
 
-  // Player Storage Hangar (AIRPORT_HANGAR_ZONE: x:-268, z:204) + Fleet Hangar
-  addOpenHangar(AIRPORT_HANGAR_ZONE.x, AIRPORT_HANGAR_ZONE.z, 28, 24, 10.5, 0x06b6d4, true);
-  addOpenHangar(-218, 204, 24, 22, 10.0, 0xf59e0b, false);
+  addOpenHangar(AIRPORT_HANGAR_ZONE.x, AIRPORT_HANGAR_ZONE.z, 60, 48, 15, 0x06b6d4, true);
+  addOpenHangar(-850, 640, 46, 42, 13.5, 0xf59e0b, false);
 
-  // Air Traffic Control Tower + Radar Dish at West Apron Edge
-  const towerStem = new THREE.Mesh(
-    new THREE.CylinderGeometry(2.4, 3.1, 22, 14),
-    new THREE.MeshStandardMaterial({ color: 0x64748b, roughness: 0.48 })
-  );
-  towerStem.position.set(-306, 11, 226);
-  const towerCab = new THREE.Mesh(
-    new THREE.CylinderGeometry(4.8, 3.6, 3.8, 16),
-    new THREE.MeshPhysicalMaterial({ color: 0x06b6d4, roughness: 0.1, clearcoat: 1 })
-  );
-  towerCab.position.set(-306, 23.2, 226);
-  const radarDish = new THREE.Mesh(
-    new THREE.BoxGeometry(3.4, 0.7, 0.25),
-    new THREE.MeshStandardMaterial({ color: 0xe2e8f0, metalness: 0.7, roughness: 0.25 })
-  );
-  radarDish.position.set(-306, 26.2, 226);
-  worldGroup.add(towerStem, towerCab, radarDish);
-  colliders.push({ minX: -309.5, maxX: -302.5, minZ: 222.5, maxZ: 229.5, height: 26 });
+  // Helper to construct a real animated 3D Elevator + Shaft + Call Pads
+  const addElevator = (
+    id: string,
+    label: string,
+    ex: number,
+    ez: number,
+    floors: ElevatorFloorDef[],
+    accentHex: number
+  ) => {
+    const topY = floors[floors.length - 1].y;
+    const shaftGroup = new THREE.Group();
+    shaftGroup.position.set(ex, 0, ez);
 
-  // Aviation Fuel Tanks
-  [-295, -287].forEach((fx) => {
-    const tank = new THREE.Mesh(
-      new THREE.CylinderGeometry(2.2, 2.2, 7.2, 14),
-      new THREE.MeshStandardMaterial({ color: 0xe2e8f0, roughness: 0.35, metalness: 0.4 })
+    const glassWallMat = new THREE.MeshPhysicalMaterial({
+      color: 0x0f172a,
+      roughness: 0.12,
+      metalness: 0.2,
+      transparent: true,
+      opacity: 0.28,
+      envMapIntensity: 0.65,
+    });
+    const frameMat = new THREE.MeshStandardMaterial({ color: 0x334155, metalness: 0.75, roughness: 0.3 });
+    const glowMat = new THREE.MeshStandardMaterial({
+      color: accentHex,
+      emissive: accentHex,
+      emissiveIntensity: 1.45,
+    });
+
+    // 4 Corner Pillars
+    [
+      [-1.7, -1.7],
+      [1.7, -1.7],
+      [-1.7, 1.7],
+      [1.7, 1.7],
+    ].forEach(([px, pz]) => {
+      const post = new THREE.Mesh(new THREE.BoxGeometry(0.2, topY + 2.8, 0.2), frameMat);
+      post.position.set(px, (topY + 2.8) * 0.5, pz);
+      shaftGroup.add(post);
+    });
+
+    // Back glass panel so front (+Z) and sides stay easy to walk in
+    const backGlass = new THREE.Mesh(new THREE.BoxGeometry(3.3, topY + 2.5, 0.12), glassWallMat);
+    backGlass.position.set(0, (topY + 2.5) * 0.5, -1.72);
+    shaftGroup.add(backGlass);
+
+    // Call button pads on every floor
+    floors.forEach((fl) => {
+      const pad = new THREE.Mesh(new THREE.TorusGeometry(1.1, 0.07, 8, 22), glowMat);
+      pad.rotation.x = Math.PI / 2;
+      pad.position.set(0, fl.y + 0.08, 0);
+      shaftGroup.add(pad);
+    });
+
+    // Moving Elevator Cab Platform
+    const cabGroup = new THREE.Group();
+    cabGroup.position.set(0, floors[0].y, 0);
+    const cabFloor = new THREE.Mesh(
+      new THREE.BoxGeometry(3.2, 0.28, 3.2),
+      new THREE.MeshStandardMaterial({ color: 0x1e293b, metalness: 0.6, roughness: 0.35 })
     );
-    tank.rotation.z = Math.PI / 2;
-    tank.position.set(fx, 2.2, 198);
-    tank.castShadow = true;
-    worldGroup.add(tank);
-  });
-  colliders.push({ minX: -299, maxX: -283, minZ: 195.5, maxZ: 200.5, height: 4.8 });
+    cabFloor.position.y = -0.14;
+    const cabRim = new THREE.Mesh(new THREE.BoxGeometry(3.3, 0.12, 3.3), glowMat);
+    cabRim.position.y = -0.02;
+    const cabCanopy = new THREE.Mesh(new THREE.BoxGeometry(3.2, 0.16, 3.2), frameMat);
+    cabCanopy.position.y = 2.65;
+    cabGroup.add(cabFloor, cabRim, cabCanopy);
+    shaftGroup.add(cabGroup);
 
-  // Open-Front 3-Wall Safehouse Drive-In Garage (SAFEHOUSE_GARAGE_ZONE: x: 159, z: -224, open South +Z)
+    worldGroup.add(shaftGroup);
+    elevators.push({
+      id,
+      label,
+      x: ex,
+      z: ez,
+      radius: 2.35,
+      floors,
+      currentFloorIndex: 0,
+      targetFloorIndex: 0,
+      currentY: floors[0].y,
+      cabGroup,
+    });
+  };
+
+  // Air Traffic Control Tower (-1060, 670) with Sky Radar Deck & Elevator
+  {
+    const tx = -1060;
+    const tz = 670;
+    const towerStem = new THREE.Mesh(
+      new THREE.CylinderGeometry(3.4, 4.5, 32, 14),
+      new THREE.MeshStandardMaterial({ color: 0x64748b, roughness: 0.52 })
+    );
+    towerStem.position.set(tx, 16, tz);
+    const towerDeck = new THREE.Mesh(
+      new THREE.CylinderGeometry(8.2, 6.2, 1.2, 16),
+      new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.48, metalness: 0.45 })
+    );
+    towerDeck.position.set(tx, 32.4, tz);
+    const towerCab = new THREE.Mesh(
+      new THREE.CylinderGeometry(6.4, 5.4, 4.6, 16),
+      new THREE.MeshPhysicalMaterial({ color: 0x06b6d4, roughness: 0.16, clearcoat: 0.85, transparent: true, opacity: 0.42 })
+    );
+    towerCab.position.set(tx, 35.3, tz);
+    const towerRoof = new THREE.Mesh(
+      new THREE.CylinderGeometry(6.8, 6.8, 0.6, 16),
+      new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.5 })
+    );
+    towerRoof.position.set(tx, 37.9, tz);
+
+    // Rotating Airport Surveillance Radar Dish on ATC roof
+    const radarGroup = new THREE.Group();
+    radarGroup.position.set(tx, 39.2, tz);
+    const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.35, 2.2, 8), new THREE.MeshStandardMaterial({ color: 0x94a3b8 }));
+    const dish = new THREE.Mesh(new THREE.BoxGeometry(5.6, 1.3, 0.45), new THREE.MeshStandardMaterial({ color: 0xf8fafc, emissive: 0x38bdf8, emissiveIntensity: 0.5 }));
+    dish.position.y = 1.1;
+    radarGroup.add(mast, dish);
+    worldGroup.add(towerStem, towerDeck, towerCab, towerRoof, radarGroup);
+    spinners.push(radarGroup);
+
+    colliders.push({ minX: tx - 4.0, maxX: tx + 4.0, minZ: tz - 4.0, maxZ: tz + 4.0, height: 32.0 });
+    floorSurfaces.push({ minX: tx - 7.5, maxX: tx + 7.5, minZ: tz - 7.5, maxZ: tz + 7.5, minY: 31.8, height: 33.1, isRoofSurface: true });
+    addElevator(
+      'elev_atc',
+      'Riadiaca veža ATC',
+      tx + 5.8,
+      tz,
+      [
+        { name: 'Prízemie letiska', y: 0 },
+        { name: 'Vyhliadková paluba ATC (33 m)', y: 33.0 },
+      ],
+      0x06b6d4
+    );
+  }
+
+  // Bayshore Airport Terminal Concourse (Walk-in Hall + Upper Departure Terrace + Fuel Farm)
+  {
+    const termX = -980;
+    const termZ = 568;
+    const tw = 66;
+    const td = 24;
+    const th = 7.4;
+    const tg = new THREE.Group();
+    tg.position.set(termX, 0, termZ);
+
+    const tWallMat = new THREE.MeshStandardMaterial({ color: 0xe2e8f0, roughness: 0.45, metalness: 0.15 });
+    const tGlassMat = new THREE.MeshPhysicalMaterial({ color: 0x0ea5e9, roughness: 0.14, transparent: true, opacity: 0.32, envMapIntensity: 0.7 });
+    const tFloorMat = new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.36, metalness: 0.2 });
+    const tNeonMat = new THREE.MeshStandardMaterial({ color: 0x38bdf8, emissive: 0x0ea5e9, emissiveIntensity: 1.5 });
+
+    const tFloor = new THREE.Mesh(new THREE.PlaneGeometry(tw, td), tFloorMat);
+    tFloor.rotation.x = -Math.PI / 2;
+    tFloor.position.y = 0.045;
+    const tRoof = new THREE.Mesh(new THREE.BoxGeometry(tw + 2, 0.7, td + 2), new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.6 }));
+    tRoof.position.y = th + 0.35;
+    const tFacade = new THREE.Mesh(new THREE.BoxGeometry(tw, th, 0.4), tGlassMat);
+    tFacade.position.set(0, th * 0.5, td * 0.5 - 0.3);
+    const tBack = new THREE.Mesh(new THREE.BoxGeometry(tw, th, 0.9), tWallMat);
+    tBack.position.set(0, th * 0.5, -td * 0.5 + 0.45);
+    const tLeft = new THREE.Mesh(new THREE.BoxGeometry(0.9, th, td), tWallMat);
+    tLeft.position.set(-tw * 0.5 + 0.45, th * 0.5, 0);
+    const tRight = new THREE.Mesh(new THREE.BoxGeometry(0.9, th, td), tWallMat);
+    tRight.position.set(tw * 0.5 - 0.45, th * 0.5, 0);
+    const tSign = new THREE.Mesh(new THREE.BoxGeometry(28, 0.45, 0.45), tNeonMat);
+    tSign.position.set(0, th + 0.9, td * 0.5 + 0.2);
+
+    // Check-in Counters & Baggage Carousel inside Terminal
+    [-16, -4, 8].forEach((cx) => {
+      const desk = new THREE.Mesh(new THREE.BoxGeometry(7.2, 1.15, 2.2), new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.4 }));
+      desk.position.set(cx, 0.58, -5.5);
+      tg.add(desk);
+      colliders.push({ minX: termX + cx - 3.6, maxX: termX + cx + 3.6, minZ: termZ - 6.6, maxZ: termZ - 4.4, height: 1.4 });
+    });
+    const carousel = new THREE.Mesh(new THREE.TorusGeometry(3.2, 0.65, 8, 24), new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.5 }));
+    carousel.rotation.x = Math.PI / 2;
+    carousel.position.set(20, 0.42, 0);
+    tg.add(tFloor, tRoof, tBack, tLeft, tRight, tSign, carousel);
+    // Open south concourse doorway (left & right wing glass walls)
+    const wingGlassL = new THREE.Mesh(new THREE.BoxGeometry(22, th, 0.4), tGlassMat);
+    wingGlassL.position.set(-22, th * 0.5, td * 0.5 - 0.3);
+    const wingGlassR = new THREE.Mesh(new THREE.BoxGeometry(22, th, 0.4), tGlassMat);
+    wingGlassR.position.set(22, th * 0.5, td * 0.5 - 0.3);
+    tg.add(wingGlassL, wingGlassR);
+    void tFacade;
+
+    worldGroup.add(tg);
+    colliders.push(
+      { minX: termX - tw * 0.5, maxX: termX + tw * 0.5, minZ: termZ - td * 0.5, maxZ: termZ - td * 0.5 + 1.0, height: th + 0.8 },
+      { minX: termX - tw * 0.5, maxX: termX - tw * 0.5 + 1.0, minZ: termZ - td * 0.5, maxZ: termZ + td * 0.5, height: th + 0.8 },
+      { minX: termX + tw * 0.5 - 1.0, maxX: termX + tw * 0.5, minZ: termZ - td * 0.5, maxZ: termZ + td * 0.5, height: th + 0.8 },
+      { minX: termX - tw * 0.5, maxX: termX - 11, minZ: termZ + td * 0.5 - 0.8, maxZ: termZ + td * 0.5 + 0.4, height: th + 0.8 },
+      { minX: termX + 11, maxX: termX + tw * 0.5, minZ: termZ + td * 0.5 - 0.8, maxZ: termZ + td * 0.5 + 0.4, height: th + 0.8 }
+    );
+    floorSurfaces.push({ minX: termX - tw * 0.5, maxX: termX + tw * 0.5, minZ: termZ - td * 0.5, maxZ: termZ + td * 0.5, minY: th - 0.2, height: th + 0.75, isRoofSurface: true });
+    addElevator(
+      'elev_terminal',
+      'Terminál Bayshore',
+      termX + 26,
+      termZ + 6,
+      [
+        { name: 'Odletová hala', y: 0 },
+        { name: 'Vyhliadková terasa letiska', y: th + 0.7 },
+      ],
+      0x38bdf8
+    );
+
+    // Airport Aviation Fuel Tanks
+    [-1220, -1196].forEach((fx) => {
+      const tank = new THREE.Mesh(
+        new THREE.CylinderGeometry(5.2, 5.2, 7.5, 18),
+        new THREE.MeshStandardMaterial({ color: 0xf1f5f9, roughness: 0.42, metalness: 0.35 })
+      );
+      tank.position.set(fx, 3.75, 580);
+      const stripe = new THREE.Mesh(new THREE.CylinderGeometry(5.28, 5.28, 0.7, 18), new THREE.MeshStandardMaterial({ color: 0xf59e0b }));
+      stripe.position.set(fx, 5.6, 580);
+      worldGroup.add(tank, stripe);
+      circleColliders.push({ x: fx, z: 580, radius: 5.4, height: 8.0 });
+    });
+  }
+
+  // Open-Front Safehouse Drive-In Garage (SAFEHOUSE_GARAGE_ZONE: x: 522, z: -620)
   {
     const gx = SAFEHOUSE_GARAGE_ZONE.x;
     const gz = SAFEHOUSE_GARAGE_ZONE.z;
-    const gw = 11.2;
-    const gd = 13.0;
-    const gh = 4.6;
+    const gw = 18;
+    const gd = 20;
+    const gh = 5.4;
     const wallMat = new THREE.MeshStandardMaterial({ color: 0xfef3c7, roughness: 0.52, metalness: 0.12 });
     const trimMat = new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.45, metalness: 0.35 });
     const glowStripMat = new THREE.MeshBasicMaterial({ color: 0x38bdf8 });
     const gg = new THREE.Group();
     gg.position.set(gx, 0, gz);
 
-    const gBack = new THREE.Mesh(new THREE.BoxGeometry(gw, gh, 0.75), wallMat);
-    gBack.position.set(0, gh * 0.5, -gd * 0.5 + 0.375);
-    gBack.castShadow = true;
-    const gLeft = new THREE.Mesh(new THREE.BoxGeometry(0.75, gh, gd), wallMat);
-    gLeft.position.set(-gw * 0.5 + 0.375, gh * 0.5, 0);
-    gLeft.castShadow = true;
-    const gRight = new THREE.Mesh(new THREE.BoxGeometry(0.75, gh, gd), wallMat);
-    gRight.position.set(gw * 0.5 - 0.375, gh * 0.5, 0);
-    gRight.castShadow = true;
-    const gRoof = new THREE.Mesh(new THREE.BoxGeometry(gw + 0.5, 0.55, gd + 0.5), trimMat);
-    gRoof.position.set(0, gh + 0.275, 0);
-    gRoof.castShadow = true;
-    const gNeon = new THREE.Mesh(new THREE.BoxGeometry(gw + 0.2, 0.22, 0.25), glowStripMat);
-    gNeon.position.set(0, gh + 0.1, gd * 0.5);
-    const gFloor = new THREE.Mesh(new THREE.PlaneGeometry(gw - 1.5, gd - 1.2), apronMat);
+    const gBack = new THREE.Mesh(new THREE.BoxGeometry(gw, gh, 0.9), wallMat);
+    gBack.position.set(0, gh * 0.5, -gd * 0.5 + 0.45);
+    const gLeft = new THREE.Mesh(new THREE.BoxGeometry(0.9, gh, gd), wallMat);
+    gLeft.position.set(-gw * 0.5 + 0.45, gh * 0.5, 0);
+    const gRight = new THREE.Mesh(new THREE.BoxGeometry(0.9, gh, gd), wallMat);
+    gRight.position.set(gw * 0.5 - 0.45, gh * 0.5, 0);
+    const gRoof = new THREE.Mesh(new THREE.BoxGeometry(gw + 0.6, 0.65, gd + 0.6), trimMat);
+    gRoof.position.set(0, gh + 0.32, 0);
+    const gNeon = new THREE.Mesh(new THREE.BoxGeometry(gw + 0.3, 0.25, 0.3), glowStripMat);
+    gNeon.position.set(0, gh + 0.12, gd * 0.5);
+    const gFloor = new THREE.Mesh(new THREE.PlaneGeometry(gw - 2, gd - 2), apronMat);
     gFloor.rotation.x = -Math.PI / 2;
-    gFloor.position.set(0, 0.04, 0);
-    const gLine = new THREE.Mesh(new THREE.BoxGeometry(gw - 2.0, 0.04, 0.22), glowStripMat);
-    gLine.position.set(0, 0.05, gd * 0.5 - 0.4);
+    gFloor.position.set(0, 0.046, 0);
+    const gLine = new THREE.Mesh(new THREE.BoxGeometry(gw - 2.5, 0.06, 0.28), glowStripMat);
+    gLine.position.set(0, 0.06, gd * 0.5 - 0.5);
     gg.add(gBack, gLeft, gRight, gRoof, gNeon, gFloor, gLine);
     worldGroup.add(gg);
 
     colliders.push(
-      { minX: gx - gw * 0.5, maxX: gx + gw * 0.5, minZ: gz - gd * 0.5, maxZ: gz - gd * 0.5 + 0.9, height: gh + 1 },
-      { minX: gx - gw * 0.5, maxX: gx - gw * 0.5 + 0.9, minZ: gz - gd * 0.5, maxZ: gz + gd * 0.5, height: gh + 1 },
-      { minX: gx + gw * 0.5 - 0.9, maxX: gx + gw * 0.5, minZ: gz - gd * 0.5, maxZ: gz + gd * 0.5, height: gh + 1 }
+      { minX: gx - gw * 0.5, maxX: gx + gw * 0.5, minZ: gz - gd * 0.5, maxZ: gz - gd * 0.5 + 1.0, height: gh + 1 },
+      { minX: gx - gw * 0.5, maxX: gx - gw * 0.5 + 1.0, minZ: gz - gd * 0.5, maxZ: gz + gd * 0.5, height: gh + 1 },
+      { minX: gx + gw * 0.5 - 1.0, maxX: gx + gw * 0.5, minZ: gz - gd * 0.5, maxZ: gz + gd * 0.5, height: gh + 1 }
     );
   }
 
-  // 6. All 10 Enterable 3D Shops & Service Buildings (Including Barber Pole & Tattoo Neon)
+  // 6. All 14 Enlarged Walk-In Shops, Drive-In Garages, Multi-Floor Buildings with Elevators & Malibu Neon Lounge
+  const rackMetalMat = new THREE.MeshStandardMaterial({ color: 0x94a3b8, metalness: 0.72, roughness: 0.28 });
+  const woodShelfMat = new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.7 });
+  const chromeMat = new THREE.MeshStandardMaterial({ color: 0xe2e8f0, metalness: 0.85, roughness: 0.18 });
+  const clothPalette = [0xf43f5e, 0x06b6d4, 0xf59e0b, 0xec4899, 0x10b981, 0x6366f1];
+
   const addEnterableShopBuilding = (shop: ShopDef) => {
     const isGarage = shop.category === 'garage';
     const isFire = shop.category === 'fire_station';
+    const isRange = shop.category === 'shooting_range';
     const isHospital = shop.category === 'hospital';
     const isPoliceStation = shop.category === 'police_station';
     const isBarber = shop.category === 'barber';
     const isTattoo = shop.category === 'tattoo';
     const isSafehouse = shop.category === 'safehouse';
-    const isWide = isGarage || isFire;
-    const w = isWide ? 16 : 14;
-    const d = isWide ? 15 : 13;
-    const h = isHospital || isPoliceStation || isFire ? 6.2 : 5.4;
-    const wallThick = 0.85;
-    const doorHalf = isWide ? 3.5 : 2.3;
+    const isBoutique = shop.category === 'wardrobe';
+    const isMarket = shop.category === 'supplies';
+    const isWeapons = shop.category === 'weapons';
+    const isLounge = shop.category === 'lounge';
+
+    const w = isRange ? 30 : isBoutique || isMarket || isLounge ? 36 : isGarage || isFire ? 34 : isHospital || isPoliceStation || isSafehouse ? 30 : 28;
+    const d = isRange ? 36 : isBoutique || isMarket || isLounge ? 28 : isGarage || isFire ? 26 : isHospital || isPoliceStation || isSafehouse ? 26 : 24;
+    const isMultiFloor = isHospital || isPoliceStation || isSafehouse || isLounge;
+    const h = isMultiFloor ? 12.6 : isFire ? 7.6 : 6.6;
+    const floor2Y = 6.2;
+    const wallThick = 0.9;
+    const doorHalf = isGarage || isFire ? 6.4 : 4.2;
 
     const g = new THREE.Group();
     g.position.set(shop.x, 0, shop.z);
 
-    const floorMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.42, metalness: 0.15 });
-    const floor = new THREE.Mesh(new THREE.PlaneGeometry(w - 0.5, d - 0.5), floorMat);
+    const floorMat = new THREE.MeshStandardMaterial({
+      color: isBoutique ? 0x262938 : isSafehouse ? 0x3b2c20 : isLounge ? 0x170f28 : 0x1e293b,
+      roughness: 0.44,
+      metalness: 0.14,
+    });
+    const floor = new THREE.Mesh(new THREE.PlaneGeometry(w - 0.6, d - 0.6), floorMat);
     floor.rotation.x = -Math.PI / 2;
-    floor.position.y = 0.04;
+    floor.position.y = 0.045;
     floor.receiveShadow = true;
     g.add(floor);
 
@@ -815,21 +1671,19 @@ export function buildOpenWorld(textures: ProceduralTextureSet): WorldBuildResult
         ? 0x991b1b
         : isPoliceStation
           ? 0x1e293b
-          : isTattoo
+          : isTattoo || isLounge
             ? 0x18181b
             : isSafehouse
               ? 0xfef3c7
-              : 0xf1f5f9;
-    const wallMat = new THREE.MeshStandardMaterial({
-      color: wallColor,
-      roughness: 0.52,
-      metalness: 0.16,
-    });
+              : isRange
+                ? 0x27272a
+                : 0xe2e8f0;
+    const wallMat = new THREE.MeshStandardMaterial({ color: wallColor, roughness: 0.58, metalness: 0.12 });
     const neonHex = new THREE.Color(shop.color).getHex();
     const neonMat = new THREE.MeshStandardMaterial({
       color: neonHex,
       emissive: neonHex,
-      emissiveIntensity: 2.2,
+      emissiveIntensity: 1.75,
     });
 
     const dx = shop.doorX - shop.x;
@@ -854,68 +1708,95 @@ export function buildOpenWorld(textures: ProceduralTextureSet): WorldBuildResult
       }
     };
 
+    // Walkable/Landable Rooftop
     const roof = new THREE.Mesh(
       new THREE.BoxGeometry(w + 0.6, 0.7, d + 0.6),
-      new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.7 })
+      new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.72 })
     );
     roof.position.y = h + 0.35;
     roof.castShadow = true;
+    roof.receiveShadow = true;
     g.add(roof);
+    floorSurfaces.push({
+      minX: shop.x - w * 0.5,
+      maxX: shop.x + w * 0.5,
+      minZ: shop.z - d * 0.5,
+      maxZ: shop.z + d * 0.5,
+      minY: h - 0.1,
+      height: h + 0.7,
+      isRoofSurface: true,
+    });
 
-    const neonTrim = new THREE.Mesh(new THREE.BoxGeometry(w + 0.75, 0.28, d + 0.75), neonMat);
-    neonTrim.position.y = h + 0.05;
+    // Multi-Floor Interior Mezzanine + Working Elevator inside Large Civic & VIP Buildings!
+    if (isMultiFloor) {
+      const mezzW = w - 8.5;
+      const mezzD = d - 4.0;
+      const mezz = new THREE.Mesh(
+        new THREE.BoxGeometry(mezzW, 0.45, mezzD),
+        new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.5 })
+      );
+      mezz.position.set(-2.2, floor2Y - 0.22, 0);
+      mezz.receiveShadow = true;
+      g.add(mezz);
+      floorSurfaces.push({
+        minX: shop.x - 2.2 - mezzW * 0.5,
+        maxX: shop.x - 2.2 + mezzW * 0.5,
+        minZ: shop.z - mezzD * 0.5,
+        maxZ: shop.z + mezzD * 0.5,
+        minY: floor2Y - 0.5,
+        height: floor2Y,
+        isRoofSurface: true,
+      });
+
+      const elevOffsetX = doorSide === 'west' ? w * 0.5 - 3.6 : w * 0.5 - 3.4;
+      const elevOffsetZ = doorSide === 'south' ? -d * 0.5 + 3.6 : d * 0.5 - 3.6;
+      addElevator(
+        `elev_${shop.id}`,
+        shop.name,
+        shop.x + elevOffsetX,
+        shop.z + elevOffsetZ,
+        [
+          { name: 'Prízemie', y: 0 },
+          { name: isHospital ? 'Operačná sála (2. posch.)' : isPoliceStation ? 'Veliteľstvo VCPD (2. posch.)' : isLounge ? 'VIP Balkón (2. posch.)' : 'Horizont Galéria (2. posch.)', y: floor2Y },
+          { name: 'Strešná terasa / Heliport', y: h + 0.7 },
+        ],
+        neonHex
+      );
+    }
+
+    const neonTrim = new THREE.Mesh(new THREE.BoxGeometry(w + 0.75, 0.3, d + 0.75), neonMat);
+    neonTrim.position.y = h + 0.06;
     g.add(neonTrim);
 
-    const signZ = doorSide === 'south' ? d / 2 + 0.28 : -d / 2 - 0.28;
+    const signZ = doorSide === 'south' ? d / 2 + 0.3 : -d / 2 - 0.3;
     if (isHospital) {
-      const crossMat = new THREE.MeshStandardMaterial({ color: 0xf43f5e, emissive: 0xf43f5e, emissiveIntensity: 2.4 });
-      const vBar = new THREE.Mesh(new THREE.CapsuleGeometry(0.32, 2.2, 4, 8), crossMat);
-      const hBar = new THREE.Mesh(new THREE.CapsuleGeometry(0.32, 2.2, 4, 8), crossMat);
+      const crossMat = new THREE.MeshStandardMaterial({ color: 0xf43f5e, emissive: 0xf43f5e, emissiveIntensity: 2.0 });
+      const vBar = new THREE.Mesh(new THREE.CapsuleGeometry(0.36, 2.5, 4, 8), crossMat);
+      const hBar = new THREE.Mesh(new THREE.CapsuleGeometry(0.36, 2.5, 4, 8), crossMat);
       hBar.rotation.z = Math.PI / 2;
-      vBar.position.set(0, h + 1.9, signZ);
-      hBar.position.set(0, h + 1.9, signZ);
+      vBar.position.set(0, h + 2.1, signZ);
+      hBar.position.set(0, h + 2.1, signZ);
       g.add(vBar, hBar);
     } else if (isPoliceStation) {
-      const copBlue = new THREE.MeshStandardMaterial({ color: 0x3b82f6, emissive: 0x3b82f6, emissiveIntensity: 2.6 });
-      const copRed = new THREE.MeshStandardMaterial({ color: 0xef4444, emissive: 0xef4444, emissiveIntensity: 2.6 });
-      const bL = new THREE.Mesh(new THREE.CapsuleGeometry(0.26, 2.4, 4, 8), copBlue);
+      const copBlue = new THREE.MeshStandardMaterial({ color: 0x3b82f6, emissive: 0x3b82f6, emissiveIntensity: 2.1 });
+      const copRed = new THREE.MeshStandardMaterial({ color: 0xef4444, emissive: 0xef4444, emissiveIntensity: 2.1 });
+      const bL = new THREE.Mesh(new THREE.CapsuleGeometry(0.28, 2.8, 4, 8), copBlue);
       bL.rotation.z = Math.PI / 2;
-      bL.position.set(-1.5, h + 1.35, signZ);
-      const bR = new THREE.Mesh(new THREE.CapsuleGeometry(0.26, 2.4, 4, 8), copRed);
+      bL.position.set(-1.7, h + 1.5, signZ);
+      const bR = new THREE.Mesh(new THREE.CapsuleGeometry(0.28, 2.8, 4, 8), copRed);
       bR.rotation.z = Math.PI / 2;
-      bR.position.set(1.5, h + 1.35, signZ);
+      bR.position.set(1.7, h + 1.5, signZ);
       g.add(bL, bR);
-    } else if (isFire) {
-      const goldMat = new THREE.MeshStandardMaterial({ color: 0xfbbf24, emissive: 0xf59e0b, emissiveIntensity: 1.8 });
-      const bar = new THREE.Mesh(new THREE.CapsuleGeometry(0.26, 4.6, 4, 8), goldMat);
-      bar.rotation.z = Math.PI / 2;
-      bar.position.set(0, h + 1.35, signZ);
-      g.add(bar);
     } else if (isBarber) {
-      // Classic Red-White-Blue Barber Pole flanking the doorway
       const poleColors = [0xef4444, 0xf8fafc, 0x3b82f6];
       for (let i = 0; i < 3; i++) {
         const ring = new THREE.Mesh(
-          new THREE.CylinderGeometry(0.24, 0.24, 0.48, 12),
+          new THREE.CylinderGeometry(0.26, 0.26, 0.55, 12),
           new THREE.MeshStandardMaterial({ color: poleColors[i], emissive: poleColors[i], emissiveIntensity: 0.7 })
         );
-        ring.position.set(-3.2, 1.8 + i * 0.48, signZ + 0.15);
+        ring.position.set(-5.2, 2.0 + i * 0.55, signZ + 0.15);
         g.add(ring);
       }
-    } else if (isTattoo) {
-      // Glowing Neon Star Sign above Tattoo Parlor
-      const inkNeon = new THREE.MeshStandardMaterial({ color: 0xa855f7, emissive: 0xc084fc, emissiveIntensity: 2.8 });
-      const diamond = new THREE.Mesh(new THREE.OctahedronGeometry(0.75, 0), inkNeon);
-      diamond.position.set(0, h + 1.6, signZ);
-      g.add(diamond);
-    } else if (isSafehouse) {
-      // Terrace Awning
-      const awning = new THREE.Mesh(
-        new THREE.BoxGeometry(5.6, 0.2, 1.8),
-        new THREE.MeshStandardMaterial({ color: 0x06b6d4, roughness: 0.45 })
-      );
-      awning.position.set(0, 3.3, signZ + (doorSide === 'south' ? 0.65 : -0.65));
-      g.add(awning);
     }
 
     if (doorSide !== 'north') addWallSeg(0, -d / 2 + wallThick / 2, w, wallThick);
@@ -928,45 +1809,199 @@ export function buildOpenWorld(textures: ProceduralTextureSet): WorldBuildResult
       const segD = d / 2 - doorHalf;
       addWallSeg(wx, -d / 2 + segD / 2, wallThick, segD);
       addWallSeg(wx, d / 2 - segD / 2, wallThick, segD);
-      addWallSeg(wx, 0, wallThick, doorHalf * 2, 1.4, h - 1.4);
+      addWallSeg(wx, 0, wallThick, doorHalf * 2, Math.max(1.4, h - 4.4), 4.4);
     } else {
       const wz = doorSide === 'south' ? d / 2 - wallThick / 2 : -d / 2 + wallThick / 2;
       const segW = w / 2 - doorHalf;
       addWallSeg(-w / 2 + segW / 2, wz, segW, wallThick);
       addWallSeg(w / 2 - segW / 2, wz, segW, wallThick);
-      addWallSeg(0, wz, doorHalf * 2, wallThick, 1.4, h - 1.4);
+      addWallSeg(0, wz, doorHalf * 2, wallThick, Math.max(1.4, h - 4.4), 4.4);
     }
 
-    const counter = new THREE.Mesh(
-      new THREE.CapsuleGeometry(0.45, 3.6, 6, 12),
-      new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.4, metalness: 0.4 })
-    );
-    counter.rotation.z = Math.PI / 2;
-    if (doorSide === 'west') {
-      counter.rotation.y = Math.PI / 2;
-      counter.position.set(2.4, 0.6, 0);
-      colliders.push({ minX: shop.x + 1.85, maxX: shop.x + 2.95, minZ: shop.z - 2.2, maxZ: shop.z + 2.2, height: 1.5 });
-    } else if (doorSide === 'east') {
-      counter.rotation.y = Math.PI / 2;
-      counter.position.set(-2.4, 0.6, 0);
-      colliders.push({ minX: shop.x - 2.95, maxX: shop.x - 1.85, minZ: shop.z - 2.2, maxZ: shop.z + 2.2, height: 1.5 });
-    } else {
-      counter.position.set(0, 0.6, -2.4);
-      colliders.push({ minX: shop.x - 2.2, maxX: shop.x + 2.2, minZ: shop.z - 2.95, maxZ: shop.z - 1.85, height: 1.5 });
-    }
-    g.add(counter);
+    // Authentic Detailed Spacious Walk-In Interior Furniture by Category!
+    if (isBoutique) {
+      // Multi-aisle Boutique with 8 clothing racks + mannequins + dressing mirror
+      const rackPositions: [number, number][] = [
+        [-8.5, -7.2],
+        [-8.5, -2.0],
+        [-8.5, 3.2],
+        [-8.5, 8.0],
+        [4.5, -7.2],
+        [4.5, -2.0],
+        [4.5, 3.2],
+        [4.5, 8.0],
+      ];
+      rackPositions.forEach(([rx, rz], rIdx) => {
+        const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 4.4, 8), chromeMat);
+        bar.rotation.z = Math.PI / 2;
+        bar.position.set(rx, 1.65, rz);
+        const legL = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 1.65, 8), chromeMat);
+        legL.position.set(rx - 2.15, 0.82, rz);
+        const legR = legL.clone();
+        legR.position.x = rx + 2.15;
+        g.add(bar, legL, legR);
+        for (let c = 0; c < 7; c++) {
+          const garment = new THREE.Mesh(
+            new THREE.BoxGeometry(0.32, 0.98, 0.56),
+            new THREE.MeshStandardMaterial({ color: clothPalette[(rIdx + c) % clothPalette.length], roughness: 0.78 })
+          );
+          garment.position.set(rx - 1.65 + c * 0.55, 1.15, rz);
+          g.add(garment);
+        }
+        colliders.push({ minX: shop.x + rx - 2.2, maxX: shop.x + rx + 2.2, minZ: shop.z + rz - 0.35, maxZ: shop.z + rz + 0.35, height: 1.7 });
+      });
+      const mirror = new THREE.Mesh(new THREE.BoxGeometry(0.28, 3.2, 4.2), chromeMat);
+      mirror.position.set(w * 0.5 - 1.4, 1.6, 0);
+      g.add(mirror);
+    } else if (isMarket) {
+      // 4 Supermarket Aisles with stocked shelves
+      [-9.5, -3.5, 3.5, 9.5].forEach((ax) => {
+        const shelf = new THREE.Mesh(new THREE.BoxGeometry(1.4, 2.3, 13.5), woodShelfMat);
+        shelf.position.set(ax, 1.15, 0);
+        const topTrim = new THREE.Mesh(new THREE.BoxGeometry(1.46, 0.18, 13.54), neonMat);
+        topTrim.position.set(ax, 2.35, 0);
+        g.add(shelf, topTrim);
+        colliders.push({ minX: shop.x + ax - 0.75, maxX: shop.x + ax + 0.75, minZ: shop.z - 6.75, maxZ: shop.z + 6.75, height: 2.4 });
+      });
+    } else if (isWeapons) {
+      // Tactical Gun Walls, Ammo Crates & Display Cases
+      [-11.5, 11.5].forEach((wx) => {
+        const rack = new THREE.Mesh(new THREE.BoxGeometry(0.7, 3.2, 14.0), rackMetalMat);
+        rack.position.set(wx, 1.6, 0);
+        const glow = new THREE.Mesh(new THREE.BoxGeometry(0.74, 0.16, 14.0), neonMat);
+        glow.position.set(wx, 3.2, 0);
+        g.add(rack, glow);
+      });
+    } else if (isRange) {
+      const firingBench = new THREE.Mesh(new THREE.BoxGeometry(w - 4, 1.05, 1.2), rackMetalMat);
+      firingBench.position.set(0, 0.52, -5.5);
+      g.add(firingBench);
+      colliders.push({ minX: shop.x - (w - 4) * 0.5, maxX: shop.x + (w - 4) * 0.5, minZ: shop.z - 6.1, maxZ: shop.z - 4.9, height: 1.2 });
 
-    const interiorLight = new THREE.Mesh(new THREE.CapsuleGeometry(0.15, 3.2, 4, 8), neonMat);
+      [-9, -4.5, 0, 4.5, 9].forEach((tx, tIdx) => {
+        const tMesh = createRangeTargetRig();
+        const wz = tIdx % 2 === 0 ? 8.5 : 13.0;
+        tMesh.position.set(shop.x + tx, 0.05, shop.z + wz);
+        tMesh.rotation.y = Math.PI;
+        worldGroup.add(tMesh);
+        rangeTargets.push({
+          id: `range_target_${tIdx}`,
+          mesh: tMesh,
+          x: shop.x + tx,
+          y: 0.05,
+          z: shop.z + wz,
+          alive: true,
+          respawnTimer: 0,
+        });
+      });
+    } else if (isBarber || isTattoo) {
+      [-7.5, -2.5, 2.5, 7.5].forEach((cx) => {
+        const chair = new THREE.Mesh(new THREE.CylinderGeometry(0.52, 0.56, 0.92, 12), rackMetalMat);
+        chair.position.set(cx, 0.5, 3.2);
+        const mirror = new THREE.Mesh(new THREE.BoxGeometry(1.8, 2.1, 0.16), chromeMat);
+        mirror.position.set(cx, 1.85, 6.2);
+        g.add(chair, mirror);
+      });
+    } else if (isHospital) {
+      [-8.5, -3.5, 2.5].forEach((bx) => {
+        const bed = new THREE.Mesh(
+          new THREE.BoxGeometry(2.2, 0.75, 4.2),
+          new THREE.MeshStandardMaterial({ color: 0xe2e8f0, roughness: 0.4 })
+        );
+        bed.position.set(bx, 0.4, 2.0);
+        g.add(bed);
+        colliders.push({ minX: shop.x + bx - 1.1, maxX: shop.x + bx + 1.1, minZ: shop.z - 0.1, maxZ: shop.z + 4.1, height: 1.0 });
+      });
+    } else if (isSafehouse) {
+      const sofa = new THREE.Mesh(
+        new THREE.BoxGeometry(5.6, 0.95, 2.0),
+        new THREE.MeshStandardMaterial({ color: 0x0ea5e9, roughness: 0.7 })
+      );
+      sofa.position.set(-7.5, 0.48, 3.0);
+      const closetRack = new THREE.Mesh(new THREE.BoxGeometry(1.4, 2.6, 6.4), woodShelfMat);
+      closetRack.position.set(-11.5, 1.3, -4.0);
+      g.add(sofa, closetRack);
+      colliders.push(
+        { minX: shop.x - 10.3, maxX: shop.x - 4.7, minZ: shop.z + 2.0, maxZ: shop.z + 4.0, height: 1.0 },
+        { minX: shop.x - 12.2, maxX: shop.x - 10.8, minZ: shop.z - 7.2, maxZ: shop.z - 0.8, height: 2.6 }
+      );
+    } else if (isLounge) {
+      // Safe, Clothed Neon Nightclub & VIP Lounge: Glowing Dance Stage + DJ Booth + VIP Booths
+      const stage = new THREE.Mesh(
+        new THREE.CylinderGeometry(4.8, 5.2, 0.65, 24),
+        new THREE.MeshStandardMaterial({ color: 0x2e1065, roughness: 0.3, metalness: 0.4 })
+      );
+      stage.position.set(-5.0, 0.32, 0);
+      const stageRing = new THREE.Mesh(new THREE.TorusGeometry(4.9, 0.12, 8, 28), neonMat);
+      stageRing.rotation.x = Math.PI / 2;
+      stageRing.position.set(-5.0, 0.66, 0);
+      const djBooth = new THREE.Mesh(new THREE.BoxGeometry(2.2, 1.35, 6.2), rackMetalMat);
+      djBooth.position.set(-12.5, 0.68, 0);
+      g.add(stage, stageRing, djBooth);
+      colliders.push(
+        { minX: shop.x - 13.6, maxX: shop.x - 11.4, minZ: shop.z - 3.1, maxZ: shop.z + 3.1, height: 1.4 }
+      );
+      // VIP Sofas along north/south walls
+      [-8.5, 8.5].forEach((vz) => {
+        const booth = new THREE.Mesh(
+          new THREE.BoxGeometry(6.8, 0.9, 2.0),
+          new THREE.MeshStandardMaterial({ color: 0x701a75, roughness: 0.65 })
+        );
+        booth.position.set(1.5, 0.45, vz);
+        g.add(booth);
+        colliders.push({ minX: shop.x - 1.9, maxX: shop.x + 4.9, minZ: shop.z + vz - 1.0, maxZ: shop.z + vz + 1.0, height: 1.0 });
+      });
+    } else if (isGarage) {
+      // Spacious Drive-In Customs Bay: Hydraulic Lift Posts + Illuminated Bay Pad right at center!
+      const bayPad = new THREE.Mesh(new THREE.RingGeometry(3.2, 3.65, 28), neonMat);
+      bayPad.rotation.x = -Math.PI / 2;
+      bayPad.position.set(0, 0.06, 0);
+      g.add(bayPad);
+      [-8.5, 8.5].forEach((px) => {
+        [-3.5, 3.5].forEach((pz) => {
+          const post = new THREE.Mesh(new THREE.BoxGeometry(0.5, 4.2, 0.5), neonMat);
+          post.position.set(px, 2.1, pz);
+          g.add(post);
+        });
+      });
+    }
+
+    // Service Desk / Counter (positioned away from doorway & garage drive-in path)
+    if (!isRange && !isGarage) {
+      const counter = new THREE.Mesh(
+        new THREE.CapsuleGeometry(0.48, 4.4, 6, 12),
+        new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.4, metalness: 0.4 })
+      );
+      counter.rotation.z = Math.PI / 2;
+      if (doorSide === 'west') {
+        counter.rotation.y = Math.PI / 2;
+        counter.position.set(w * 0.5 - 5.5, 0.6, 0);
+        colliders.push({ minX: shop.x + w * 0.5 - 6.1, maxX: shop.x + w * 0.5 - 4.9, minZ: shop.z - 2.6, maxZ: shop.z + 2.6, height: 1.5 });
+      } else if (doorSide === 'east') {
+        counter.rotation.y = Math.PI / 2;
+        counter.position.set(-w * 0.5 + 5.5, 0.6, 0);
+        colliders.push({ minX: shop.x - w * 0.5 + 4.9, maxX: shop.x - w * 0.5 + 6.1, minZ: shop.z - 2.6, maxZ: shop.z + 2.6, height: 1.5 });
+      } else if (doorSide === 'south') {
+        counter.position.set(-2.5, 0.6, -d * 0.5 + 4.2);
+        colliders.push({ minX: shop.x - 5.1, maxX: shop.x + 0.1, minZ: shop.z - d * 0.5 + 3.6, maxZ: shop.z - d * 0.5 + 4.8, height: 1.5 });
+      } else {
+        counter.position.set(-2.5, 0.6, d * 0.5 - 4.2);
+        colliders.push({ minX: shop.x - 5.1, maxX: shop.x + 0.1, minZ: shop.z + d * 0.5 - 4.8, maxZ: shop.z + d * 0.5 - 3.6, height: 1.5 });
+      }
+      g.add(counter);
+    }
+
+    const interiorLight = new THREE.Mesh(new THREE.CapsuleGeometry(0.18, 6.2, 4, 8), neonMat);
     interiorLight.rotation.z = Math.PI / 2;
     interiorLight.position.set(0, h - 0.35, 0);
     g.add(interiorLight);
 
     const ring = new THREE.Mesh(
-      new THREE.TorusGeometry(1.15, 0.08, 10, 28),
+      new THREE.TorusGeometry(isGarage ? 2.1 : 1.45, 0.1, 10, 28),
       new THREE.MeshBasicMaterial({ color: neonHex })
     );
     ring.rotation.x = Math.PI / 2;
-    ring.position.set(shop.doorX, 0.12, shop.doorZ);
+    ring.position.set(isGarage ? shop.x : shop.doorX, 0.14, isGarage ? shop.z : shop.doorZ);
     worldGroup.add(ring);
     shopRings.push(ring);
 
@@ -976,30 +2011,80 @@ export function buildOpenWorld(textures: ProceduralTextureSet): WorldBuildResult
 
   SHOPS.forEach(addEnterableShopBuilding);
 
-  // 7. High-FPS Batched City Skyline (Merged BufferGeometries by Material for 60+ FPS across 5x Island!)
+  // Paved Architectural Concrete Plazas around Non-Safehouse Shops & Downtown Towers
+  const urbanPlazaGeos: THREE.BufferGeometry[] = [];
+  const addUrbanPlazaPad = (px: number, pz: number, pw: number, pd: number) => {
+    const g = new THREE.PlaneGeometry(pw, pd);
+    g.rotateX(-Math.PI / 2);
+    const pos = g.attributes.position;
+    const uv = g.attributes.uv;
+    for (let i = 0; i < pos.count; i++) {
+      uv.setXY(i, (px + pos.getX(i)) * 0.125, (pz + pos.getZ(i)) * 0.125);
+    }
+    g.translate(px, 0.02, pz);
+    urbanPlazaGeos.push(g.toNonIndexed());
+  };
+  for (const shop of SHOPS) {
+    if (shop.category === 'safehouse') {
+      // Safehouse patio directly under villa + walkway to front door
+      addUrbanPlazaPad(shop.x, shop.z, 34, 30);
+    } else {
+      addUrbanPlazaPad(shop.x, shop.z, 40, 34);
+    }
+  }
+
+  // Accessible Downtown Horizon Skyscraper Deck with Scenic Glass Elevator (-110, -400)
+  addElevator(
+    'elev_horizon_tower',
+    'Horizon Sky Tower',
+    -84,
+    -400,
+    [
+      { name: 'Námestie Horizon', y: 0 },
+      { name: 'Vyhliadková terasa (42 m)', y: 42 },
+      { name: 'Strešný heliport (82.5 m)', y: 82.5 },
+    ],
+    0x06b6d4
+  );
+  {
+    const midDeck = new THREE.Mesh(
+      new THREE.BoxGeometry(12, 0.5, 12),
+      new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.45, metalness: 0.45 })
+    );
+    midDeck.position.set(-84, 41.75, -400);
+    worldGroup.add(midDeck);
+    floorSurfaces.push({ minX: -90, maxX: -78, minZ: -406, maxZ: -394, minY: 41.4, height: 42.1, isRoofSurface: true });
+    floorSurfaces.push({ minX: -132, maxX: -78, minZ: -420, maxZ: -380, minY: 81.8, height: 82.7, isRoofSurface: true });
+  }
+
+  // 7. High-FPS Batched 15x City Skyline (Calibrated PBR — No Daylight White Overexposure!)
   const modernMat = new THREE.MeshPhysicalMaterial({
     map: textures.buildingModern,
     emissiveMap: textures.buildingModernEmissive,
     emissive: 0xffffff,
-    emissiveIntensity: 0.72,
-    roughness: 0.2,
-    metalness: 0.62,
-    clearcoat: 0.85,
-    envMapIntensity: 1.45,
+    emissiveIntensity: 0.05,
+    roughness: 0.28,
+    metalness: 0.45,
+    clearcoat: 0.65,
+    clearcoatRoughness: 0.14,
+    envMapIntensity: 0.52,
   });
   const decoMat = new THREE.MeshStandardMaterial({
     map: textures.buildingArtDeco,
     emissiveMap: textures.buildingArtDecoEmissive,
     emissive: 0xffffff,
-    emissiveIntensity: 0.55,
-    roughness: 0.48,
-    metalness: 0.16,
+    emissiveIntensity: 0.04,
+    roughness: 0.55,
+    metalness: 0.14,
+    envMapIntensity: 0.42,
   });
   const indMat = new THREE.MeshStandardMaterial({
     map: textures.buildingIndustrial,
-    roughness: 0.68,
-    metalness: 0.28,
+    roughness: 0.72,
+    metalness: 0.24,
+    envMapIntensity: 0.4,
   });
+  buildingWindowMaterials.push(modernMat, decoMat);
   const roofMat = new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.78 });
 
   const modernGeos: THREE.BufferGeometry[] = [];
@@ -1008,23 +2093,37 @@ export function buildOpenWorld(textures: ProceduralTextureSet): WorldBuildResult
   const roofGeos: THREE.BufferGeometry[] = [];
   const neonBuckets = new Map<number, THREE.BufferGeometry[]>();
 
-  const canPlaceStructure = (x: number, z: number, w: number, d: number, extraPad = 2.0): boolean => {
+  const canPlaceStructure = (x: number, z: number, w: number, d: number, extraPad = 4.0): boolean => {
     const rad = Math.hypot(w * 0.5, d * 0.5);
     const ang = Math.atan2(z, x);
-    if (Math.hypot(x, z) + rad > getIslandCoastRadius(ang) - 24) return false;
-    if (isWaterAt(x, z) || isWaterAt(x + w * 0.45, z + d * 0.45) || isWaterAt(x - w * 0.45, z - d * 0.45)) return false;
-    if (z >= 115 && z <= 162 && x >= -114) return false; // canal banks
-    if (x >= -332 && x <= -144 && z >= 176 && z <= 286) return false; // expanded airport complex
-    if (x >= 149 && x <= 171 && z >= -236 && z <= -206) return false; // safehouse garage & driveway
-    if (Math.hypot(x, z + 20) < 42 + rad || Math.hypot(x - 185, z + 20) < 32 + rad) return false; // roundabouts
+    if (Math.hypot(x, z) + rad > getIslandCoastRadius(ang) - 55) return false;
+    if (isWaterAt(x, z) || isWaterAt(x + w * 0.48, z + d * 0.48) || isWaterAt(x - w * 0.48, z - d * 0.48)) return false;
+    if (z >= 365 && z <= 495 && x >= -360) return false; // canal banks
+    if (z >= -845 && z <= -735 && x >= -840 && x <= 880) return false; // north river banks
+    if (x >= -1380 && x <= -520 && z >= 520 && z <= 1020) return false; // airport complex
+    if (x >= 500 && x <= 550 && z >= -655 && z <= -585) return false; // safehouse garage & driveway
+    if (Math.hypot(x, z + 70) < 76 + rad || Math.hypot(x - 520, z + 70) < 62 + rad) return false;
+    for (const p of PARKING_LOTS) {
+      if (Math.abs(x - p.x) < (w + p.width) * 0.5 + 8 && Math.abs(z - p.z) < (d + p.depth) * 0.5 + 8) return false;
+    }
+    for (const ov of OVERPASS_SPANS) {
+      const ox = ov.axis === 'x' ? ov.length * 0.5 + 10 : ov.width + 12;
+      const oz = ov.axis === 'x' ? ov.width + 12 : ov.length * 0.5 + 10;
+      if (Math.abs(x - ov.centerX) < ox + w * 0.5 && Math.abs(z - ov.centerZ) < oz + d * 0.5) return false;
+    }
+    for (const un of UNDERPASS_SPANS) {
+      const ux = un.axis === 'x' ? un.length * 0.5 + 10 : un.width + 12;
+      const uz = un.axis === 'x' ? un.width + 12 : un.length * 0.5 + 10;
+      if (Math.abs(x - un.centerX) < ux + w * 0.5 && Math.abs(z - un.centerZ) < uz + d * 0.5) return false;
+    }
     if (distanceToRoadNetwork(x, z) < rad + extraPad) return false;
     for (const s of SHOPS) {
-      if (Math.hypot(x - s.x, z - s.z) < rad + 15 || Math.hypot(x - s.doorX, z - s.doorZ) < rad + 12) {
+      if (Math.hypot(x - s.x, z - s.z) < rad + 28 || Math.hypot(x - s.doorX, z - s.doorZ) < rad + 24) {
         return false;
       }
     }
     for (const fp of buildingFootprints) {
-      if (Math.abs(x - fp.x) < (w + fp.w) * 0.5 + 3.5 && Math.abs(z - fp.z) < (d + fp.d) * 0.5 + 3.5) {
+      if (Math.abs(x - fp.x) < (w + fp.w) * 0.5 + 10 && Math.abs(z - fp.z) < (d + fp.d) * 0.5 + 10) {
         return false;
       }
     }
@@ -1042,21 +2141,21 @@ export function buildOpenWorld(textures: ProceduralTextureSet): WorldBuildResult
   ) => {
     if (!canPlaceStructure(x, z, w, d)) return;
 
-    const cornerR = style === 'deco' ? 4.0 : style === 'modern' ? 2.4 : 1.1;
+    const cornerR = style === 'deco' ? 4.2 : style === 'modern' ? 2.6 : 1.2;
     const baseShape = createRoundedRectShape(w, d, cornerR);
     const bodyGeo = new THREE.ExtrudeGeometry(baseShape, {
       depth: h,
       bevelEnabled: true,
-      bevelThickness: 0.35,
-      bevelSize: 0.35,
+      bevelThickness: 0.4,
+      bevelSize: 0.4,
       bevelSegments: 2,
-      curveSegments: 6,
+      curveSegments: 5,
     });
     bodyGeo.rotateX(-Math.PI / 2);
     const pos = bodyGeo.attributes.position;
     const uv = bodyGeo.attributes.uv;
     for (let i = 0; i < pos.count; i++) {
-      uv.setXY(i, (pos.getX(i) + pos.getZ(i)) * 0.04, pos.getY(i) * 0.045);
+      uv.setXY(i, (pos.getX(i) + pos.getZ(i)) * 0.035, pos.getY(i) * 0.04);
     }
     bodyGeo.translate(x, 0, z);
     const nonIdxBody = bodyGeo.toNonIndexed();
@@ -1066,15 +2165,15 @@ export function buildOpenWorld(textures: ProceduralTextureSet): WorldBuildResult
     else if (style === 'deco') decoGeos.push(nonIdxBody);
     else indGeos.push(nonIdxBody);
 
-    if (style === 'modern' && h >= 32) {
-      const upperShape = createRoundedRectShape(w * 0.72, d * 0.72, 2.0);
+    // Concrete plaza apron directly around city buildings so towers never float on raw grass
+    addUrbanPlazaPad(x, z, w + 9.5, d + 9.5);
+
+    if (style === 'modern' && h >= 36) {
+      const upperShape = createRoundedRectShape(w * 0.68, d * 0.68, 2.0);
       const upperGeo = new THREE.ExtrudeGeometry(upperShape, {
         depth: 4.5,
-        bevelEnabled: true,
-        bevelThickness: 0.2,
-        bevelSize: 0.2,
-        bevelSegments: 1,
-        curveSegments: 5,
+        bevelEnabled: false,
+        curveSegments: 4,
       });
       upperGeo.rotateX(-Math.PI / 2);
       upperGeo.translate(x, h, z);
@@ -1083,23 +2182,24 @@ export function buildOpenWorld(textures: ProceduralTextureSet): WorldBuildResult
     }
 
     if (neonHex !== undefined) {
-      const neonShape = createRoundedRectShape(w + 0.5, d + 0.5, cornerR + 0.2);
-      const neonGeo = new THREE.ExtrudeGeometry(neonShape, { depth: 0.36, bevelEnabled: false, curveSegments: 6 });
+      const neonShape = createRoundedRectShape(w + 0.6, d + 0.6, cornerR + 0.2);
+      const neonGeo = new THREE.ExtrudeGeometry(neonShape, { depth: 0.42, bevelEnabled: false, curveSegments: 5 });
       neonGeo.rotateX(-Math.PI / 2);
-      neonGeo.translate(x, Math.min(h - 1.2, 5.8), z);
+      neonGeo.translate(x, Math.min(h - 1.4, 7.2), z);
       const bucket = neonBuckets.get(neonHex) || [];
       bucket.push(neonGeo.toNonIndexed());
       neonBuckets.set(neonHex, bucket);
       neonGeo.dispose();
     }
 
-    const padMargin = 0.42;
+    const padMargin = 0.5;
     colliders.push({
       minX: x - w * 0.5 - padMargin,
       maxX: x + w * 0.5 + padMargin,
       minZ: z - d * 0.5 - padMargin,
       maxZ: z + d * 0.5 + padMargin,
-      height: h + 1.0,
+      height: h + 0.5,
+      isRoofSurface: true,
     });
     buildingFootprints.push({
       x,
@@ -1110,66 +2210,68 @@ export function buildOpenWorld(textures: ProceduralTextureSet): WorldBuildResult
     });
   };
 
-  // Curated Signature Towers & Landmarks
+  // Curated Signature Towers across Downtown & Coral Strip
   const neonColors = [0x06b6d4, 0xf97316, 0xec4899, 0xf59e0b, 0x2dd4bf, 0xa855f7];
   const signatureBuildings: Array<[number, number, number, number, number, 'modern' | 'deco' | 'industrial', number?]> = [
-    [-55, -142, 26, 24, 52, 'modern', 0x06b6d4],
-    [48, -142, 24, 24, 48, 'modern', 0xec4899],
-    [-82, -146, 22, 22, 42, 'modern', 0xf97316],
-    [136, -142, 22, 22, 38, 'modern', 0x2dd4bf],
-    [-58, 36, 22, 22, 36, 'modern', 0xf59e0b],
-    [48, 36, 24, 22, 38, 'modern', 0x06b6d4],
-    [138, 36, 20, 22, 28, 'deco', 0xec4899],
-    [232, -62, 20, 24, 22, 'deco', 0x2dd4bf],
-    [232, 32, 20, 22, 18, 'deco', 0xf97316],
-    [236, -110, 18, 22, 20, 'deco', 0xfbbf24],
-    [-190, -70, 22, 24, 24, 'modern', 0xf59e0b],
-    [-190, 42, 22, 22, 16, 'industrial', 0xf97316],
-    [-190, 118, 24, 22, 15, 'industrial'],
-    [-82, 174, 24, 20, 18, 'industrial'],
-    [48, 174, 22, 22, 22, 'modern', 0x06b6d4],
-    [138, 174, 20, 22, 19, 'deco', 0xec4899],
+    [-110, -400, 44, 40, 82, 'modern', 0x06b6d4],
+    [110, -420, 40, 40, 76, 'modern', 0xec4899],
+    [-250, -410, 38, 38, 68, 'modern', 0xf97316],
+    [360, -400, 38, 38, 62, 'modern', 0x2dd4bf],
+    [-120, 80, 38, 36, 56, 'modern', 0xf59e0b],
+    [120, 80, 40, 36, 60, 'modern', 0x06b6d4],
+    [380, 80, 34, 36, 44, 'deco', 0xec4899],
+    [660, -180, 34, 38, 32, 'deco', 0x2dd4bf],
+    [660, 80, 34, 36, 28, 'deco', 0xf97316],
+    [-490, -160, 36, 38, 36, 'modern', 0xf59e0b],
+    [-490, 290, 40, 38, 22, 'industrial'],
+    [120, 310, 38, 34, 32, 'modern', 0x06b6d4],
   ];
   for (const b of signatureBuildings) {
     tryAddBuilding(b[0], b[1], b[2], b[3], b[4], b[5], b[6]);
   }
 
-  // Procedural City Grid Fill across the entire 5x Island (respecting all curved highways, streets & shops!)
+  // Urban Districts Fill (leaving Emerald Forest & North/South Countryside spacious & green!)
   let seed = 1337;
   const rand = () => {
     seed = (seed * 16807) % 2147483647;
     return (seed - 1) / 2147483646;
   };
 
-  for (let gx = -310; gx <= 290; gx += 34) {
-    for (let gz = -280; gz <= 290; gz += 34) {
-      const jx = gx + (rand() - 0.5) * 10;
-      const jz = gz + (rand() - 0.5) * 10;
+  for (let gx = -940; gx <= 940; gx += 82) {
+    for (let gz = -720; gz <= 740; gz += 82) {
+      const jx = gx + (rand() - 0.5) * 18;
+      const jz = gz + (rand() - 0.5) * 18;
       const distCenter = Math.hypot(jx, jz);
-      const w = 15 + Math.floor(rand() * 10);
-      const d = 15 + Math.floor(rand() * 10);
+      const w = 24 + Math.floor(rand() * 18);
+      const d = 24 + Math.floor(rand() * 18);
 
       let style: 'modern' | 'deco' | 'industrial' = 'modern';
-      let h = 18 + Math.floor(rand() * 20);
-      if (jx > 150) {
+      let h = 22 + Math.floor(rand() * 26);
+      if (jx > 420) {
         style = 'deco';
-        h = 12 + Math.floor(rand() * 14);
-      } else if (jx < -155 && jz > 20) {
+        h = 14 + Math.floor(rand() * 18);
+      } else if (jx < -440 && jz > 60) {
         style = 'industrial';
-        h = 10 + Math.floor(rand() * 9);
-      } else if (distCenter < 130) {
+        h = 12 + Math.floor(rand() * 12);
+      } else if (distCenter < 360) {
         style = 'modern';
-        h = 26 + Math.floor(rand() * 28);
-      } else if (jz < -190) {
+        h = 34 + Math.floor(rand() * 44);
+      } else if (jz < -460) {
         style = 'deco';
-        h = 9 + Math.floor(rand() * 7); // Northern villa hills
+        h = 11 + Math.floor(rand() * 9);
       }
 
-      const neon = rand() > 0.55 ? neonColors[Math.floor(rand() * neonColors.length)] : undefined;
+      const neon = rand() > 0.52 ? neonColors[Math.floor(rand() * neonColors.length)] : undefined;
       tryAddBuilding(jx, jz, w, d, h, style, neon);
     }
   }
 
+  if (urbanPlazaGeos.length > 0) {
+    const m = new THREE.Mesh(BufferGeometryUtils.mergeGeometries(urbanPlazaGeos), urbanPlazaMat);
+    m.receiveShadow = true;
+    worldGroup.add(m);
+    urbanPlazaGeos.forEach((g) => g.dispose());
+  }
   if (modernGeos.length > 0) {
     const m = new THREE.Mesh(BufferGeometryUtils.mergeGeometries(modernGeos), modernMat);
     m.castShadow = true;
@@ -1209,66 +2311,62 @@ export function buildOpenWorld(textures: ProceduralTextureSet): WorldBuildResult
     geos.forEach((g) => g.dispose());
   }
 
-  // 8. Marina Wooden Piers, Shipping Containers & Yachts (Southeast Bay: x: 205..340, z: 215..310)
+  // 8. Marina Wooden Piers, Containers & Yachts (x: 560..1240, z: 620..1100)
   const pierMat = new THREE.MeshStandardMaterial({ color: 0x785032, roughness: 0.85 });
-  const pier1 = new THREE.Mesh(new THREE.BoxGeometry(78, 0.7, 10), pierMat);
-  pier1.position.set(244, 0.15, 240);
-  pier1.receiveShadow = true;
-  worldGroup.add(pier1);
-
-  const pier2 = new THREE.Mesh(new THREE.BoxGeometry(78, 0.7, 10), pierMat);
-  pier2.position.set(244, 0.15, 278);
-  pier2.receiveShadow = true;
-  worldGroup.add(pier2);
+  [700, 840, 960].forEach((pz) => {
+    const pier = new THREE.Mesh(new THREE.BoxGeometry(220, 0.8, 12), pierMat);
+    pier.position.set(660, 0.2, pz);
+    pier.receiveShadow = true;
+    worldGroup.add(pier);
+  });
 
   const addContainer = (x: number, z: number, color: number) => {
     const c = new THREE.Mesh(
-      new THREE.BoxGeometry(6.4, 2.7, 2.6),
+      new THREE.BoxGeometry(8.5, 3.2, 3.2),
       new THREE.MeshStandardMaterial({ color, roughness: 0.62, metalness: 0.35 })
     );
-    c.position.set(x, 1.35, z);
+    c.position.set(x, 1.6, z);
     c.castShadow = true;
-    c.receiveShadow = true;
     worldGroup.add(c);
-    colliders.push({ minX: x - 3.2, maxX: x + 3.2, minZ: z - 1.3, maxZ: z + 1.3, height: 2.7 });
+    colliders.push({ minX: x - 4.3, maxX: x + 4.3, minZ: z - 1.6, maxZ: z + 1.6, height: 3.2, isRoofSurface: true });
   };
-  addContainer(198, 250, 0xdc2626);
-  addContainer(198, 255, 0x0284c7);
-  addContainer(198, 266, 0xd97706);
+  addContainer(536, 730, 0xdc2626);
+  addContainer(546, 752, 0x0284c7);
+  addContainer(536, 770, 0xd97706);
 
   const yacht1 = createYachtMesh();
-  yacht1.position.set(308, -0.35, 240);
+  yacht1.position.set(860, -0.45, 700);
   yacht1.rotation.y = Math.PI / 2;
   worldGroup.add(yacht1);
-  circleColliders.push({ x: 308, z: 240, radius: 5.5, height: 4.0 });
+  circleColliders.push({ x: 860, z: 700, radius: 6.5, height: 4.5 });
 
   const yacht2 = createYachtMesh();
-  yacht2.position.set(316, -0.35, 282);
+  yacht2.position.set(920, -0.45, 860);
   yacht2.rotation.y = Math.PI / 2;
   worldGroup.add(yacht2);
-  circleColliders.push({ x: 316, z: 282, radius: 5.5, height: 4.0 });
+  circleColliders.push({ x: 920, z: 860, radius: 6.5, height: 4.5 });
 
-  // 9. Beach Umbrellas & Coastal Rocks around the Entire Island Shore (InstancedMesh!)
+  // 9. Beach Umbrellas (InstancedMesh)
   const umbrellaPositions: [number, number][] = [];
-  for (let i = 0; i < 42; i++) {
-    const ang = (i / 42) * Math.PI * 2;
-    const r = getIslandCoastRadius(ang) - 12;
+  for (let i = 0; i < 64; i++) {
+    const ang = (i / 64) * Math.PI * 2;
+    const r = getIslandCoastRadius(ang) - 28;
     const ux = Math.cos(ang) * r;
     const uz = Math.sin(ang) * r;
-    if (!isWaterAt(ux, uz) && distanceToRoadNetwork(ux, uz) > 6) {
+    if (!isWaterAt(ux, uz) && distanceToRoadNetwork(ux, uz) > 10) {
       umbrellaPositions.push([ux, uz]);
     }
   }
   if (umbrellaPositions.length > 0) {
-    const poleGeo = new THREE.CylinderGeometry(0.05, 0.05, 2.6, 8);
-    poleGeo.translate(0, 1.3, 0);
+    const poleGeo = new THREE.CylinderGeometry(0.06, 0.06, 2.8, 6);
+    poleGeo.translate(0, 1.4, 0);
     const poleInst = new THREE.InstancedMesh(
       poleGeo,
       new THREE.MeshStandardMaterial({ color: 0xe2e8f0, metalness: 0.6 }),
       umbrellaPositions.length
     );
-    const canopyGeo = new THREE.ConeGeometry(1.8, 0.68, 12);
-    canopyGeo.translate(0, 2.55, 0);
+    const canopyGeo = new THREE.ConeGeometry(2.1, 0.78, 10);
+    canopyGeo.translate(0, 2.75, 0);
     const canopyInst = new THREE.InstancedMesh(
       canopyGeo,
       new THREE.MeshStandardMaterial({ roughness: 0.7 }),
@@ -1286,14 +2384,14 @@ export function buildOpenWorld(textures: ProceduralTextureSet): WorldBuildResult
       canopyInst.setMatrixAt(idx, dummy.matrix);
       col.setHex(uPalette[idx % uPalette.length]);
       canopyInst.setColorAt(idx, col);
-      circleColliders.push({ x: ux, z: uz, radius: 0.35, height: 2.8 });
+      circleColliders.push({ x: ux, z: uz, radius: 0.4, height: 2.9 });
     });
     poleInst.computeBoundingSphere();
     canopyInst.computeBoundingSphere();
     worldGroup.add(poleInst, canopyInst);
   }
 
-  // 10. Stunt Jump Ramps across Highways & Canal Approaches
+  // 10. Realistic Stunt Jump Ramps (Smooth gentle slope — no flying above airplanes!)
   const addRamp = (x: number, z: number, width: number, length: number, height: number, heading: number) => {
     const rampGroup = new THREE.Group();
     rampGroup.position.set(x, 0, z);
@@ -1302,15 +2400,12 @@ export function buildOpenWorld(textures: ProceduralTextureSet): WorldBuildResult
     const shape = new THREE.Shape();
     shape.moveTo(0, 0);
     shape.lineTo(length, 0);
-    shape.quadraticCurveTo(length * 0.65, height * 0.45, length, height);
+    shape.lineTo(length, height);
     shape.closePath();
 
     const geom = new THREE.ExtrudeGeometry(shape, {
       depth: width,
-      bevelEnabled: true,
-      bevelThickness: 0.12,
-      bevelSize: 0.1,
-      bevelSegments: 2,
+      bevelEnabled: false,
     });
     geom.translate(-length / 2, 0, -width / 2);
     geom.rotateY(Math.PI / 2);
@@ -1324,34 +2419,34 @@ export function buildOpenWorld(textures: ProceduralTextureSet): WorldBuildResult
     rampGroup.add(mesh);
 
     const strip = new THREE.Mesh(
-      new THREE.CapsuleGeometry(0.12, width * 0.78, 4, 8),
+      new THREE.CapsuleGeometry(0.14, width * 0.82, 4, 8),
       new THREE.MeshStandardMaterial({ color: 0xfef08a, emissive: 0xf59e0b, emissiveIntensity: 1.6 })
     );
     strip.rotation.z = Math.PI / 2;
-    strip.position.set(0, height + 0.04, length * 0.45);
+    strip.position.set(0, height + 0.05, length * 0.46);
     rampGroup.add(strip);
 
     worldGroup.add(rampGroup);
     ramps.push({ x, z, width, length, height, heading });
   };
 
-  addRamp(0, 96, 6.8, 12, 2.8, 0);
-  addRamp(185, 95, 6.8, 12, 2.8, 0);
-  addRamp(-140, 108, 7.2, 13, 3.0, 0);
-  addRamp(45, -102, 6.5, 11, 2.5, Math.PI / 2);
+  addRamp(0, 330, 8.2, 22, 2.7, 0);
+  addRamp(520, 330, 8.2, 22, 2.7, 0);
+  addRamp(-360, 340, 8.5, 22, 2.8, 0);
+  addRamp(180, -290, 7.6, 20, 2.5, Math.PI / 2);
 
   // 11. Explosive Barrels
   const barrelCoords: [number, number][] = [
-    [188, 252],
-    [194, 268],
-    [-48, -112],
-    [-56, -118],
-    [-254, 224],
-    [-242, 248],
-    [164, 14],
-    [-70, 55],
-    [95, 60],
-    [-145, -18],
+    [526, 695],
+    [540, 735],
+    [-125, -365],
+    [-150, -395],
+    [-935, 725],
+    [-910, 755],
+    [495, -45],
+    [-180, 145],
+    [240, 140],
+    [-370, -70],
   ];
   barrelCoords.forEach(([bx, bz], idx) => {
     const mesh = createExplosiveBarrelMesh();
@@ -1367,20 +2462,20 @@ export function buildOpenWorld(textures: ProceduralTextureSet): WorldBuildResult
     });
   });
 
-  // 12. Organic Curved Palm Trees (InstancedMesh around Coastal Ring, Boulevards & Beaches)
+  // 12. Palm Trees (Coast & Boulevards) + Pine Forest Groves (Northern Highlands) via InstancedMesh
   const palmPositions: [number, number][] = [];
-  for (let i = 0; i < 96; i++) {
-    const ang = (i / 96) * Math.PI * 2;
-    const r = getIslandCoastRadius(ang) - 22 - (i % 3) * 18;
+  for (let i = 0; i < 140; i++) {
+    const ang = (i / 140) * Math.PI * 2;
+    const r = getIslandCoastRadius(ang) - 42 - (i % 3) * 34;
     const px = Math.cos(ang) * r;
     const pz = Math.sin(ang) * r;
-    if (!isWaterAt(px, pz) && distanceToRoadNetwork(px, pz) > 4.5 && canPlaceStructure(px, pz, 2.5, 2.5, 1.5)) {
+    if (!isWaterAt(px, pz) && distanceToRoadNetwork(px, pz) > 8 && canPlaceStructure(px, pz, 3, 3, 2)) {
       palmPositions.push([px, pz]);
     }
   }
-  for (let x = -220; x <= 240; x += 34) {
-    for (const z of [-185, -84, 58, 185]) {
-      if (!isWaterAt(x, z) && distanceToRoadNetwork(x, z) > 4.0 && canPlaceStructure(x, z, 2.5, 2.5, 1.2)) {
+  for (let x = -600; x <= 680; x += 88) {
+    for (const z of [-460, -180, 140, 580]) {
+      if (!isWaterAt(x, z) && distanceToRoadNetwork(x, z) > 7 && canPlaceStructure(x, z, 3, 3, 2)) {
         palmPositions.push([x, z]);
       }
     }
@@ -1393,20 +2488,16 @@ export function buildOpenWorld(textures: ProceduralTextureSet): WorldBuildResult
       new THREE.Vector3(0.45, 5.2, -0.08),
       new THREE.Vector3(0.0, 7.7, 0.0),
     ]);
-    const trunkGeo = new THREE.TubeGeometry(trunkCurve, 10, 0.24, 8, false);
+    const trunkGeo = new THREE.TubeGeometry(trunkCurve, 8, 0.24, 6, false);
     const trunkMat = new THREE.MeshStandardMaterial({ color: 0x7c583a, roughness: 0.88 });
     const trunkInst = new THREE.InstancedMesh(trunkGeo, trunkMat, palmPositions.length);
-    trunkInst.castShadow = true;
-
     const crownGeo = createPalmCrownGeometry();
     const crownMat = new THREE.MeshStandardMaterial({ color: 0x2f855a, roughness: 0.72 });
     const crownInst = new THREE.InstancedMesh(crownGeo, crownMat, palmPositions.length);
-    crownInst.castShadow = true;
-
     const dummy = new THREE.Object3D();
     const color = new THREE.Color();
     palmPositions.forEach(([px, pz], idx) => {
-      const s = 0.88 + ((idx * 17) % 28) / 100;
+      const s = 0.9 + ((idx * 17) % 28) / 100;
       dummy.position.set(px, 0, pz);
       dummy.rotation.set(0, idx * 1.37, 0);
       dummy.scale.set(s, s, s);
@@ -1422,9 +2513,161 @@ export function buildOpenWorld(textures: ProceduralTextureSet): WorldBuildResult
     worldGroup.add(trunkInst, crownInst);
   }
 
-  // 13. Swan-Neck Curved Streetlights Along Highways & Boulevards (InstancedMesh)
+  // Dense Pine Forest Trees in North-West & North-East Countryside
+  const pinePositions: [number, number][] = [];
+  for (let i = 0; i < 190; i++) {
+    const px = -1140 + ((i * 193) % 2280);
+    const pz = -1260 + ((i * 97) % 440);
+    if (!isWaterAt(px, pz) && isIslandLandAtCheck(px, pz) && distanceToRoadNetwork(px, pz) > 9 && canPlaceStructure(px, pz, 4, 4, 2)) {
+      pinePositions.push([px, pz]);
+    }
+  }
+  if (pinePositions.length > 0) {
+    const pineTrunkGeo = new THREE.CylinderGeometry(0.28, 0.42, 4.5, 6);
+    pineTrunkGeo.translate(0, 2.25, 0);
+    const pineCrownGeo = new THREE.ConeGeometry(2.6, 8.2, 8);
+    pineCrownGeo.translate(0, 7.2, 0);
+    const ptInst = new THREE.InstancedMesh(
+      pineTrunkGeo,
+      new THREE.MeshStandardMaterial({ color: 0x5c3d28, roughness: 0.9 }),
+      pinePositions.length
+    );
+    const pcInst = new THREE.InstancedMesh(
+      pineCrownGeo,
+      new THREE.MeshStandardMaterial({ color: 0x1e5232, roughness: 0.8 }),
+      pinePositions.length
+    );
+    const dummy = new THREE.Object3D();
+    pinePositions.forEach(([px, pz], idx) => {
+      const s = 0.85 + ((idx * 13) % 40) / 100;
+      dummy.position.set(px, 0, pz);
+      dummy.rotation.set(0, idx * 0.9, 0);
+      dummy.scale.set(s, s, s);
+      dummy.updateMatrix();
+      ptInst.setMatrixAt(idx, dummy.matrix);
+      pcInst.setMatrixAt(idx, dummy.matrix);
+      circleColliders.push({ x: px, z: pz, radius: 0.55, height: 10.5 });
+    });
+    ptInst.computeBoundingSphere();
+    pcInst.computeBoundingSphere();
+    worldGroup.add(ptInst, pcInst);
+  }
+
+  // 12B. Dense 3D Grass Tufts & Ornamental Park/Roadside Shrubs (InstancedMesh)
+  const isGrassSpotClear = (gx: number, gz: number): boolean => {
+    const ang = Math.atan2(gz, gx);
+    if (Math.hypot(gx, gz) > getIslandCoastRadius(ang) - 68) return false;
+    if (isWaterAt(gx, gz)) return false;
+    if (gx >= -1385 && gx <= -525 && gz >= 540 && gz <= 1020) return false; // airport
+    if (distanceToRoadNetwork(gx, gz) < 5.2) return false;
+    for (const p of PARKING_LOTS) {
+      if (Math.abs(gx - p.x) < p.width * 0.5 + 3 && Math.abs(gz - p.z) < p.depth * 0.5 + 3) return false;
+    }
+    for (const fp of buildingFootprints) {
+      if (Math.abs(gx - fp.x) < fp.w * 0.5 + 6.0 && Math.abs(gz - fp.z) < fp.d * 0.5 + 6.0) return false;
+    }
+    return true;
+  };
+
+  const grassCoords: [number, number][] = [];
+  for (let i = 0; i < 3600 && grassCoords.length < 2200; i++) {
+    const gx = (rand() - 0.5) * 2800;
+    const gz = (rand() - 0.5) * 2700;
+    if (isGrassSpotClear(gx, gz)) {
+      grassCoords.push([gx, gz]);
+    }
+  }
+  if (grassCoords.length > 0) {
+    const tuftCards: THREE.BufferGeometry[] = [];
+    for (let c = 0; c < 3; c++) {
+      const card = new THREE.PlaneGeometry(0.95, 0.52);
+      card.translate(0, 0.24, 0);
+      card.rotateY((c / 3) * Math.PI);
+      tuftCards.push(card.toNonIndexed());
+      card.dispose();
+    }
+    const tuftGeo = BufferGeometryUtils.mergeGeometries(tuftCards);
+    tuftCards.forEach((g) => g.dispose());
+    const tuftMat = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      roughness: 0.92,
+      side: THREE.DoubleSide,
+    });
+    const tuftInst = new THREE.InstancedMesh(tuftGeo, tuftMat, grassCoords.length);
+    const dummy = new THREE.Object3D();
+    const gCol = new THREE.Color();
+    grassCoords.forEach(([gx, gz], idx) => {
+      const s = 0.75 + ((idx * 19) % 55) / 100;
+      dummy.position.set(gx, 0, gz);
+      dummy.rotation.set(0, idx * 1.13, 0);
+      dummy.scale.set(s, s * (0.85 + ((idx * 7) % 35) / 100), s);
+      dummy.updateMatrix();
+      tuftInst.setMatrixAt(idx, dummy.matrix);
+      gCol.setHSL(0.28 + ((idx * 11) % 7) * 0.011, 0.42, 0.25 + ((idx * 5) % 4) * 0.035);
+      tuftInst.setColorAt(idx, gCol);
+    });
+    tuftInst.computeBoundingSphere();
+    worldGroup.add(tuftInst);
+  }
+
+  const shrubCoords: [number, number][] = [];
+  // Line roundabout plaza outer lawns & roadside parks with lush ornamental bushes
+  for (let i = 0; i < 24; i++) {
+    const a = (i / 24) * Math.PI * 2;
+    shrubCoords.push([Math.cos(a) * 33, -70 + Math.sin(a) * 33]);
+  }
+  for (let i = 0; i < 16; i++) {
+    const a = (i / 16) * Math.PI * 2;
+    shrubCoords.push([520 + Math.cos(a) * 23, -70 + Math.sin(a) * 23]);
+  }
+  for (let i = 0; i < 900 && shrubCoords.length < 480; i++) {
+    const sx = (rand() - 0.5) * 2500;
+    const sz = (rand() - 0.5) * 2450;
+    if (isGrassSpotClear(sx, sz)) {
+      shrubCoords.push([sx, sz]);
+    }
+  }
+  if (shrubCoords.length > 0) {
+    const lobes: THREE.BufferGeometry[] = [];
+    const lobeOffsets: [number, number, number, number][] = [
+      [0, 0.48, 0, 0.68],
+      [-0.42, 0.36, 0.22, 0.5],
+      [0.4, 0.38, -0.2, 0.52],
+    ];
+    for (const [ox, oy, oz, r] of lobeOffsets) {
+      const l = new THREE.IcosahedronGeometry(r, 1);
+      l.scale(1.15, 0.85, 1.15);
+      l.translate(ox, oy, oz);
+      lobes.push(l.toNonIndexed());
+      l.dispose();
+    }
+    const shrubGeo = BufferGeometryUtils.mergeGeometries(lobes);
+    lobes.forEach((g) => g.dispose());
+    const shrubMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.88 });
+    const shrubInst = new THREE.InstancedMesh(shrubGeo, shrubMat, shrubCoords.length);
+    const dummy = new THREE.Object3D();
+    const sCol = new THREE.Color();
+    shrubCoords.forEach(([sx, sz], idx) => {
+      const sc = 0.8 + ((idx * 23) % 45) / 100;
+      dummy.position.set(sx, 0, sz);
+      dummy.rotation.set(0, idx * 0.91, 0);
+      dummy.scale.set(sc, sc, sc);
+      dummy.updateMatrix();
+      shrubInst.setMatrixAt(idx, dummy.matrix);
+      sCol.setHSL(0.32 + (idx % 4) * 0.018, 0.48, 0.22 + (idx % 3) * 0.045);
+      shrubInst.setColorAt(idx, sCol);
+    });
+    shrubInst.computeBoundingSphere();
+    worldGroup.add(shrubInst);
+  }
+
+  // 13. Streetlights & Sidewalk Street Furniture (Benches & Curbs Bins)
   const polePlacements: { x: number; z: number; rot: number }[] = [];
+  const benchPlacements: { x: number; z: number; rot: number }[] = [];
+  const binPlacements: { x: number; z: number }[] = [];
+
   for (const seg of ROAD_SEGMENTS) {
+    if (seg.isDirtTrail) continue;
     const stride = seg.isHighway ? 4 : 5;
     for (let i = 1; i < seg.points.length - 1; i += stride) {
       const p = seg.points[i];
@@ -1434,34 +2677,99 @@ export function buildOpenWorld(textures: ProceduralTextureSet): WorldBuildResult
       const len = Math.hypot(tx, tz) || 1;
       const nx = -tz / len;
       const nz = tx / len;
-      const side = (i % 2 === 0 ? 1 : -1) * (seg.width * 0.5 + 1.4);
-      const lx = p.x + nx * side;
-      const lz = p.z + nz * side;
-      if (
-        !isWaterAt(lx, lz) &&
-        getBridgeElevationAt(lx, lz) === 0 &&
-        !(lx <= -144 && lz >= 178 && lz <= 284)
-      ) {
-        const rot = Math.atan2(-nx * Math.sign(side), -nz * Math.sign(side)) - Math.PI / 2;
+      const dirSign = i % 2 === 0 ? 1 : -1;
+      const offsetDist = seg.isHighway ? seg.width * 0.5 + 1.85 : seg.width * 0.5 + 3.15;
+      const lx = p.x + nx * dirSign * offsetDist;
+      const lz = p.z + nz * dirSign * offsetDist;
+      if (!isSidewalkEdgeBlocked(lx, lz, seg.id)) {
+        const rot = Math.atan2(-nx * dirSign, -nz * dirSign) - Math.PI / 2;
         polePlacements.push({ x: lx, z: lz, rot });
+        if (!seg.isHighway && i % 2 === 0 && benchPlacements.length < 90) {
+          const bx = p.x + nx * -dirSign * (seg.width * 0.5 + 2.95);
+          const bz = p.z + nz * -dirSign * (seg.width * 0.5 + 2.95);
+          if (!isSidewalkEdgeBlocked(bx, bz, seg.id)) {
+            benchPlacements.push({ x: bx, z: bz, rot: Math.atan2(nx * dirSign, nz * dirSign) });
+          }
+        }
+        if (!seg.isHighway && i % 3 === 1 && binPlacements.length < 110) {
+          const txp = p.x + nx * dirSign * (seg.width * 0.5 + 2.45);
+          const tzp = p.z + nz * dirSign * (seg.width * 0.5 + 2.45);
+          if (!isSidewalkEdgeBlocked(txp, tzp, seg.id)) {
+            binPlacements.push({ x: txp, z: tzp });
+          }
+        }
       }
     }
+  }
+
+  if (benchPlacements.length > 0) {
+    const benchParts: THREE.BufferGeometry[] = [];
+    const seat = new THREE.BoxGeometry(1.9, 0.1, 0.56);
+    seat.translate(0, 0.54, 0);
+    const back = new THREE.BoxGeometry(1.9, 0.42, 0.08);
+    back.translate(0, 0.82, -0.24);
+    const legL = new THREE.BoxGeometry(0.12, 0.46, 0.52);
+    legL.translate(-0.78, 0.31, 0);
+    const legR = legL.clone();
+    legR.translate(1.56, 0, 0);
+    benchParts.push(seat.toNonIndexed(), back.toNonIndexed(), legL.toNonIndexed(), legR.toNonIndexed());
+    seat.dispose();
+    back.dispose();
+    legL.dispose();
+    legR.dispose();
+    const benchGeo = BufferGeometryUtils.mergeGeometries(benchParts);
+    benchParts.forEach((g) => g.dispose());
+    const benchInst = new THREE.InstancedMesh(
+      benchGeo,
+      new THREE.MeshStandardMaterial({ color: 0x6b4423, roughness: 0.78 }),
+      benchPlacements.length
+    );
+    const dummy = new THREE.Object3D();
+    benchPlacements.forEach((b, idx) => {
+      dummy.position.set(b.x, 0, b.z);
+      dummy.rotation.set(0, b.rot, 0);
+      dummy.scale.set(1, 1, 1);
+      dummy.updateMatrix();
+      benchInst.setMatrixAt(idx, dummy.matrix);
+    });
+    benchInst.computeBoundingSphere();
+    worldGroup.add(benchInst);
+  }
+
+  if (binPlacements.length > 0) {
+    const binGeo = new THREE.CylinderGeometry(0.26, 0.22, 0.85, 8);
+    binGeo.translate(0, 0.52, 0);
+    const binInst = new THREE.InstancedMesh(
+      binGeo,
+      new THREE.MeshStandardMaterial({ color: 0x334155, metalness: 0.55, roughness: 0.42 }),
+      binPlacements.length
+    );
+    const dummy = new THREE.Object3D();
+    binPlacements.forEach((b, idx) => {
+      dummy.position.set(b.x, 0, b.z);
+      dummy.rotation.set(0, 0, 0);
+      dummy.scale.set(1, 1, 1);
+      dummy.updateMatrix();
+      binInst.setMatrixAt(idx, dummy.matrix);
+    });
+    binInst.computeBoundingSphere();
+    worldGroup.add(binInst);
   }
 
   if (polePlacements.length > 0) {
     const poleCurve = new THREE.CatmullRomCurve3([
       new THREE.Vector3(0, 0, 0),
-      new THREE.Vector3(0, 4.8, 0),
-      new THREE.Vector3(0.35, 5.7, 0),
-      new THREE.Vector3(1.1, 5.8, 0),
+      new THREE.Vector3(0, 5.2, 0),
+      new THREE.Vector3(0.4, 6.2, 0),
+      new THREE.Vector3(1.2, 6.3, 0),
     ]);
-    const poleGeo = new THREE.TubeGeometry(poleCurve, 10, 0.09, 7, false);
+    const poleGeo = new THREE.TubeGeometry(poleCurve, 8, 0.1, 6, false);
     const poleMat = new THREE.MeshStandardMaterial({ color: 0x334155, metalness: 0.75, roughness: 0.32 });
     const poleInst = new THREE.InstancedMesh(poleGeo, poleMat, polePlacements.length);
 
-    const lampGeo = new THREE.CapsuleGeometry(0.14, 0.32, 4, 8);
+    const lampGeo = new THREE.CapsuleGeometry(0.16, 0.36, 4, 6);
     lampGeo.rotateZ(Math.PI / 2);
-    lampGeo.translate(1.15, 5.74, 0);
+    lampGeo.translate(1.25, 6.22, 0);
     const lampMat = new THREE.MeshStandardMaterial({
       color: 0xfef3c7,
       emissive: 0xfbbf24,
@@ -1477,7 +2785,7 @@ export function buildOpenWorld(textures: ProceduralTextureSet): WorldBuildResult
       dummy.updateMatrix();
       poleInst.setMatrixAt(idx, dummy.matrix);
       lampInst.setMatrixAt(idx, dummy.matrix);
-      circleColliders.push({ x: pl.x, z: pl.z, radius: 0.28, height: 6.0 });
+      circleColliders.push({ x: pl.x, z: pl.z, radius: 0.3, height: 6.4 });
     });
     poleInst.computeBoundingSphere();
     lampInst.computeBoundingSphere();
@@ -1487,14 +2795,26 @@ export function buildOpenWorld(textures: ProceduralTextureSet): WorldBuildResult
   return {
     worldGroup,
     colliders,
+    floorSurfaces,
     circleColliders,
     ramps,
     barrels,
+    rangeTargets,
+    elevators,
+    buildingWindowMaterials,
+    spinners,
     oceanMesh,
     skyMat,
+    cloudGroup,
+    cloudMaterials,
     roadSegments: ROAD_SEGMENTS,
     roadRects,
     buildingFootprints,
     shopRings,
   };
+}
+
+function isIslandLandAtCheck(x: number, z: number): boolean {
+  const ang = Math.atan2(z, x);
+  return Math.hypot(x, z) <= getIslandCoastRadius(ang) - 65;
 }

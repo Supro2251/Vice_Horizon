@@ -5,6 +5,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import {
+  ActiveCutsceneState,
   CameraMode,
   CharacterAppearance,
   CharacterId,
@@ -15,19 +16,30 @@ import {
   HudTelemetry,
   InventoryState,
   MinimapBlip,
+  MissionCutsceneLine,
   MissionDef,
   MissionProgressRecord,
+  RemotePlayerState,
+  SavedGarageState,
   ShopDef,
+  StoredVehicleRecord,
+  VehicleControlCategory,
   VehicleKind,
+  VehicleUpgrades,
   WeaponId,
 } from '../types/game';
 import {
+  AIRPORT_HANGAR_ZONE,
+  ALL_MISSIONS,
   DEFAULT_MISSIONS,
+  DEFAULT_SAVED_GARAGE,
   HOSPITAL_RESPAWN,
   isMissionUnlocked,
   MISSIONS,
   POLICE_STATION_RESPAWN,
+  SAFEHOUSE_GARAGE_ZONE,
   SHOPS,
+  SIDE_DISCOVERY_MISSIONS,
   WEAPON_CATALOG,
 } from '../data/defaults';
 import { ProceduralAudioEngine } from './audio';
@@ -36,8 +48,12 @@ import { createProceduralTextures, ProceduralTextureSet } from './textures';
 import {
   CharacterRig,
   createCharacterRig,
+  createParachuteRig,
   createVehicleRig,
   createWeaponMesh,
+  deformVehicleRig,
+  getWeaponMuzzleOffset,
+  resetVehicleDeformation,
   updateCharacterRigAppearance,
   VehicleRig,
 } from './models';
@@ -45,18 +61,23 @@ import {
   AABBCollider,
   buildOpenWorld,
   CircleCollider,
+  ElevatorEntity,
   ExplosiveBarrelEntity,
   getDistrictName,
+  RangeTargetEntity,
   StuntRamp,
 } from './world';
 import {
   computeGpsRoute,
   getBridgeElevationAt,
+  getOverpassDeckHeightAt,
+  getUnderpassFloorHeightAt,
   isBridgeAt,
   isIslandLandAt,
   isOnBeachAt,
   isOutOfBoundsSeaAt,
   isWaterAt,
+  PARKING_LOTS,
   RoadSegmentDef,
   TRAFFIC_LOOP_PATHS,
 } from './navigation';
@@ -89,6 +110,7 @@ interface VehicleEntity {
   brand: string;
   name: string;
   kind: VehicleKind;
+  color: string;
   rig: VehicleRig;
   x: number;
   y: number;
@@ -116,7 +138,9 @@ interface VehicleEntity {
   driftIntensity: number;
   occupiedByPlayer: boolean;
   health: number;
+  maxHealth: number;
   destroyed: boolean;
+  upgrades: VehicleUpgrades;
 }
 
 interface NpcEntity {
@@ -170,6 +194,18 @@ interface ParticleBurst {
   growSpeed: number;
 }
 
+interface RemotePlayerVisual {
+  uid: string;
+  root: THREE.Group;
+  charRig: CharacterRig;
+  vehRig: VehicleRig | null;
+  vehKind: VehicleKind | null;
+  vehColor: string;
+  targetPos: THREE.Vector3;
+  targetHeading: number;
+  state: RemotePlayerState;
+}
+
 export interface EngineCallbacks {
   onTelemetry: (t: HudTelemetry) => void;
   onInventoryChange: (inv: InventoryState) => void;
@@ -178,6 +214,10 @@ export interface EngineCallbacks {
   onStatsChange: (stats: GameStats) => void;
   onMissionComplete: (missionId: string, elapsedSec: number, reward: number) => void;
   onShopInteract: (shop: ShopDef) => void;
+  onGarageChange?: (garage: SavedGarageState) => void;
+  onCutsceneChange?: (cutscene: ActiveCutsceneState | null) => void;
+  onSideMissionDiscovered?: (mission: MissionDef) => void;
+  onTaxiMenuRequested?: () => void;
 }
 
 export class ViceEngine {
@@ -197,13 +237,20 @@ export class ViceEngine {
   public input = new InputManager();
 
   private colliders: AABBCollider[] = [];
+  private floorSurfaces: AABBCollider[] = [];
   private circleColliders: CircleCollider[] = [];
   private colliderGrid = new Map<string, { aabb: AABBCollider[]; circle: CircleCollider[] }>();
   private ramps: StuntRamp[] = [];
   private barrels: ExplosiveBarrelEntity[] = [];
+  private rangeTargets: RangeTargetEntity[] = [];
+  private elevators: ElevatorEntity[] = [];
+  private buildingWindowMaterials: THREE.Material[] = [];
+  private spinners: THREE.Object3D[] = [];
   private shopRings: THREE.Mesh[] = [];
   private oceanMesh!: THREE.Mesh;
   private skyMat!: THREE.ShaderMaterial;
+  private cloudGroup!: THREE.Group;
+  private cloudMaterials: THREE.MeshStandardMaterial[] = [];
   public roadSegments: RoadSegmentDef[] = [];
   public roadRects: { x: number; z: number; w: number; l: number }[] = [];
   public buildingFootprints: { x: number; z: number; w: number; d: number; color: string }[] = [];
@@ -211,6 +258,8 @@ export class ViceEngine {
   private characters: Record<CharacterId, CharacterState>;
   private activeCharId: CharacterId;
   private playerRig!: CharacterRig;
+  private parachuteRig!: THREE.Group;
+  private parachuteDeployed = false;
   private firstPersonWeaponGroup: THREE.Group;
   private muzzleFlashMesh: THREE.Mesh;
   private muzzleFlashTimer = 0;
@@ -256,13 +305,15 @@ export class ViceEngine {
   private switchSwoopTimer = 0;
   private wardrobePreview = false;
 
-  // Combat & Wanted
+  // Combat, Wanted, God Mode, Auto-Aim & Police Dispatch
   private inventory: InventoryState;
   private cash: number;
   private stats: GameStats;
   private settings: GameSettings;
   private fireCooldown = 0;
   private reloadTimer = 0;
+  private weaponRecoilKick = 0;
+  private garageTriggerCooldown = 0;
   private hitMarkerTimer = 0;
   private damageFlashTimer = 0;
   private stuntMessage: string | null = null;
@@ -270,6 +321,8 @@ export class ViceEngine {
   private wastedTimer = 0;
   private wastedReason: string | null = null;
   private bustedTimer = 0;
+  private godModeActive = false;
+  private autoAimLocked = false;
 
   private wantedStars = 0;
   private wantedHeat = 0;
@@ -277,6 +330,41 @@ export class ViceEngine {
   private evasionProgress = 0;
   private arrestProgress = 0;
   private policeSpawnTimer = 0;
+  private policeDispatchTimer = 0;
+  private policeDispatchReason: string | null = null;
+  private pendingDispatchStars = 0;
+
+  // Dynamic Day/Night Cycle & Weather
+  private gameTimeNormalized = 0.72; // Start at Vice Sunset (17:15)
+  private cloudCoverage = 0.42;
+
+  // Hangar, Garage, Taxi, Side Missions & Cutscenes
+  private savedGarage: SavedGarageState = structuredClone(DEFAULT_SAVED_GARAGE);
+  private parkedFacilityNotice: string | null = null;
+  private parkedNoticeTimer = 0;
+  private taxiMode: 'none' | 'passenger' | 'driver_waiting' | 'driver_active' = 'none';
+  private taxiFareCash = 0;
+  private taxiDestinationLabel: string | null = null;
+  private taxiTargetX = 0;
+  private taxiTargetZ = 0;
+  private taxiPickupX = 0;
+  private taxiPickupZ = 0;
+  private taxiAutoPilotTimer = 0;
+  private taxiDropBeacon: THREE.Mesh | null = null;
+
+  private activeCutscene: ActiveCutsceneState | null = null;
+  private cutsceneLines: MissionCutsceneLine[] = [];
+  private cutsceneTargetPos = new THREE.Vector3();
+  private cutsceneOnFinish: (() => void) | null = null;
+
+  private discoveredSideMissions = new Set<string>();
+  private nearbySideMission: MissionDef | null = null;
+  private activeSidePrompt: string | null = null;
+
+  // Multiplayer Remote Players & Skill XP
+  private remotePlayers = new Map<string, RemotePlayerVisual>();
+  private skillXp = { driving: 0, shooting: 0, flying: 0, stamina: 0 };
+  private smokeTimer = 0;
 
   // Mission state
   private activeMission: MissionDef | null = null;
@@ -340,7 +428,7 @@ export class ViceEngine {
     });
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.12;
+    this.renderer.toneMappingExposure = 0.94;
     this.renderer.shadowMap.enabled = !this.isSoftwareGl && this.settings.graphics.shadowQuality !== 'off';
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.setPixelRatio(this.computePixelRatio());
@@ -356,7 +444,7 @@ export class ViceEngine {
       this.settings.graphics.fov,
       (container.clientWidth || window.innerWidth) / (container.clientHeight || window.innerHeight),
       0.15,
-      950
+      4200
     );
     this.scene.add(this.camera);
 
@@ -375,9 +463,9 @@ export class ViceEngine {
       composer.addPass(new RenderPass(this.scene, this.camera));
       const bloom = new UnrealBloomPass(
         new THREE.Vector2(Math.max(1, Math.floor(initW / 2)), Math.max(1, Math.floor(initH / 2))),
-        0.26,
-        0.4,
-        0.92
+        0.20,
+        0.38,
+        1.18
       );
       composer.addPass(bloom);
       composer.addPass(new OutputPass());
@@ -385,17 +473,17 @@ export class ViceEngine {
       this.bloomPass = bloom;
     }
 
-    // Lighting (Sun + Cool Rim Fill for crisp GTA contrast)
-    this.hemiLight = new THREE.HemisphereLight(0x93c5fd, 0x334155, 0.88);
+    // Lighting (Calibrated Sun + Cool Rim Fill for crisp GTA V contrast without distance washout)
+    this.hemiLight = new THREE.HemisphereLight(0x93c5fd, 0x334155, 0.44);
     this.scene.add(this.hemiLight);
 
-    this.sunLight = new THREE.DirectionalLight(0xffedd5, 2.25);
+    this.sunLight = new THREE.DirectionalLight(0xffedd5, 1.75);
     this.sunLight.position.set(80, 95, 60);
     this.sunLight.castShadow = !this.isSoftwareGl;
     this.sunLight.shadow.mapSize.set(1024, 1024);
     this.sunLight.shadow.camera.near = 10;
-    this.sunLight.shadow.camera.far = 230;
-    const d = 56;
+    this.sunLight.shadow.camera.far = 260;
+    const d = 75;
     this.sunLight.shadow.camera.left = -d;
     this.sunLight.shadow.camera.right = d;
     this.sunLight.shadow.camera.top = d;
@@ -405,7 +493,7 @@ export class ViceEngine {
     this.scene.add(this.sunLight);
     this.scene.add(this.sunLight.target);
 
-    this.rimLight = new THREE.DirectionalLight(0x7dd3fc, 0.52);
+    this.rimLight = new THREE.DirectionalLight(0x7dd3fc, 0.32);
     this.rimLight.position.set(-70, 50, -65);
     this.rimLight.castShadow = false;
     this.scene.add(this.rimLight);
@@ -416,12 +504,19 @@ export class ViceEngine {
     const world = buildOpenWorld(this.textures);
     this.scene.add(world.worldGroup);
     this.colliders = world.colliders;
+    this.floorSurfaces = world.floorSurfaces;
     this.circleColliders = world.circleColliders;
     this.ramps = world.ramps;
     this.barrels = world.barrels;
+    this.rangeTargets = world.rangeTargets;
+    this.elevators = world.elevators;
+    this.buildingWindowMaterials = world.buildingWindowMaterials;
+    this.spinners = world.spinners;
     this.shopRings = world.shopRings;
     this.oceanMesh = world.oceanMesh;
     this.skyMat = world.skyMat;
+    this.cloudGroup = world.cloudGroup;
+    this.cloudMaterials = world.cloudMaterials;
     this.roadSegments = world.roadSegments;
     this.roadRects = world.roadRects;
     this.buildingFootprints = world.buildingFootprints;
@@ -435,12 +530,17 @@ export class ViceEngine {
       this.skidPool.push(m);
     }
 
-    // 5. Player Rig & First Person Weapon Viewmodel
+    // 5. Player Rig, Parachute & First Person Weapon Viewmodel
     const activeChar = this.characters[this.activeCharId];
     this.playerRig = createCharacterRig(activeChar.appearance, this.textures.contactShadow);
     this.playerRig.root.position.set(activeChar.posX, activeChar.posY, activeChar.posZ);
     this.camYaw = activeChar.heading;
     this.scene.add(this.playerRig.root);
+
+    this.parachuteRig = createParachuteRig();
+    this.parachuteRig.position.set(0, 0.45, -0.05);
+    this.parachuteRig.visible = false;
+    this.playerRig.torsoGroup.add(this.parachuteRig);
 
     this.firstPersonWeaponGroup = new THREE.Group();
     this.firstPersonWeaponGroup.position.set(0.24, -0.22, -0.42);
@@ -457,7 +557,7 @@ export class ViceEngine {
 
     this.syncEquippedWeaponMesh();
 
-    // 6. Waypoint Beacon, Story Start Beacons & Mission Briefcase
+    // 6. Waypoint Beacon, Taxi Drop Beacon, Story Start Beacons & Mission Briefcase
     this.waypointGroup = new THREE.Group();
     this.waypointGroup.visible = false;
     const beamGeo = new THREE.CylinderGeometry(1.1, 1.1, 48, 16, 1, true);
@@ -480,6 +580,15 @@ export class ViceEngine {
     this.waypointRing.position.y = 0.08;
     this.waypointGroup.add(this.waypointBeam, this.waypointRing);
     this.scene.add(this.waypointGroup);
+
+    this.taxiDropBeacon = new THREE.Mesh(
+      new THREE.TorusGeometry(2.1, 0.14, 10, 28),
+      new THREE.MeshBasicMaterial({ color: 0xfacc15 })
+    );
+    this.taxiDropBeacon.rotation.x = Math.PI / 2;
+    this.taxiDropBeacon.position.y = 0.22;
+    this.taxiDropBeacon.visible = false;
+    this.scene.add(this.taxiDropBeacon);
 
     // Floating 3D Beacons for Unlocked Story Missions
     for (const m of MISSIONS) {
@@ -517,7 +626,7 @@ export class ViceEngine {
     this.pickupBriefcase.visible = false;
     this.scene.add(this.pickupBriefcase);
 
-    // 7. Spawn Initial Diverse Fleet (Cars, Supercars, Motorcycles, Boats, Planes) & Civilians
+    // 7. Spawn Initial Diverse Fleet (Cars, Taxis, Helicopters, Fighter Jets, Boats, Planes) & Civilians
     this.spawnInitialVehicles();
     this.spawnAmbientCivilians();
 
@@ -632,39 +741,69 @@ export class ViceEngine {
       z: number;
       heading: number;
     }> = [
-      // Supercars (Valkyra)
-      { kind: 'supercar', brand: 'Valkyra', name: 'Aether RS', color: '#fbbf24', x: 175, z: -48, heading: 0 },
-      { kind: 'supercar', brand: 'Valkyra', name: 'Solaris GT', color: '#ec4899', x: 14, z: -64, heading: Math.PI / 2 },
+      // Supercars (Valkyra) & Sports around Coral Strip, Safehouse & Downtown
+      { kind: 'supercar', brand: 'Valkyra', name: 'Aether RS', color: '#fbbf24', x: 472, z: -112, heading: 0 },
+      { kind: 'supercar', brand: 'Valkyra', name: 'Solaris GT', color: '#ec4899', x: 32, z: -64, heading: Math.PI / 2 },
+      { kind: 'supercar', brand: 'Valkyra', name: 'Vortex V12', color: '#f97316', x: 492, z: -598, heading: Math.PI },
       // Muscle Cars (Solano)
-      { kind: 'muscle', brand: 'Solano', name: 'Hellhound V8', color: '#e11d48', x: 102, z: 185, heading: Math.PI / 2 },
-      { kind: 'muscle', brand: 'Solano', name: 'Mojave 440', color: '#f97316', x: -130, z: -18, heading: 0 },
+      { kind: 'muscle', brand: 'Solano', name: 'Hellhound V8', color: '#e11d48', x: 182, z: -210, heading: Math.PI / 2 },
+      { kind: 'muscle', brand: 'Solano', name: 'Mojave 440', color: '#f97316', x: -120, z: -176, heading: 0 },
       // Sport Coupes (Kuroi)
-      { kind: 'coupe', brand: 'Kuroi', name: 'Shinobi GT', color: '#06b6d4', x: 162, z: -64, heading: 0 },
-      { kind: 'coupe', brand: 'Kuroi', name: 'Ronin Spec-R', color: '#14b8a6', x: 185, z: -108, heading: Math.PI },
+      { kind: 'coupe', brand: 'Kuroi', name: 'Shinobi GT', color: '#06b6d4', x: 448, z: -132, heading: 0 },
+      { kind: 'coupe', brand: 'Kuroi', name: 'Ronin Spec-R', color: '#14b8a6', x: 560, z: -206, heading: Math.PI },
       // Sedans (Bavaro)
-      { kind: 'sedan', brand: 'Bavaro', name: 'M50 Touring', color: '#94a3b8', x: 14, z: -108, heading: Math.PI / 2 },
-      { kind: 'sedan', brand: 'Bavaro', name: '320 Berlina', color: '#475569', x: -130, z: 68, heading: 0 },
+      { kind: 'sedan', brand: 'Bavaro', name: 'M50 Touring', color: '#94a3b8', x: -292, z: -216, heading: Math.PI / 2 },
+      { kind: 'sedan', brand: 'Bavaro', name: '320 Berlina', color: '#475569', x: -322, z: -260, heading: 0 },
+      // Horizon Cab Taxis
+      { kind: 'taxi', brand: 'Horizon Cab', name: 'Horizon Taxík', color: '#facc15', x: 444, z: -104, heading: -Math.PI / 2 },
+      { kind: 'taxi', brand: 'Horizon Cab', name: 'Horizon Taxík', color: '#facc15', x: -72, z: -608, heading: Math.PI / 2 },
+      { kind: 'taxi', brand: 'Horizon Cab', name: 'Horizon Taxík', color: '#facc15', x: -746, z: 588, heading: 0 },
       // SUVs (Titanus)
-      { kind: 'suv', brand: 'Titanus', name: 'Apex G-Line', color: '#0ea5e9', x: -46, z: -56, heading: -Math.PI / 2 },
-      { kind: 'suv', brand: 'Titanus', name: 'Overland 4x4', color: '#a855f7', x: 88, z: -185, heading: 0 },
+      { kind: 'suv', brand: 'Titanus', name: 'Apex G-Line', color: '#0ea5e9', x: -536, z: 162, heading: -Math.PI / 2 },
+      { kind: 'suv', brand: 'Titanus', name: 'Overland 4x4', color: '#a855f7', x: 118, z: -915, heading: 0 },
       // Motorcycles (Zeta)
-      { kind: 'motorcycle', brand: 'Zeta', name: 'Viper RR', color: '#ef4444', x: 152, z: -42, heading: -Math.PI / 2 },
-      { kind: 'motorcycle', brand: 'Zeta', name: 'Cross 450', color: '#22c55e', x: -148, z: 188, heading: Math.PI },
-      { kind: 'motorcycle', brand: 'Zeta', name: 'Volt S', color: '#38bdf8', x: 86, z: 192, heading: 0 },
+      { kind: 'motorcycle', brand: 'Zeta', name: 'Viper RR', color: '#ef4444', x: 454, z: -126, heading: -Math.PI / 2 },
+      { kind: 'motorcycle', brand: 'Zeta', name: 'Cross 450', color: '#22c55e', x: -720, z: -475, heading: Math.PI },
+      { kind: 'motorcycle', brand: 'Zeta', name: 'Volt S', color: '#38bdf8', x: 785, z: -108, heading: 0 },
       // Emergency Fleet stationed outside Hospital, Police Station & Fire Station
-      { kind: 'police', brand: 'VCPD', name: 'VCPD Interceptor', color: '#111827', x: -162, z: -198, heading: Math.PI },
-      { kind: 'police', brand: 'VCPD', name: 'VCPD Interceptor', color: '#111827', x: -12, z: -108, heading: Math.PI / 2 },
-      { kind: 'ambulance', brand: 'VEMS', name: 'VEMS Sanitka', color: '#f8fafc', x: -20, z: -198, heading: Math.PI },
-      { kind: 'firetruck', brand: 'VCFD', name: 'VCFD Hasičské auto', color: '#dc2626', x: 96, z: 184, heading: 0 },
-      // Speedboats (Pelican) in Vice Canal, Marina Harbor & Beaches
-      { kind: 'boat', brand: 'Pelican', name: 'Speeder 320', color: '#06b6d4', x: 138, z: 138, heading: Math.PI / 2 },
-      { kind: 'boat', brand: 'Pelican', name: 'Offshore 45', color: '#f43f5e', x: 262, z: 226, heading: Math.PI / 2 },
-      { kind: 'boat', brand: 'Pelican', name: 'Marlin Sport', color: '#f59e0b', x: 266, z: 294, heading: 0 },
-      { kind: 'boat', brand: 'Pelican', name: 'Coral Wave', color: '#10b981', x: 432, z: -12, heading: 0 },
-      // Planes on Bayshore International Airport Runway (z = 235)
-      { kind: 'plane', brand: 'Pelican', name: 'Skylark Coastal', color: '#f97316', x: -258, z: 235, heading: Math.PI / 2 },
-      { kind: 'plane', brand: 'Zeta', name: 'Stunt Jet X1', color: '#38bdf8', x: -198, z: 235, heading: Math.PI / 2 },
+      { kind: 'police', brand: 'VCPD', name: 'VCPD Interceptor', color: '#111827', x: -464, z: -606, heading: Math.PI },
+      { kind: 'police', brand: 'VCPD', name: 'VCPD Interceptor', color: '#111827', x: -438, z: -606, heading: Math.PI },
+      { kind: 'ambulance', brand: 'VEMS', name: 'VEMS Sanitka', color: '#f8fafc', x: -102, z: -606, heading: Math.PI },
+      { kind: 'firetruck', brand: 'VCFD', name: 'VCFD Hasičské auto', color: '#dc2626', x: -102, z: 590, heading: 0 },
+      // Speedboats (Pelican) in Marina Bay & Coastline
+      { kind: 'boat', brand: 'Pelican', name: 'Speeder 320', color: '#06b6d4', x: 650, z: 720, heading: Math.PI / 2 },
+      { kind: 'boat', brand: 'Pelican', name: 'Offshore 45', color: '#f43f5e', x: 780, z: 810, heading: Math.PI / 2 },
+      { kind: 'boat', brand: 'Pelican', name: 'Marlin Sport', color: '#f59e0b', x: 890, z: 690, heading: 0 },
+      { kind: 'boat', brand: 'Pelican', name: 'Coral Wave', color: '#10b981', x: 1120, z: -80, heading: 0 },
+      // Dynamic Airport Aircraft Fleet (varied per launch, includes Helicopters & Fighter Jet!)
+      { kind: 'plane', brand: 'Pelican', name: 'Skylark Coastal', color: '#f97316', x: -1060, z: 770, heading: Math.PI / 2 },
+      { kind: 'helicopter', brand: 'Pelican', name: 'Pelican Helistar', color: '#0ea5e9', x: -860, z: 680, heading: 0 },
+      { kind: 'helicopter', brand: 'VCPD', name: 'VCPD Air-1', color: '#1e293b', x: -450, z: -575, heading: Math.PI },
     ];
+
+    const airRoll = Math.random();
+    if (airRoll < 0.72) {
+      parkedSpecs.push({
+        kind: 'fighter_jet',
+        brand: 'Zeta',
+        name: 'Zeta F-22 Interceptor',
+        color: '#334155',
+        x: -910,
+        z: 845,
+        heading: Math.PI / 2,
+      });
+    }
+    if (airRoll > 0.28) {
+      parkedSpecs.push({
+        kind: 'plane',
+        brand: 'Valkyra',
+        name: 'Valkyra Jetstream',
+        color: '#e11d48',
+        x: -790,
+        z: 770,
+        heading: Math.PI / 2,
+      });
+    }
 
     parkedSpecs.forEach((s, idx) => {
       this.addVehicle(
@@ -681,23 +820,25 @@ export class ViceEngine {
       );
     });
 
-    // Autonomous Curved-Path Traffic across the 5x Island (Highways, Roundabouts, Boulevards)
+    // Autonomous Curved-Path Traffic across the 15x Island (Highways, Roundabouts, Boulevards)
     const fleetPalette: Array<[VehicleKind, string, string, string]> = [
       ['sedan', 'Bavaro', 'Bavaro 320', '#64748b'],
       ['coupe', 'Kuroi', 'Kuroi Shinobi', '#ef4444'],
+      ['taxi', 'Horizon Cab', 'Horizon Taxík', '#facc15'],
       ['muscle', 'Solano', 'Solano V8', '#3b82f6'],
       ['suv', 'Titanus', 'Titanus Apex', '#f8fafc'],
       ['supercar', 'Valkyra', 'Valkyra Aether', '#fbbf24'],
       ['coupe', 'Kuroi', 'Kuroi Ronin', '#ec4899'],
       ['sedan', 'Bavaro', 'Bavaro M50', '#10b981'],
       ['motorcycle', 'Zeta', 'Zeta Viper', '#f43f5e'],
+      ['taxi', 'Horizon Cab', 'Horizon Taxík', '#facc15'],
       ['ambulance', 'VEMS', 'VEMS Sanitka', '#f8fafc'],
       ['firetruck', 'VCFD', 'VCFD Hasičské auto', '#dc2626'],
     ];
 
     let tIdx = 0;
     TRAFFIC_LOOP_PATHS.forEach((path, pIdx) => {
-      const carsOnLoop = pIdx < 2 ? 5 : 4;
+      const carsOnLoop = pIdx < 2 ? 6 : 4;
       for (let k = 0; k < carsOnLoop; k++) {
         const wpIdx = Math.floor((k / carsOnLoop) * path.length) % path.length;
         const nextIdx = (wpIdx + 1) % path.length;
@@ -719,21 +860,21 @@ export class ViceEngine {
           pIdx,
           nextIdx
         );
-        veh.speed = 10 + (tIdx % 4) * 1.5;
+        veh.speed = 11 + (tIdx % 4) * 1.6;
         tIdx += 1;
       }
     });
 
-    // Autonomous Offshore Boats circling the Island Coastline
-    for (let b = 0; b < 3; b++) {
-      const ang = (b / 3) * Math.PI * 2;
-      const r = 468;
+    // Autonomous Offshore Boats circling the 15x Island Coastline
+    for (let b = 0; b < 4; b++) {
+      const ang = (b / 4) * Math.PI * 2;
+      const r = 1690;
       this.addVehicle(
         `traffic_boat_${b}`,
         'Pelican',
         'Pelican Cruiser',
         'boat',
-        b === 0 ? '#0ea5e9' : b === 1 ? '#f43f5e' : '#fbbf24',
+        b === 0 ? '#0ea5e9' : b === 1 ? '#f43f5e' : b === 2 ? '#fbbf24' : '#10b981',
         Math.cos(ang) * r,
         Math.sin(ang) * r,
         ang,
@@ -768,25 +909,35 @@ export class ViceEngine {
     this.scene.add(rig.root);
 
     const speedTable: Record<VehicleKind, [number, number]> = {
-      sedan: [26, 13],
-      suv: [29, 15],
-      muscle: [39, 22],
-      police: [44, 25],
-      ambulance: [35, 17],
-      firetruck: [32, 14],
-      coupe: [45, 25],
-      supercar: [58, 33],
-      motorcycle: [48, 30],
-      boat: [38, 19],
-      plane: [74, 27],
+      sedan: [28, 14],
+      taxi: [30, 15],
+      suv: [31, 16],
+      muscle: [41, 23],
+      police: [46, 26],
+      ambulance: [36, 18],
+      firetruck: [33, 15],
+      coupe: [47, 26],
+      supercar: [60, 34],
+      motorcycle: [50, 31],
+      boat: [40, 20],
+      plane: [78, 28],
+      helicopter: [52, 24],
+      fighter_jet: [118, 46],
     };
     const [maxSpeed, accel] = speedTable[kind];
+    const maxHealth =
+      kind === 'fighter_jet' || kind === 'helicopter' || kind === 'plane' || kind === 'boat' || kind === 'firetruck'
+        ? 300
+        : kind === 'ambulance' || kind === 'police'
+          ? 230
+          : 170;
 
     const v: VehicleEntity = {
       id,
       brand,
       name,
       kind,
+      color,
       rig,
       x,
       y: startY,
@@ -797,7 +948,7 @@ export class ViceEngine {
       heading,
       pitch: 0,
       roll: 0,
-      speed: isTraffic ? 9.5 : 0,
+      speed: isTraffic ? 10 : 0,
       steerAngle: 0,
       wheelSpin: 0,
       maxSpeed,
@@ -813,8 +964,10 @@ export class ViceEngine {
       isDrifting: false,
       driftIntensity: 0,
       occupiedByPlayer: false,
-      health: kind === 'plane' || kind === 'boat' || kind === 'firetruck' ? 280 : kind === 'ambulance' ? 220 : 160,
+      health: maxHealth,
+      maxHealth,
       destroyed: false,
+      upgrades: { engineLevel: 0, turbo: false, armorLevel: 0, suspensionLevel: 0 },
     };
     this.vehicles.push(v);
     return v;
@@ -897,16 +1050,18 @@ export class ViceEngine {
   }
 
   private spawnAmbientCivilians() {
-    // Conversing pairs near Coral Strip, Slnečné námestie, Downtown & Beaches
+    // Conversing pairs near Coral Strip, Slnečné námestie, Downtown, Marina & Beaches
     const pairs: [number, number][] = [
-      [154, -44],
-      [172, -32],
-      [-28, -44],
-      [26, 12],
-      [120, -96],
-      [-125, -88],
-      [345, -18],
-      [182, 194],
+      [445, -112],
+      [475, -130],
+      [-28, -56],
+      [34, 14],
+      [512, -96],
+      [-285, -208],
+      [785, -90],
+      [510, 560],
+      [-740, 565],
+      [148, -225],
     ];
     pairs.forEach(([px, pz], i) => {
       if (!isWaterAt(px, pz)) {
@@ -915,10 +1070,10 @@ export class ViceEngine {
       }
     });
 
-    // Strolling & chilling pedestrians across the 5x Island
-    for (let i = 0; i < 16; i++) {
-      const ang = (i / 16) * Math.PI * 2;
-      const r = 45 + (i % 5) * 65;
+    // Strolling & chilling pedestrians across the 15x Island
+    for (let i = 0; i < 20; i++) {
+      const ang = (i / 20) * Math.PI * 2;
+      const r = 80 + (i % 6) * 195;
       const sx = Math.cos(ang) * r;
       const sz = Math.sin(ang) * r;
       if (!isWaterAt(sx, sz)) {
@@ -997,6 +1152,7 @@ export class ViceEngine {
     const skin = owned?.skinColor || '#27272a';
     const tpMesh = createWeaponMesh(this.inventory.equippedWeapon, skin);
     this.playerRig.weaponMount.add(tpMesh);
+    this.playerRig.muzzlePoint.position.set(0, 0.05, getWeaponMuzzleOffset(this.inventory.equippedWeapon));
 
     // 1st person viewmodel
     while (this.firstPersonWeaponGroup.children.length > 0) {
@@ -1023,7 +1179,7 @@ export class ViceEngine {
     }
     if (this.bloomPass) {
       this.bloomPass.enabled = settings.graphics.preset === 'high' || settings.graphics.preset === 'ultra';
-      this.bloomPass.strength = settings.graphics.preset === 'ultra' ? 0.34 : 0.24;
+      this.bloomPass.strength = settings.graphics.preset === 'ultra' ? 0.28 : 0.20;
     }
     this.camera.fov = settings.graphics.fov;
     this.camera.updateProjectionMatrix();
@@ -1041,74 +1197,108 @@ export class ViceEngine {
 
     // Time of Day, Sky Dome Sun Disc & Horizon Fog
     const tod = settings.gameplayMods.timeOfDay;
-    const fogDensity = Math.max(0.0012, 0.28 / settings.graphics.viewDistance);
-    if (tod === 'sunset') {
-      const horizon = new THREE.Color(0xfb923c);
-      const mid = new THREE.Color(0x9333ea).lerp(new THREE.Color(0x334155), 0.35);
-      const top = new THREE.Color(0x0f172a);
-      this.skyMat.uniforms.uHorizonColor.value.copy(horizon);
-      this.skyMat.uniforms.uMidColor.value.copy(mid);
-      this.skyMat.uniforms.uTopColor.value.copy(top);
-      this.skyMat.uniforms.uSunDir.value.set(0.76, 0.24, 0.56).normalize();
-      this.skyMat.uniforms.uSunColor.value.set(0xffedd5);
-      this.skyMat.uniforms.uSunStrength.value = 1.05;
-      this.scene.background = horizon.clone().lerp(mid, 0.3);
-      this.scene.fog = new THREE.FogExp2(horizon.clone().lerp(mid, 0.25).getHex(), fogDensity);
-      this.sunLight.color.set(0xfdba74);
-      this.sunLight.intensity = 2.45;
-      this.sunLight.position.set(110, 58, 70);
-      this.rimLight.color.set(0x38bdf8);
-      this.rimLight.intensity = 0.55;
-      this.hemiLight.color.set(0x7dd3fc);
-      this.hemiLight.groundColor.set(0x334155);
-      this.hemiLight.intensity = 0.92;
-      this.renderer.toneMappingExposure = 1.14;
-    } else if (tod === 'noon') {
-      const horizon = new THREE.Color(0xbae6fd);
-      const mid = new THREE.Color(0x38bdf8);
-      const top = new THREE.Color(0x0284c7);
-      this.skyMat.uniforms.uHorizonColor.value.copy(horizon);
-      this.skyMat.uniforms.uMidColor.value.copy(mid);
-      this.skyMat.uniforms.uTopColor.value.copy(top);
-      this.skyMat.uniforms.uSunDir.value.set(0.38, 0.88, 0.34).normalize();
-      this.skyMat.uniforms.uSunColor.value.set(0xfffbeb);
-      this.skyMat.uniforms.uSunStrength.value = 0.9;
-      this.scene.background = horizon;
-      this.scene.fog = new THREE.FogExp2(horizon.getHex(), fogDensity * 0.72);
-      this.sunLight.color.set(0xfffbeb);
-      this.sunLight.intensity = 2.65;
-      this.sunLight.position.set(50, 120, 45);
-      this.rimLight.color.set(0xe0f2fe);
-      this.rimLight.intensity = 0.48;
-      this.hemiLight.color.set(0xbae6fd);
-      this.hemiLight.groundColor.set(0x475569);
-      this.hemiLight.intensity = 0.96;
-      this.renderer.toneMappingExposure = 1.1;
-    } else {
-      const horizon = new THREE.Color(0x1e1b4b);
-      const mid = new THREE.Color(0x0f172a);
-      const top = new THREE.Color(0x030712);
-      this.skyMat.uniforms.uHorizonColor.value.copy(horizon);
-      this.skyMat.uniforms.uMidColor.value.copy(mid);
-      this.skyMat.uniforms.uTopColor.value.copy(top);
-      this.skyMat.uniforms.uSunDir.value.set(-0.55, 0.65, -0.45).normalize();
-      this.skyMat.uniforms.uSunColor.value.set(0xc7d2fe);
-      this.skyMat.uniforms.uSunStrength.value = 0.35;
-      this.scene.background = horizon;
-      this.scene.fog = new THREE.FogExp2(horizon.getHex(), fogDensity * 1.1);
-      this.sunLight.color.set(0x93c5fd);
-      this.sunLight.intensity = 0.95;
-      this.sunLight.position.set(-70, 90, -50);
-      this.rimLight.color.set(0x818cf8);
-      this.rimLight.intensity = 0.42;
-      this.hemiLight.color.set(0x1e3a8a);
-      this.hemiLight.groundColor.set(0x0f172a);
-      this.hemiLight.intensity = 0.62;
-      this.renderer.toneMappingExposure = 1.02;
+    if (tod === 'sunset') this.gameTimeNormalized = 0.76;
+    else if (tod === 'noon') this.gameTimeNormalized = 0.5;
+    else if (tod === 'night') this.gameTimeNormalized = 0.02;
+
+    this.updateAtmosphere(0);
+
+    if (settings.gameplayMods.noPolice && (this.wantedStars > 0 || this.policeDispatchTimer > 0)) {
+      this.clearPolicePursuit();
+    }
+  }
+
+  public setTimeOfDay(normalized: number) {
+    this.gameTimeNormalized = ((normalized % 1) + 1) % 1;
+    this.updateAtmosphere(0);
+  }
+
+  private getGameClockString(): string {
+    const totalMinutes = Math.floor(this.gameTimeNormalized * 1440) % 1440;
+    const hh = String(Math.floor(totalMinutes / 60)).padStart(2, '0');
+    const mm = String(totalMinutes % 60).padStart(2, '0');
+    return `${hh}:${mm}`;
+  }
+
+  private updateAtmosphere(dt: number) {
+    // Advance clock 3x faster than real-time? Spec: 1 in-game 24h cycle smoothly progresses when 'auto' (~16 min full day or smooth 3x clock)
+    if (dt > 0 && this.settings.gameplayMods.timeOfDay === 'auto') {
+      // 3x real-time minutes => 1 real second = 3 game minutes -> 480s = 24h (8 minutes full day-night cycle)
+      this.gameTimeNormalized = (this.gameTimeNormalized + (dt * 3) / 1440) % 1;
     }
 
-    if (settings.gameplayMods.noPolice && this.wantedStars > 0) {
-      this.clearPolicePursuit();
+    // Dynamic drifting clouds & varying cloud coverage (sometimes sunny clear, sometimes cloudy)
+    if (this.cloudGroup) {
+      this.cloudCoverage = 0.45 + 0.42 * Math.sin(this.elapsedSec * 0.012);
+      const targetVisOpacity = THREE.MathUtils.clamp((this.cloudCoverage - 0.1) * 0.85, 0.05, 0.78);
+      for (let i = 0; i < this.cloudGroup.children.length; i++) {
+        const cloud = this.cloudGroup.children[i];
+        cloud.position.x += dt * (1.8 + (i % 3) * 0.7);
+        if (cloud.position.x > 1650) cloud.position.x = -1650;
+        cloud.visible = i / this.cloudGroup.children.length <= this.cloudCoverage + 0.12;
+      }
+      for (const m of this.cloudMaterials) {
+        m.opacity = targetVisOpacity;
+      }
+    }
+
+    // Compute smooth solar elevation (-1 midnight .. 0 sunrise/sunset .. +1 noon)
+    const sunAngle = (this.gameTimeNormalized - 0.25) * Math.PI * 2;
+    const sunY = Math.sin(sunAngle);
+    const sunX = Math.cos(sunAngle);
+    const dayWeight = THREE.MathUtils.smoothstep(sunY, -0.15, 0.35);
+    const sunsetWeight = Math.exp(-Math.pow((sunY - 0.05) / 0.22, 2));
+
+    const nightHorizon = new THREE.Color(0x0f172a);
+    const nightMid = new THREE.Color(0x090d1a);
+    const nightTop = new THREE.Color(0x020617);
+
+    const dayHorizon = new THREE.Color(0xbae6fd);
+    const dayMid = new THREE.Color(0x38bdf8);
+    const dayTop = new THREE.Color(0x0284c7);
+
+    const sunsetHorizon = new THREE.Color(0xfb923c);
+    const sunsetMid = new THREE.Color(0x7e22ce).lerp(new THREE.Color(0x334155), 0.35);
+    const sunsetTop = new THREE.Color(0x0f172a);
+
+    const horizon = nightHorizon.clone().lerp(dayHorizon, dayWeight).lerp(sunsetHorizon, sunsetWeight * 0.85);
+    const mid = nightMid.clone().lerp(dayMid, dayWeight).lerp(sunsetMid, sunsetWeight * 0.78);
+    const top = nightTop.clone().lerp(dayTop, dayWeight).lerp(sunsetTop, sunsetWeight * 0.7);
+
+    this.skyMat.uniforms.uHorizonColor.value.copy(horizon);
+    this.skyMat.uniforms.uMidColor.value.copy(mid);
+    this.skyMat.uniforms.uTopColor.value.copy(top);
+    this.skyMat.uniforms.uSunDir.value.set(sunX * 0.8, Math.max(-0.2, sunY), 0.42).normalize();
+    this.skyMat.uniforms.uSunColor.value.set(sunsetWeight > 0.4 ? 0xffedd5 : 0xfffbeb);
+    this.skyMat.uniforms.uSunStrength.value = THREE.MathUtils.lerp(0.28, 1.05, Math.max(dayWeight, sunsetWeight));
+
+    const fogColor = horizon.clone().lerp(mid, 0.22);
+    const fogDensity = Math.max(0.0005, 0.24 / Math.max(200, this.settings.graphics.viewDistance));
+    this.scene.background = fogColor;
+    if (this.scene.fog instanceof THREE.FogExp2) {
+      this.scene.fog.color.copy(fogColor);
+      this.scene.fog.density = fogDensity * THREE.MathUtils.lerp(1.12, 0.78, dayWeight);
+    } else {
+      this.scene.fog = new THREE.FogExp2(fogColor.getHex(), fogDensity);
+    }
+
+    const sunColor = new THREE.Color(0x93c5fd)
+      .lerp(new THREE.Color(0xfffbeb), dayWeight)
+      .lerp(new THREE.Color(0xfdba74), sunsetWeight * 0.8);
+    this.sunLight.color.copy(sunColor);
+    this.sunLight.intensity = THREE.MathUtils.lerp(0.45, 1.82, Math.max(dayWeight, sunsetWeight * 0.75));
+    this.rimLight.color.set(dayWeight > 0.5 ? 0xe0f2fe : 0x60a5fa);
+    this.rimLight.intensity = THREE.MathUtils.lerp(0.24, 0.34, dayWeight);
+    this.hemiLight.color.set(dayWeight > 0.45 ? 0xbae6fd : 0x3b82f6);
+    this.hemiLight.groundColor.set(dayWeight > 0.45 ? 0x475569 : 0x0f172a);
+    this.hemiLight.intensity = THREE.MathUtils.lerp(0.28, 0.48, dayWeight);
+    this.renderer.toneMappingExposure = THREE.MathUtils.lerp(0.86, 0.94, Math.max(dayWeight, sunsetWeight));
+
+    const windowGlow = THREE.MathUtils.lerp(0.65, 0.04, dayWeight);
+    for (const wm of this.buildingWindowMaterials) {
+      if ('emissiveIntensity' in wm) {
+        (wm as THREE.MeshStandardMaterial).emissiveIntensity = windowGlow;
+      }
     }
   }
 
@@ -1332,6 +1522,9 @@ export class ViceEngine {
     this.wantedEvading = false;
     this.evasionProgress = 0;
     this.arrestProgress = 0;
+    this.policeDispatchTimer = 0;
+    this.policeDispatchReason = null;
+    this.pendingDispatchStars = 0;
 
     this.npcs = this.npcs.filter((n) => {
       if (n.kind === 'police') {
@@ -1356,37 +1549,442 @@ export class ViceEngine {
     });
   }
 
+  public getNearbyRepairCost(): number {
+    const target = this.currentVehicle || this.lastLandVehicle;
+    if (!target || target.destroyed) return 0;
+    const damageRatio = 1 - THREE.MathUtils.clamp(target.health / Math.max(1, target.maxHealth), 0, 1);
+    return Math.max(40, Math.round(40 + damageRatio * 480));
+  }
+
   public repairAndRepaintVehicle(colorHex?: string): boolean {
     const target = this.currentVehicle || this.lastLandVehicle;
     if (!target || target.destroyed) return false;
-    target.health = target.kind === 'plane' || target.kind === 'boat' || target.kind === 'firetruck' ? 280 : 180;
+    target.health = target.maxHealth;
+    resetVehicleDeformation(target.rig);
     if (colorHex && target.rig.paintMat) {
+      target.color = colorHex;
       target.rig.paintMat.color.set(colorHex);
     }
-    this.stuntMessage = `Servis: ${target.name} opravený a prelakovaný!`;
+    this.stuntMessage = `Servis: ${target.name} opravený a karoséria vyrovnaná!`;
     this.stuntTimer = 3.0;
     this.audio.playUiChime('mission');
     return true;
   }
 
-  public startMission(missionId: string) {
-    const def = MISSIONS.find((m) => m.id === missionId);
-    if (!def) return;
-    this.activeMission = def;
-    this.activeStageIndex = 0;
-    this.missionElapsedSec = 0;
-    this.missionTimerRemaining = def.timeLimitSec ?? null;
-    if (def.wantedOnStart && !this.settings.gameplayMods.noPolice) {
-      this.addCrimeHeat(def.wantedOnStart * 35);
+  public upgradeCurrentVehicle(type: 'engine' | 'turbo' | 'armor' | 'suspension'): {
+    ok: boolean;
+    cost: number;
+    message: string;
+  } {
+    const target = this.currentVehicle || this.lastLandVehicle;
+    if (!target || target.destroyed) {
+      return { ok: false, cost: 0, message: 'Najprv zaparkuj vozidlo pred servisom.' };
     }
-    this.setupCurrentMissionStage();
-    this.refreshMissionBeaconVisibility();
-    this.missionNotification = {
-      title: def.title,
-      subtitle: def.stages[0].label,
-    };
-    this.missionNotifTimer = 4.5;
+    let cost = 0;
+    let label = '';
+    if (type === 'engine') {
+      if (target.upgrades.engineLevel >= 3) return { ok: false, cost: 0, message: 'Motor je už na maxime (Úroveň 3).' };
+      cost = 900 + target.upgrades.engineLevel * 650;
+      if (this.cash < cost) return { ok: false, cost, message: `Nedostatok peňazí ($${cost}).` };
+      target.upgrades.engineLevel = (target.upgrades.engineLevel + 1) as 0 | 1 | 2 | 3;
+      label = `Motor Stage ${target.upgrades.engineLevel}`;
+    } else if (type === 'turbo') {
+      if (target.upgrades.turbo) return { ok: false, cost: 0, message: 'Twin-Turbo je už nainštalované.' };
+      cost = 2200;
+      if (this.cash < cost) return { ok: false, cost, message: `Nedostatok peňazí ($${cost}).` };
+      target.upgrades.turbo = true;
+      label = 'Twin-Turbo kit';
+    } else if (type === 'armor') {
+      if (target.upgrades.armorLevel >= 2) return { ok: false, cost: 0, message: 'Pancier je na maxime.' };
+      cost = 1200 + target.upgrades.armorLevel * 900;
+      if (this.cash < cost) return { ok: false, cost, message: `Nedostatok peňazí ($${cost}).` };
+      target.upgrades.armorLevel = (target.upgrades.armorLevel + 1) as 0 | 1 | 2;
+      target.maxHealth += 90;
+      target.health = target.maxHealth;
+      label = `Balistický pancier ${target.upgrades.armorLevel}`;
+    } else {
+      if (target.upgrades.suspensionLevel >= 2) return { ok: false, cost: 0, message: 'Podvozok je na maxime.' };
+      cost = 750 + target.upgrades.suspensionLevel * 600;
+      if (this.cash < cost) return { ok: false, cost, message: `Nedostatok peňazí ($${cost}).` };
+      target.upgrades.suspensionLevel = (target.upgrades.suspensionLevel + 1) as 0 | 1 | 2;
+      label = `Športový podvozok ${target.upgrades.suspensionLevel}`;
+    }
+
+    this.cash -= cost;
+    this.callbacks.onCashChange(this.cash);
     this.audio.playUiChime('mission');
+    this.stuntMessage = `${target.name}: Nainštalovaný ${label}!`;
+    this.stuntTimer = 3.0;
+    return { ok: true, cost, message: `${label} nainštalovaný (-$${cost}).` };
+  }
+
+  public setSavedGarage(garage: SavedGarageState) {
+    this.savedGarage = structuredClone(garage);
+  }
+
+  public getSavedGarage(): SavedGarageState {
+    return structuredClone(this.savedGarage);
+  }
+
+  public retrieveSavedVehicle(facility: 'hangar' | 'safehouse', index: number): boolean {
+    const list = facility === 'hangar' ? this.savedGarage.hangarVehicles : this.savedGarage.safehouseVehicles;
+    const rec = list[index];
+    if (!rec) return false;
+    const existing = this.vehicles.find((v) => v.id === rec.id && !v.destroyed);
+    const spawnX = facility === 'hangar' ? AIRPORT_HANGAR_ZONE.doorX : SAFEHOUSE_GARAGE_ZONE.doorX;
+    const spawnZ = facility === 'hangar' ? AIRPORT_HANGAR_ZONE.doorZ + 8 : SAFEHOUSE_GARAGE_ZONE.doorZ + 6;
+    if (existing) {
+      existing.x = spawnX;
+      existing.z = spawnZ;
+      existing.y = this.getGroundHeightAt(spawnX, spawnZ, 0);
+      existing.speed = 0;
+      existing.vx = 0;
+      existing.vz = 0;
+      existing.heading = rec.heading || 0;
+      existing.health = existing.maxHealth;
+      resetVehicleDeformation(existing.rig);
+      existing.rig.root.position.set(existing.x, existing.y, existing.z);
+      existing.rig.root.rotation.y = existing.heading;
+    } else {
+      const veh = this.addVehicle(
+        rec.id || `stored_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+        rec.brand,
+        rec.name,
+        rec.kind,
+        rec.color,
+        spawnX,
+        spawnZ,
+        rec.heading || 0,
+        rec.kind === 'police',
+        false
+      );
+      if (rec.upgrades) {
+        veh.upgrades = { ...rec.upgrades };
+        veh.maxHealth += rec.upgrades.armorLevel * 90;
+        veh.health = veh.maxHealth;
+      }
+    }
+    this.stuntMessage = `${rec.name} pristavené pred ${facility === 'hangar' ? 'hangár' : 'garáž'}!`;
+    this.stuntTimer = 3.2;
+    this.audio.playUiChime('mission');
+    return true;
+  }
+
+  public buyParachute(): boolean {
+    if (this.inventory.hasParachute || this.cash < 450) return false;
+    this.cash -= 450;
+    this.inventory.hasParachute = true;
+    this.callbacks.onCashChange(this.cash);
+    this.callbacks.onInventoryChange(structuredClone(this.inventory));
+    this.audio.playUiChime('mission');
+    return true;
+  }
+
+  public callTaxiPassenger(): boolean {
+    if (this.currentVehicle) return false;
+    const px = this.playerRig.root.position.x;
+    const pz = this.playerRig.root.position.z;
+    const cab = this.addVehicle(
+      `cab_call_${Date.now()}`,
+      'Horizon Cab',
+      'Horizon Taxík',
+      'taxi',
+      '#facc15',
+      px + 8,
+      pz + 6,
+      this.camYaw + Math.PI,
+      false,
+      false
+    );
+    cab.hasDriver = true;
+    if (cab.rig.driverGroup) cab.rig.driverGroup.visible = true;
+    this.currentVehicle = cab;
+    this.lastLandVehicle = cab;
+    cab.occupiedByPlayer = true;
+    this.playerRig.root.visible = false;
+    this.taxiMode = 'passenger';
+    this.stuntMessage = 'Horizon Cab dorazil! Vyber destináciu na mape.';
+    this.stuntTimer = 3.5;
+    this.audio.playHorn();
+    this.callbacks.onTaxiMenuRequested?.();
+    return true;
+  }
+
+  public startTaxiRideTo(destX: number, destZ: number, label: string): boolean {
+    if (!this.currentVehicle || this.currentVehicle.kind !== 'taxi') return false;
+    this.taxiMode = 'passenger';
+    this.taxiTargetX = destX;
+    this.taxiTargetZ = destZ;
+    this.taxiDestinationLabel = label;
+    const dist = Math.hypot(destX - this.currentVehicle.x, destZ - this.currentVehicle.z);
+    this.taxiFareCash = Math.max(45, Math.round(dist * 0.14));
+    this.taxiAutoPilotTimer = 0;
+    this.setGpsWaypoint(destX, destZ, `Taxík: ${label}`);
+    this.stuntMessage = `Vodič Horizon Cab vyráža smer ${label} ($${this.taxiFareCash})`;
+    this.stuntTimer = 3.5;
+    return true;
+  }
+
+  public startTaxiDriverShift(): boolean {
+    if (!this.currentVehicle || this.currentVehicle.kind !== 'taxi') return false;
+    this.taxiMode = 'driver_waiting';
+    const px = this.currentVehicle.x;
+    const pz = this.currentVehicle.z;
+    const ang = Math.random() * Math.PI * 2;
+    const dist = 90 + Math.random() * 140;
+    this.taxiPickupX = THREE.MathUtils.clamp(px + Math.cos(ang) * dist, -1100, 1100);
+    this.taxiPickupZ = THREE.MathUtils.clamp(pz + Math.sin(ang) * dist, -1000, 1000);
+    if (isWaterAt(this.taxiPickupX, this.taxiPickupZ)) {
+      this.taxiPickupX = 0;
+      this.taxiPickupZ = -70;
+    }
+    const dAng = Math.random() * Math.PI * 2;
+    const dDist = 180 + Math.random() * 340;
+    this.taxiTargetX = THREE.MathUtils.clamp(this.taxiPickupX + Math.cos(dAng) * dDist, -1050, 1050);
+    this.taxiTargetZ = THREE.MathUtils.clamp(this.taxiPickupZ + Math.sin(dAng) * dDist, -950, 950);
+    if (isWaterAt(this.taxiTargetX, this.taxiTargetZ)) {
+      this.taxiTargetX = 460;
+      this.taxiTargetZ = -120;
+    }
+    this.taxiDestinationLabel = getDistrictName(this.taxiTargetX, this.taxiTargetZ);
+    this.taxiFareCash = Math.round(Math.hypot(this.taxiTargetX - this.taxiPickupX, this.taxiTargetZ - this.taxiPickupZ) * 0.45);
+    if (this.taxiDropBeacon) {
+      this.taxiDropBeacon.position.set(this.taxiPickupX, 0.25, this.taxiPickupZ);
+      this.taxiDropBeacon.visible = true;
+    }
+    this.setGpsWaypoint(this.taxiPickupX, this.taxiPickupZ, 'Zákazník Horizon Cab');
+    this.stuntMessage = 'Taxi služba aktívna! Vyzdvihni zákazníka na GPS.';
+    this.stuntTimer = 3.5;
+    return true;
+  }
+
+  public startCutscene(title: string, lines: MissionCutsceneLine[], targetPos?: { x: number; z: number }, onFinish?: () => void) {
+    if (!lines || lines.length === 0) {
+      onFinish?.();
+      return;
+    }
+    this.cutsceneLines = lines;
+    this.cutsceneOnFinish = onFinish || null;
+    if (targetPos) this.cutsceneTargetPos.set(targetPos.x, 1.5, targetPos.z);
+    else this.cutsceneTargetPos.copy(this.playerRig.root.position);
+    this.activeCutscene = {
+      title,
+      speaker: lines[0].speaker,
+      text: lines[0].text,
+      lineIndex: 0,
+      totalLines: lines.length,
+    };
+    this.callbacks.onCutsceneChange?.(this.activeCutscene);
+  }
+
+  public advanceCutscene() {
+    if (!this.activeCutscene) return;
+    const nextIdx = this.activeCutscene.lineIndex + 1;
+    if (nextIdx >= this.cutsceneLines.length) {
+      this.skipCutscene();
+      return;
+    }
+    const line = this.cutsceneLines[nextIdx];
+    this.activeCutscene = {
+      title: this.activeCutscene.title,
+      speaker: line.speaker,
+      text: line.text,
+      lineIndex: nextIdx,
+      totalLines: this.cutsceneLines.length,
+    };
+    this.callbacks.onCutsceneChange?.(this.activeCutscene);
+  }
+
+  public skipCutscene() {
+    this.activeCutscene = null;
+    this.cutsceneLines = [];
+    this.callbacks.onCutsceneChange?.(null);
+    const cb = this.cutsceneOnFinish;
+    this.cutsceneOnFinish = null;
+    cb?.();
+  }
+
+  public applyCheatCode(rawCode: string): { ok: boolean; message: string } {
+    const clean = rawCode.trim().replace(/\s+/g, '').toUpperCase();
+    const ch = this.characters[this.activeCharId];
+
+    if (clean === '1999-463-663' || clean === 'GODMODE') {
+      this.godModeActive = !this.godModeActive;
+      this.audio.playUiChime('mission');
+      return { ok: true, message: this.godModeActive ? 'God Mode (Nesmrteľnosť) AKTIVOVANÝ!' : 'God Mode VYPNUTÝ.' };
+    }
+    if (clean === '1999-227-468' || clean === 'CASH50K') {
+      this.cash += 50000;
+      this.callbacks.onCashChange(this.cash);
+      this.audio.playUiChime('mission');
+      return { ok: true, message: '+$50,000 pripísaných na účet!' };
+    }
+    if (clean === '1999-887-853' || clean === 'TURTLE') {
+      ch.health = ch.maxHealth;
+      ch.armor = ch.maxArmor;
+      this.playerStamina = 100;
+      this.callbacks.onCharactersChange(structuredClone(this.characters), this.activeCharId);
+      this.audio.playUiChime('mission');
+      return { ok: true, message: 'Zdravie a vesta doplnené na 100%!' };
+    }
+    if (clean === '1999-529-937' || clean === 'LAWYERUP') {
+      this.clearPolicePursuit();
+      this.audio.playUiChime('mission');
+      return { ok: true, message: 'Policajné pátranie úplne vymazané!' };
+    }
+    if (clean === '1999-727-438' || clean === 'JET') {
+      const px = this.playerRig.root.position.x + Math.sin(this.camYaw) * 14;
+      const pz = this.playerRig.root.position.z + Math.cos(this.camYaw) * 14;
+      this.addVehicle(`cheat_jet_${Date.now()}`, 'Zeta', 'Zeta F-22 Interceptor', 'fighter_jet', '#334155', px, pz, this.camYaw, false, false);
+      this.audio.playUiChime('mission');
+      return { ok: true, message: 'Pristavená bojová stíhačka Zeta F-22!' };
+    }
+    if (clean === '1999-435-426' || clean === 'HELI') {
+      const px = this.playerRig.root.position.x + Math.sin(this.camYaw) * 12;
+      const pz = this.playerRig.root.position.z + Math.cos(this.camYaw) * 12;
+      this.addVehicle(`cheat_heli_${Date.now()}`, 'Pelican', 'Pelican Helistar', 'helicopter', '#0ea5e9', px, pz, this.camYaw, false, false);
+      this.audio.playUiChime('mission');
+      return { ok: true, message: 'Pristavený vrtuľník Pelican Helistar!' };
+    }
+    if (clean === '1999-787-372' || clean === 'SUPERCAR') {
+      const px = this.playerRig.root.position.x + Math.sin(this.camYaw) * 9;
+      const pz = this.playerRig.root.position.z + Math.cos(this.camYaw) * 9;
+      this.addVehicle(`cheat_super_${Date.now()}`, 'Valkyra', 'Aether RS', 'supercar', '#fbbf24', px, pz, this.camYaw, false, false);
+      this.audio.playUiChime('mission');
+      return { ok: true, message: 'Pristavený superšport Valkyra Aether RS!' };
+    }
+    if (clean === '1999-759-348' || clean === 'SKYDIVE') {
+      this.inventory.hasParachute = true;
+      this.callbacks.onInventoryChange(structuredClone(this.inventory));
+      this.audio.playUiChime('mission');
+      return { ok: true, message: 'Získaný taktický padák do výbavy!' };
+    }
+    if (clean === '1999-866-587' || clean === 'TOOLUP') {
+      this.inventory.weapons = this.inventory.weapons.map((w) => {
+        const def = WEAPON_CATALOG[w.id];
+        return { ...w, unlocked: true, ammoInClip: def.clipSize, reserveAmmo: def.clipSize * 6 };
+      });
+      this.syncEquippedWeaponMesh();
+      this.callbacks.onInventoryChange(structuredClone(this.inventory));
+      this.audio.playUiChime('mission');
+      return { ok: true, message: 'Všetky zbrane a plná munícia odomknuté!' };
+    }
+    return { ok: false, message: 'Neznámy cheat kód. Pozri nápovedu v aplikácii Cheaty.' };
+  }
+
+  public teleportTo(x: number, z: number, label?: string) {
+    if (this.currentVehicle) {
+      this.currentVehicle.x = x;
+      this.currentVehicle.y = getBridgeElevationAt(x, z);
+      this.currentVehicle.z = z;
+      this.currentVehicle.vx = 0;
+      this.currentVehicle.vz = 0;
+      this.currentVehicle.speed = 0;
+      this.currentVehicle.rig.root.position.set(x, this.currentVehicle.y, z);
+    } else {
+      this.playerRig.root.position.set(x, getBridgeElevationAt(x, z), z);
+      this.playerVelX = 0;
+      this.playerVelY = 0;
+      this.playerVelZ = 0;
+    }
+    if (label) {
+      this.stuntMessage = `Presun na pozíciu: ${label}`;
+      this.stuntTimer = 2.6;
+    }
+  }
+
+  public updateRemotePlayers(players: RemotePlayerState[]) {
+    const activeUids = new Set(players.map((p) => p.uid));
+    for (const [uid, vis] of this.remotePlayers.entries()) {
+      if (!activeUids.has(uid)) {
+        this.scene.remove(vis.root);
+        this.remotePlayers.delete(uid);
+      }
+    }
+    for (const p of players) {
+      let vis = this.remotePlayers.get(p.uid);
+      if (!vis) {
+        const root = new THREE.Group();
+        const appearance = p.appearance || this.characters[p.characterId]?.appearance || this.characters.lucia.appearance;
+        const charRig = createCharacterRig(appearance, this.textures.contactShadow);
+        root.add(charRig.root);
+        root.position.set(p.x, p.y, p.z);
+        this.scene.add(root);
+        vis = {
+          uid: p.uid,
+          root,
+          charRig,
+          vehRig: null,
+          vehKind: null,
+          vehColor: p.vehicleColor || '#38bdf8',
+          targetPos: new THREE.Vector3(p.x, p.y, p.z),
+          targetHeading: p.heading,
+          state: p,
+        };
+        this.remotePlayers.set(p.uid, vis);
+      }
+      vis.state = p;
+      vis.targetPos.set(p.x, p.y, p.z);
+      vis.targetHeading = p.heading;
+
+      if (p.vehicleKind !== vis.vehKind) {
+        if (vis.vehRig) {
+          vis.root.remove(vis.vehRig.root);
+          vis.vehRig = null;
+        }
+        vis.vehKind = p.vehicleKind;
+        if (p.vehicleKind) {
+          vis.vehRig = createVehicleRig(p.vehicleKind, p.vehicleColor || '#38bdf8', this.textures.contactShadow);
+          vis.root.add(vis.vehRig.root);
+          vis.charRig.root.visible = p.vehicleKind === 'motorcycle' || p.vehicleKind === 'boat';
+        } else {
+          vis.charRig.root.visible = true;
+        }
+      }
+    }
+  }
+
+  private schedulePoliceDispatch(reason: string, stars: number, delaySec = 7.5) {
+    if (this.settings.gameplayMods.noPolice) return;
+    if (this.wantedStars > 0) {
+      this.addCrimeHeat(stars * 30);
+      return;
+    }
+    if (this.policeDispatchTimer <= 0) {
+      this.policeDispatchTimer = delaySec;
+      this.policeDispatchReason = reason;
+      this.pendingDispatchStars = stars;
+    } else {
+      this.pendingDispatchStars = Math.max(this.pendingDispatchStars, stars);
+    }
+  }
+
+  public startMission(missionId: string) {
+    const def = ALL_MISSIONS.find((m) => m.id === missionId);
+    if (!def) return;
+    const launch = () => {
+      this.activeMission = def;
+      this.activeStageIndex = 0;
+      this.missionElapsedSec = 0;
+      this.missionTimerRemaining = def.timeLimitSec ?? null;
+      if (def.wantedOnStart && !this.settings.gameplayMods.noPolice) {
+        this.addCrimeHeat(def.wantedOnStart * 35);
+      }
+      this.setupCurrentMissionStage();
+      this.refreshMissionBeaconVisibility();
+      this.missionNotification = {
+        title: def.title,
+        subtitle: def.stages[0].label,
+      };
+      this.missionNotifTimer = 4.5;
+      this.audio.playUiChime('mission');
+    };
+
+    if (def.cutsceneIntro && def.cutsceneIntro.length > 0) {
+      this.startCutscene(def.title, def.cutsceneIntro, { x: def.stages[0].targetX, z: def.stages[0].targetZ }, launch);
+    } else {
+      launch();
+    }
   }
 
   public cancelMission() {
@@ -1431,7 +2029,7 @@ export class ViceEngine {
       });
       for (let i = 0; i < stage.enemyCount; i++) {
         const ang = (i / stage.enemyCount) * Math.PI * 2;
-        const dist = 5 + (i % 3) * 3.5;
+        const dist = 6 + (i % 3) * 4.5;
         this.spawnHostileNpc(
           'enemy',
           stage.targetX + Math.cos(ang) * dist,
@@ -1445,8 +2043,9 @@ export class ViceEngine {
     if (!this.activeMission) return;
     this.activeStageIndex += 1;
     if (this.activeStageIndex >= this.activeMission.stages.length) {
-      const completedId = this.activeMission.id;
-      const reward = this.activeMission.rewardCash;
+      const completedMission = this.activeMission;
+      const completedId = completedMission.id;
+      const reward = completedMission.rewardCash;
       this.cash += reward;
       this.callbacks.onCashChange(this.cash);
       this.callbacks.onMissionComplete(
@@ -1455,7 +2054,7 @@ export class ViceEngine {
         reward
       );
       this.missionNotification = {
-        title: `Misia splnená: ${this.activeMission.title}`,
+        title: `Misia splnená: ${completedMission.title}`,
         subtitle: `Odmena pripísaná na účet`,
         reward,
       };
@@ -1470,6 +2069,9 @@ export class ViceEngine {
         this.waypointGroup.visible = true;
       } else {
         this.waypointGroup.visible = false;
+      }
+      if (completedMission.cutsceneOutro && completedMission.cutsceneOutro.length > 0) {
+        this.startCutscene(completedMission.title, completedMission.cutsceneOutro);
       }
       return;
     }
@@ -1591,8 +2193,125 @@ export class ViceEngine {
     this.camera.lookAt(this.camCurrentLook);
   }
 
+  private getControlCategoryForVehicle(v: VehicleEntity | null): VehicleControlCategory {
+    if (!v) return 'foot';
+    if (v.kind === 'boat') return 'boat';
+    if (v.kind === 'helicopter') return 'helicopter';
+    if (v.kind === 'fighter_jet') return 'fighter_jet';
+    if (v.kind === 'plane') return 'plane';
+    if (v.kind === 'motorcycle') return 'motorcycle';
+    return 'car';
+  }
+
+  private addSkillXp(skill: keyof CharacterState['skills'], amount: number) {
+    const ch = this.characters[this.activeCharId];
+    if (!ch.skills) ch.skills = { driving: 50, shooting: 50, flying: 50, stamina: 50 };
+    if (ch.skills[skill] >= 100) return;
+    this.skillXp[skill] += amount;
+    if (this.skillXp[skill] >= 100) {
+      this.skillXp[skill] -= 100;
+      ch.skills[skill] = Math.min(100, ch.skills[skill] + 1);
+      const labelMap: Record<keyof CharacterState['skills'], string> = {
+        driving: 'Šoférovanie',
+        shooting: 'Streľba',
+        flying: 'Lietanie',
+        stamina: 'Kondícia',
+      };
+      this.stuntMessage = `Zručnosť ${labelMap[skill]} zvýšená na ${ch.skills[skill]}/100!`;
+      this.stuntTimer = 2.6;
+      this.callbacks.onCharactersChange(structuredClone(this.characters), this.activeCharId);
+    }
+  }
+
+  public syncGarageBeforeSave(): SavedGarageState {
+    // Remove only vehicles that were taken out into the world and are no longer parked inside Hangar / Safehouse Garage
+    const isInsideZone = (v: VehicleEntity, z: { minX: number; maxX: number; minZ: number; maxZ: number }) =>
+      !v.destroyed && v.x >= z.minX && v.x <= z.maxX && v.z >= z.minZ && v.z <= z.maxZ;
+
+    this.savedGarage.hangarVehicles = this.savedGarage.hangarVehicles.filter((rec) => {
+      const activeInWorld = this.vehicles.find((v) => v.id === rec.id);
+      if (!activeInWorld) return true; // safely stored off-map in hangar
+      return isInsideZone(activeInWorld, AIRPORT_HANGAR_ZONE);
+    });
+
+    this.savedGarage.safehouseVehicles = this.savedGarage.safehouseVehicles.filter((rec) => {
+      const activeInWorld = this.vehicles.find((v) => v.id === rec.id);
+      if (!activeInWorld) return true; // safely stored off-map in garage
+      return isInsideZone(activeInWorld, SAFEHOUSE_GARAGE_ZONE);
+    });
+
+    // Also capture any eligible vehicle currently parked inside Hangar or Safehouse Garage
+    for (const v of this.vehicles) {
+      if (v.destroyed) continue;
+      const isAir = v.kind === 'plane' || v.kind === 'helicopter' || v.kind === 'fighter_jet';
+      if (isAir && isInsideZone(v, AIRPORT_HANGAR_ZONE)) {
+        this.upsertGarageVehicle('hangar', v);
+      } else if (!isAir && v.kind !== 'boat' && isInsideZone(v, SAFEHOUSE_GARAGE_ZONE)) {
+        this.upsertGarageVehicle('safehouse', v);
+      }
+    }
+    return this.getSavedGarage();
+  }
+
+  private upsertGarageVehicle(facility: 'hangar' | 'safehouse', v: VehicleEntity) {
+    const list = facility === 'hangar' ? this.savedGarage.hangarVehicles : this.savedGarage.safehouseVehicles;
+    const record: StoredVehicleRecord = {
+      id: v.id,
+      brand: v.brand,
+      name: v.name,
+      kind: v.kind,
+      color: v.color,
+      x: v.x,
+      z: v.z,
+      heading: v.heading,
+      upgrades: { ...v.upgrades },
+    };
+    const idx = list.findIndex((item) => item.id === v.id);
+    if (idx >= 0) {
+      list[idx] = record;
+    } else {
+      if (list.length >= 4) list.shift();
+      list.push(record);
+      this.parkedFacilityNotice =
+        facility === 'hangar'
+          ? `${v.name} zaparkované v Hangári Bayshore`
+          : `${v.name} zaparkované v Garáži Coral Villa`;
+      this.parkedNoticeTimer = 3.5;
+      this.callbacks.onGarageChange?.(this.getSavedGarage());
+    }
+  }
+
   private stepSimulation(dt: number, inp: ReturnType<InputManager['poll']>) {
     const activeChar = this.characters[this.activeCharId];
+
+    // Always advance dynamic atmosphere & clouds
+    this.updateAtmosphere(dt);
+
+    // Smoothly interpolate remote multiplayer friends in 3D world
+    for (const vis of this.remotePlayers.values()) {
+      vis.root.position.lerp(vis.targetPos, Math.min(1, 10 * dt));
+      let hDiff = vis.targetHeading - vis.root.rotation.y;
+      while (hDiff > Math.PI) hDiff -= Math.PI * 2;
+      while (hDiff < -Math.PI) hDiff += Math.PI * 2;
+      vis.root.rotation.y += hDiff * Math.min(1, 10 * dt);
+      if (!vis.vehRig) {
+        const moveDist = vis.root.position.distanceTo(vis.targetPos);
+        const swing = moveDist > 0.12 ? Math.sin(this.elapsedSec * 9) * 0.55 : 0;
+        vis.charRig.leftLegPivot.rotation.x = swing;
+        vis.charRig.rightLegPivot.rotation.x = -swing;
+      }
+    }
+
+    // Cutscene mode: cinematic orbit camera, gameplay paused cleanly
+    if (this.activeCutscene) {
+      this.updateActiveCamera(dt, false);
+      this.telemetryTimer += dt;
+      if (this.telemetryTimer >= 0.05) {
+        this.telemetryTimer = 0;
+        this.pushTelemetry(inp, null);
+      }
+      return;
+    }
 
     // Busted (Arrested) -> Respawn in front of Police Station & clear pursuit
     if (this.bustedTimer > 0) {
@@ -1606,6 +2325,8 @@ export class ViceEngine {
         this.playerVelY = 0;
         this.playerVelZ = 0;
         this.playerGrounded = true;
+        this.parachuteDeployed = false;
+        this.parachuteRig.visible = false;
         this.camYaw = POLICE_STATION_RESPAWN.heading;
         activeChar.posX = POLICE_STATION_RESPAWN.x;
         activeChar.posY = 0;
@@ -1635,6 +2356,8 @@ export class ViceEngine {
         this.playerVelY = 0;
         this.playerVelZ = 0;
         this.playerGrounded = true;
+        this.parachuteDeployed = false;
+        this.parachuteRig.visible = false;
         this.camYaw = HOSPITAL_RESPAWN.heading;
         activeChar.posX = HOSPITAL_RESPAWN.x;
         activeChar.posY = 0;
@@ -1642,7 +2365,7 @@ export class ViceEngine {
         activeChar.heading = HOSPITAL_RESPAWN.heading;
         this.stuntMessage = wasDrowned
           ? 'Zachránený pobrežnou strážou pred nemocnicou (-$350)'
-          : 'Prepustený z nemocnice Vice Central (-$350)';
+          : 'Prepustený z nemocnice Vice General (-$350)';
         this.stuntTimer = 3.2;
         this.callbacks.onCashChange(this.cash);
         this.callbacks.onCharactersChange(structuredClone(this.characters), this.activeCharId);
@@ -1657,8 +2380,25 @@ export class ViceEngine {
 
     // Timers
     if (this.fireCooldown > 0) this.fireCooldown -= dt;
+    if (this.garageTriggerCooldown > 0) this.garageTriggerCooldown -= dt;
     if (this.hitMarkerTimer > 0) this.hitMarkerTimer -= dt;
     if (this.damageFlashTimer > 0) this.damageFlashTimer -= dt;
+    if (this.parkedNoticeTimer > 0) {
+      this.parkedNoticeTimer -= dt;
+      if (this.parkedNoticeTimer <= 0) this.parkedFacilityNotice = null;
+    }
+    if (this.policeDispatchTimer > 0) {
+      this.policeDispatchTimer -= dt;
+      if (this.policeDispatchTimer <= 0 && this.pendingDispatchStars > 0) {
+        if (!this.settings.gameplayMods.noPolice) {
+          this.addCrimeHeat(this.pendingDispatchStars * 35);
+          this.stuntMessage = 'Polícia VCPD dorazila na hlásenie!';
+          this.stuntTimer = 3.0;
+        }
+        this.policeDispatchReason = null;
+        this.pendingDispatchStars = 0;
+      }
+    }
     if (this.stuntTimer > 0) {
       this.stuntTimer -= dt;
       if (this.stuntTimer <= 0) this.stuntMessage = null;
@@ -1683,21 +2423,63 @@ export class ViceEngine {
       }
     }
 
-    // Animate shop rings & unlocked story beacons
+    // Animate shop rings, airport radar spinners, elevators, taxi beacon & unlocked story beacons
     for (const sr of this.shopRings) {
       sr.rotation.z += dt * 1.4;
+    }
+    for (const sp of this.spinners) {
+      sp.rotation.y += dt * 0.9;
+    }
+    let nearbyElevator: ElevatorEntity | null = null;
+    for (const el of this.elevators) {
+      const prevY = el.currentY;
+      const targetFloor = el.floors[el.targetFloorIndex] || el.floors[0];
+      const diff = targetFloor.y - el.currentY;
+      if (Math.abs(diff) > 0.02) {
+        const step = Math.sign(diff) * Math.min(Math.abs(diff), 5.2 * dt);
+        el.currentY += step;
+        el.cabGroup.position.y = el.currentY;
+      } else {
+        el.currentY = targetFloor.y;
+        el.cabGroup.position.y = el.currentY;
+        el.currentFloorIndex = el.targetFloorIndex;
+      }
+      const distToEl = Math.hypot(
+        this.playerRig.root.position.x - el.x,
+        this.playerRig.root.position.z - el.z
+      );
+      if (!this.currentVehicle && distToEl <= el.radius) {
+        if (Math.abs(this.playerRig.root.position.y - prevY) < 1.8) {
+          this.playerRig.root.position.y += el.currentY - prevY;
+        }
+        if (Math.abs(this.playerRig.root.position.y - el.currentY) <= 2.6 && !nearbyElevator) {
+          nearbyElevator = el;
+        }
+      }
     }
     for (const mb of this.missionStartBeacons) {
       if (mb.group.visible) {
         mb.group.children[1].rotation.y += dt * 2.0;
       }
     }
+    if (this.taxiDropBeacon && this.taxiDropBeacon.visible) {
+      this.taxiDropBeacon.rotation.z += dt * 2.4;
+    }
+
+    // Sync active control category
+    this.input.inAircraft = Boolean(
+      this.currentVehicle &&
+        (this.currentVehicle.kind === 'plane' ||
+          this.currentVehicle.kind === 'helicopter' ||
+          this.currentVehicle.kind === 'fighter_jet')
+    );
+    this.input.setControlCategory(this.getControlCategoryForVehicle(this.currentVehicle));
 
     const px = this.playerRig.root.position.x;
     const pz = this.playerRig.root.position.z;
 
     // Auto-clear custom GPS waypoint when player arrives
-    if (!this.activeMission && this.gpsWaypoint) {
+    if (!this.activeMission && this.gpsWaypoint && this.taxiMode === 'none') {
       if (Math.hypot(px - this.gpsWaypoint.x, pz - this.gpsWaypoint.z) < 8) {
         this.stuntMessage = `Cieľ GPS dosiahnutý: ${this.gpsWaypoint.label}`;
         this.stuntTimer = 2.8;
@@ -1705,15 +2487,37 @@ export class ViceEngine {
       }
     }
 
+    // Discover Hidden Side Missions by proximity
+    this.nearbySideMission = null;
+    this.activeSidePrompt = null;
+    if (!this.activeMission) {
+      for (const sm of SIDE_DISCOVERY_MISSIONS) {
+        const d = Math.hypot(sm.startX - px, sm.startZ - pz);
+        if (d < 28 && !this.discoveredSideMissions.has(sm.id)) {
+          this.discoveredSideMissions.add(sm.id);
+          this.stuntMessage = `Objavená tajná misia: ${sm.title}!`;
+          this.stuntTimer = 3.5;
+          this.audio.playUiChime('switch');
+          this.callbacks.onSideMissionDiscovered?.(sm);
+        }
+        if (d < 13 && !this.nearbySideMission) {
+          this.nearbySideMission = sm;
+          this.activeSidePrompt = `Tajná misia: ${sm.title} ($${sm.rewardCash.toLocaleString('sk-SK')})`;
+        }
+      }
+    }
+
     // Find nearby vehicle, enterable shop, or unlocked story mission marker
     let nearbyVehicle: VehicleEntity | null = null;
-    let bestVehDist = 5.0;
+    let bestVehDist = 5.4;
     if (!this.currentVehicle) {
       for (const v of this.vehicles) {
         if (v.destroyed) continue;
-        // Allow grabbing any stopped or slow-moving vehicle (including stopped traffic!)
-        if (Math.abs(v.speed) > 12) continue;
-        const maxR = v.kind === 'plane' || v.kind === 'boat' ? 6.2 : 4.8;
+        if (Math.abs(v.speed) > 13) continue;
+        const maxR =
+          v.kind === 'plane' || v.kind === 'fighter_jet' || v.kind === 'helicopter' || v.kind === 'boat'
+            ? 6.6
+            : 4.8;
         const d = Math.hypot(v.x - px, v.z - pz);
         if (d < maxR && d < bestVehDist) {
           bestVehDist = d;
@@ -1723,7 +2527,7 @@ export class ViceEngine {
     }
 
     let nearbyShop: ShopDef | null = null;
-    let bestShopDist = 4.8;
+    let bestShopDist = 5.2;
     for (const s of SHOPS) {
       const dDoor = Math.hypot(s.doorX - px, s.doorZ - pz);
       const dCenter = Math.hypot(s.x - px, s.z - pz);
@@ -1745,10 +2549,23 @@ export class ViceEngine {
       }
     }
 
-    // Interact / Enter / Carjack / Exit Vehicle
-    if (inp.enterVehiclePressed) {
+    // Interact / Enter / Carjack / Exit Vehicle / Use Elevator
+    if (inp.enterVehiclePressed || inp.carjackPressed) {
       if (this.currentVehicle) {
-        if (nearbyShop?.category === 'garage') {
+        if (this.taxiMode === 'passenger' && inp.carjackPressed) {
+          // Throw out taxi driver mid-ride and take over!
+          this.taxiMode = 'none';
+          this.taxiDestinationLabel = null;
+          this.taxiFareCash = 0;
+          this.currentVehicle.hasDriver = false;
+          if (this.currentVehicle.rig.driverGroup) this.currentVehicle.rig.driverGroup.visible = false;
+          const ejectX = this.currentVehicle.x - Math.cos(this.currentVehicle.heading) * 2.1;
+          const ejectZ = this.currentVehicle.z + Math.sin(this.currentVehicle.heading) * 2.1;
+          this.spawnCivilianAt(ejectX, ejectZ, Math.floor(Math.random() * 60), 'flee', 12);
+          this.stuntMessage = 'Vodič Horizon Cab vyhodený! Prebral si volant taxíka.';
+          this.stuntTimer = 3.2;
+          this.startTaxiDriverShift();
+        } else if (nearbyShop?.category === 'garage') {
           this.callbacks.onShopInteract(nearbyShop);
         } else {
           this.exitCurrentVehicle();
@@ -1756,13 +2573,64 @@ export class ViceEngine {
       } else if (nearbyShop && (!nearbyVehicle || bestShopDist <= bestVehDist)) {
         this.callbacks.onShopInteract(nearbyShop);
       } else if (nearbyVehicle) {
-        this.enterVehicle(nearbyVehicle);
+        this.enterVehicle(nearbyVehicle, inp.carjackPressed);
       } else if (nearbyMission) {
         this.startMission(nearbyMission.id);
+      } else if (this.nearbySideMission) {
+        this.startMission(this.nearbySideMission.id);
+      } else if (nearbyElevator) {
+        nearbyElevator.targetFloorIndex = (nearbyElevator.targetFloorIndex + 1) % nearbyElevator.floors.length;
+        const nextFloor = nearbyElevator.floors[nearbyElevator.targetFloorIndex];
+        this.stuntMessage = `Výťah (${nearbyElevator.label}): ${nextFloor.name}`;
+        this.stuntTimer = 2.6;
+        this.audio.playUiChime('click');
       }
     }
 
-    // Movement: On Foot vs Driving / Flying / Boating
+    // Drive-in Customs Auto-Trigger: drive straight inside a garage bay to open Tuning & Repair automatically!
+    if (this.currentVehicle && this.garageTriggerCooldown <= 0 && this.taxiMode !== 'passenger') {
+      const k = this.currentVehicle.kind;
+      if (k !== 'plane' && k !== 'fighter_jet' && k !== 'helicopter' && k !== 'boat') {
+        const driveInGarage = SHOPS.find(
+          (s) =>
+            s.category === 'garage' &&
+            Math.hypot(this.currentVehicle!.x - s.x, this.currentVehicle!.z - s.z) < 7.2
+        );
+        if (driveInGarage) {
+          this.currentVehicle.speed = 0;
+          this.currentVehicle.vx = 0;
+          this.currentVehicle.vz = 0;
+          this.garageTriggerCooldown = 6.0;
+          this.callbacks.onShopInteract(driveInGarage);
+        }
+      }
+    }
+
+    // Check Hangar & Safehouse Garage auto-parking
+    if (this.currentVehicle && Math.abs(this.currentVehicle.speed) < 3.5) {
+      const v = this.currentVehicle;
+      const isAir = v.kind === 'plane' || v.kind === 'helicopter' || v.kind === 'fighter_jet';
+      if (
+        isAir &&
+        v.x >= AIRPORT_HANGAR_ZONE.minX &&
+        v.x <= AIRPORT_HANGAR_ZONE.maxX &&
+        v.z >= AIRPORT_HANGAR_ZONE.minZ &&
+        v.z <= AIRPORT_HANGAR_ZONE.maxZ
+      ) {
+        this.upsertGarageVehicle('hangar', v);
+      } else if (
+        !isAir &&
+        v.kind !== 'boat' &&
+        v.x >= SAFEHOUSE_GARAGE_ZONE.minX &&
+        v.x <= SAFEHOUSE_GARAGE_ZONE.maxX &&
+        v.z >= SAFEHOUSE_GARAGE_ZONE.minZ &&
+        v.z <= SAFEHOUSE_GARAGE_ZONE.maxZ
+      ) {
+        this.upsertGarageVehicle('safehouse', v);
+      }
+    }
+
+    // Movement: On Foot vs Driving / Flying / Boating / Taxi Autopilot
     this.currentDriftIntensity = 0;
     if (this.currentVehicle) {
       this.isPlayerSprinting = false;
@@ -1775,12 +2643,13 @@ export class ViceEngine {
       this.stepPlayerOnFoot(dt, inp);
     }
 
-    // Shooting (allowed on foot & drive-by!)
+    // Shooting (allowed on foot & drive-by; fighter_jet shoots rockets inside stepPlayerDriving!)
     if (inp.reloadPressed && this.reloadTimer <= 0) {
       this.startReload();
     }
-    if (inp.shootHeld && this.fireCooldown <= 0 && this.reloadTimer <= 0) {
-      this.fireEquippedWeapon();
+    const inJet = this.currentVehicle?.kind === 'fighter_jet';
+    if (inp.shootHeld && this.fireCooldown <= 0 && this.reloadTimer <= 0 && this.taxiMode !== 'passenger' && !inJet) {
+      this.fireEquippedWeapon(inp.aimHeld);
     }
 
     // Step Vehicles (Autonomous Curved Traffic & Police Cars)
@@ -1789,7 +2658,7 @@ export class ViceEngine {
     // Step NPCs (Civilians, Cops, Syndicate Enemies)
     this.stepNpcs(dt);
 
-    // Maintain lively ambient city crowd around player across 5x Island (60+ FPS streaming!)
+    // Maintain lively ambient city crowd around player across 15x Island
     this.crowdMaintainTimer += dt;
     if (this.crowdMaintainTimer >= 2.5) {
       this.crowdMaintainTimer = 0;
@@ -1797,7 +2666,7 @@ export class ViceEngine {
       const curPz = this.playerRig.root.position.z;
       this.npcs = this.npcs.filter((n) => {
         if (!n.alive) return false;
-        if (n.kind === 'civilian' && Math.hypot(n.x - curPx, n.z - curPz) > 175) {
+        if (n.kind === 'civilian' && Math.hypot(n.x - curPx, n.z - curPz) > 195) {
           this.scene.remove(n.rig.root);
           return false;
         }
@@ -1822,16 +2691,19 @@ export class ViceEngine {
     // Step Police Wanted System
     this.stepWantedSystem(dt);
 
-    // Step Explosive Barrels, Rockets, Tracers, Particles
+    // Step Explosive Barrels, Targets, Rockets, Tracers, Particles
     this.stepWorldDynamics(dt);
 
     // Step Mission Objectives
     this.stepMission(dt);
 
-    // Update Camera smoothly (with spatial-grid wall anti-clipping)
+    // Update live soft Auto-Aim lock state for HUD indicator
+    this.autoAimLocked = Boolean(inp.aimHeld && !this.currentVehicle && this.findAutoAimTarget());
+
+    // Update Camera smoothly
     this.updateActiveCamera(dt, inp.aimHeld);
 
-    // Update Audio Engine (including realistic tire screech during drift!)
+    // Update Audio Engine
     const speedKmh = this.currentVehicle ? Math.abs(this.currentVehicle.speed) * 3.6 : 0;
     this.audio.updateContinuous(
       Boolean(this.currentVehicle),
@@ -1863,21 +2735,31 @@ export class ViceEngine {
             nearbyVehicle.kind === 'ambulance' ||
             nearbyVehicle.kind === 'firetruck';
           const emergTag = isEmerg ? ' (! Zásah polície)' : '';
-          if (nearbyVehicle.hasDriver) {
+          if (nearbyVehicle.kind === 'taxi' && nearbyVehicle.hasDriver) {
+            prompt = 'Nastúpiť do Horizon Cab (Pasažier) · [G / Shift+F] Vyhodiť vodiča';
+          } else if (nearbyVehicle.hasDriver) {
             prompt = `Vyhodiť vodiča a ukradnúť ${nearbyVehicle.name}${emergTag}`;
           } else {
             const verb =
-              nearbyVehicle.kind === 'plane'
+              nearbyVehicle.kind === 'plane' || nearbyVehicle.kind === 'fighter_jet'
                 ? 'Nastúpiť do lietadla'
-                : nearbyVehicle.kind === 'boat'
-                  ? 'Nastúpiť na loď'
-                  : nearbyVehicle.kind === 'motorcycle'
-                    ? 'Nasadať na motorku'
-                    : 'Nastúpiť do';
+                : nearbyVehicle.kind === 'helicopter'
+                  ? 'Nastúpiť do vrtuľníka'
+                  : nearbyVehicle.kind === 'boat'
+                    ? 'Nastúpiť na loď'
+                    : nearbyVehicle.kind === 'motorcycle'
+                      ? 'Nasadať na motorku'
+                      : 'Nastúpiť do';
             prompt = `${verb} ${nearbyVehicle.name}${emergTag}`;
           }
         } else if (nearbyMission) {
           prompt = `Spustiť príbeh: ${nearbyMission.title}`;
+        } else if (this.nearbySideMission) {
+          prompt = `Spustiť tajnú misiu: ${this.nearbySideMission.title}`;
+        } else if (nearbyElevator) {
+          const nextIdx = (nearbyElevator.targetFloorIndex + 1) % nearbyElevator.floors.length;
+          const nextFloor = nearbyElevator.floors[nextIdx];
+          prompt = `Použiť výťah (${nearbyElevator.label} -> ${nextFloor.name})`;
         }
       }
       this.pushTelemetry(inp, prompt);
@@ -1890,15 +2772,21 @@ export class ViceEngine {
     const isSprinting = inp.sprint && hasSpeed && this.playerStamina > 4 && !inp.aimHeld;
     this.isPlayerSprinting = isSprinting;
 
+    const staminaBonus = 1 + ((ch.skills?.stamina ?? 50) - 50) * 0.004;
     if (isSprinting) {
-      this.playerStamina = Math.max(0, this.playerStamina - 22 * dt);
+      this.playerStamina = Math.max(0, this.playerStamina - (22 / staminaBonus) * dt);
+      this.addSkillXp('stamina', dt * 3.0);
     } else {
-      const regen = this.activeCharId === 'kairo' ? 28 : 18;
+      const regen = (this.activeCharId === 'kairo' ? 28 : 18) * staminaBonus;
       this.playerStamina = Math.min(100, this.playerStamina + regen * dt);
     }
 
-    const curInWater = isWaterAt(this.playerRig.root.position.x, this.playerRig.root.position.z) &&
+    const curInWater =
+      isWaterAt(this.playerRig.root.position.x, this.playerRig.root.position.z) &&
       this.playerRig.root.position.y < 0.1;
+    if (curInWater && hasSpeed) {
+      this.addSkillXp('stamina', dt * 2.2);
+    }
     const moveSpeed = curInWater
       ? isSprinting
         ? 6.4
@@ -1906,7 +2794,7 @@ export class ViceEngine {
       : inp.aimHeld
         ? 4.2
         : isSprinting
-          ? 10.2
+          ? 10.6
           : 6.4;
 
     // Camera-relative movement direction
@@ -1924,19 +2812,38 @@ export class ViceEngine {
     }
 
     // Momentum / acceleration
-    const accelFactor = this.playerGrounded ? 14 : 5;
-    this.playerVelX = THREE.MathUtils.damp(this.playerVelX, dirX * moveSpeed, accelFactor, dt);
-    this.playerVelZ = THREE.MathUtils.damp(this.playerVelZ, dirZ * moveSpeed, accelFactor, dt);
+    const accelFactor = this.playerGrounded ? 14 : this.parachuteDeployed ? 7.5 : 5;
+    const airGlideMult = this.parachuteDeployed ? 2.0 : 1.0;
+    this.playerVelX = THREE.MathUtils.damp(this.playerVelX, dirX * moveSpeed * airGlideMult, accelFactor, dt);
+    this.playerVelZ = THREE.MathUtils.damp(this.playerVelZ, dirZ * moveSpeed * airGlideMult, accelFactor, dt);
 
-    // Jump, Parachute glide & Gravity
+    // Jump, Parachute deployment & Gravity
     const grav = this.settings.gameplayMods.lowGravity ? -9.8 : -24.0;
     if (inp.jumpPressed && this.playerGrounded && !curInWater) {
       this.playerVelY = this.settings.gameplayMods.lowGravity ? 10.5 : 8.2;
       this.playerGrounded = false;
+    } else if (
+      !this.playerGrounded &&
+      !curInWater &&
+      this.playerRig.root.position.y > 5.5 &&
+      this.inventory.hasParachute &&
+      !this.parachuteDeployed &&
+      inp.jumpPressed
+    ) {
+      this.parachuteDeployed = true;
+      this.parachuteRig.visible = true;
+      this.audio.playUiChime('switch');
+      this.stuntMessage = 'Padák otvorený!';
+      this.stuntTimer = 2.0;
     }
+
     this.playerVelY += grav * dt;
-    if (!this.playerGrounded && this.playerRig.root.position.y > 4) {
-      this.playerVelY = Math.max(-5.5, this.playerVelY); // gentle skydiving descent if bailed from plane
+    if (this.parachuteDeployed) {
+      this.playerVelY = Math.max(-3.6, this.playerVelY);
+      this.parachuteRig.rotation.z = THREE.MathUtils.damp(this.parachuteRig.rotation.z, -inp.moveX * 0.22, 6, dt);
+      this.parachuteRig.rotation.x = THREE.MathUtils.damp(this.parachuteRig.rotation.x, inp.moveY * 0.16, 6, dt);
+    } else if (!this.playerGrounded && this.playerRig.root.position.y > 4) {
+      this.playerVelY = Math.max(-18.0, this.playerVelY);
     }
 
     let nx = this.playerRig.root.position.x + this.playerVelX * dt;
@@ -1949,18 +2856,21 @@ export class ViceEngine {
       return;
     }
 
-    // Watertight Building, Circle Prop & Vehicle Collision Sliding
     const resolved = this.resolveBuildingCollision(nx, nz, 0.45, Math.max(0, ny), false);
     nx = resolved.x;
     nz = resolved.z;
 
-    const groundH = this.getGroundHeightAt(nx, nz);
+    const groundH = this.getGroundHeightAt(nx, nz, this.playerRig.root.position.y);
     const waterHere = isWaterAt(nx, nz) && groundH <= 0.05;
     const floorY = waterHere ? -0.82 : groundH;
     if (ny <= floorY) {
       ny = floorY;
       this.playerVelY = 0;
       this.playerGrounded = true;
+      if (this.parachuteDeployed) {
+        this.parachuteDeployed = false;
+        this.parachuteRig.visible = false;
+      }
     }
 
     this.playerRig.root.position.set(nx, ny, nz);
@@ -1978,24 +2888,79 @@ export class ViceEngine {
       this.playerRig.root.rotation.y += diff * Math.min(1, 14 * dt);
     }
 
-    // Procedural limb walk / swim / aim animation
+    // Decay weapon recoil smoothly
+    this.weaponRecoilKick *= Math.exp(-16 * dt);
+
+    // Procedural limb walk / swim / realistic 1H & 2H weapon holding stance
     const horizSpeed = Math.hypot(this.playerVelX, this.playerVelZ);
     const swing = horizSpeed > 0.3 ? Math.sin(this.elapsedSec * (isSprinting ? 13 : 8.5)) * 0.65 : 0;
+    const wId = this.inventory.equippedWeapon;
     if (waterHere && ny < -0.3) {
       const stroke = Math.sin(this.elapsedSec * 5.5) * 0.85;
-      this.playerRig.leftArmPivot.rotation.x = -Math.PI / 2 + stroke;
-      this.playerRig.rightArmPivot.rotation.x = -Math.PI / 2 - stroke;
+      this.playerRig.leftArmPivot.rotation.set(-Math.PI / 2 + stroke, 0, 0);
+      this.playerRig.rightArmPivot.rotation.set(-Math.PI / 2 - stroke, 0, 0);
       this.playerRig.leftLegPivot.rotation.x = stroke * 0.4;
       this.playerRig.rightLegPivot.rotation.x = -stroke * 0.4;
+      this.playerRig.weaponMount.position.set(0, -0.52, 0.05);
+      this.playerRig.weaponMount.rotation.set(0.2, 0, 0);
     } else {
       this.playerRig.leftLegPivot.rotation.x = swing;
       this.playerRig.rightLegPivot.rotation.x = -swing;
-      this.playerRig.leftArmPivot.rotation.x = -swing * 0.7;
 
-      if (inp.aimHeld || this.muzzleFlashTimer > 0) {
-        this.playerRig.rightArmPivot.rotation.x = -Math.PI / 2 + this.camPitch * 0.7;
+      if (inp.aimHeld || this.muzzleFlashTimer > 0 || this.weaponRecoilKick > 0.012) {
+        if (wId === 'rpg') {
+          // Over-the-shoulder heavy launcher stance
+          this.playerRig.rightArmPivot.rotation.set(
+            -Math.PI * 0.56 + this.camPitch * 0.72 - this.weaponRecoilKick * 1.4,
+            0,
+            0.08
+          );
+          this.playerRig.leftArmPivot.rotation.set(-Math.PI * 0.48 + this.camPitch * 0.65, 0, -0.36);
+          this.playerRig.weaponMount.position.set(0.02, -0.44, 0.02 - this.weaponRecoilKick * 0.25);
+          this.playerRig.weaponMount.rotation.set(Math.PI * 0.54, 0, 0);
+        } else if (wId === 'minigun') {
+          // Low-hip two-handed heavy minigun brace
+          this.playerRig.rightArmPivot.rotation.set(-Math.PI * 0.28 + this.camPitch * 0.42, 0, 0.14);
+          this.playerRig.leftArmPivot.rotation.set(-Math.PI * 0.36 + this.camPitch * 0.42, 0, -0.42);
+          this.playerRig.weaponMount.position.set(-0.08, -0.48, 0.08 - this.weaponRecoilKick * 0.35);
+          this.playerRig.weaponMount.rotation.set(Math.PI * 0.28, -0.18, 0);
+        } else if (wId === 'pistol') {
+          // Crisp dual-hand tactical pistol grip
+          this.playerRig.rightArmPivot.rotation.set(
+            -Math.PI * 0.5 + this.camPitch * 0.75 - this.weaponRecoilKick * 1.5,
+            0,
+            0.06
+          );
+          this.playerRig.leftArmPivot.rotation.set(-Math.PI * 0.36 + this.camPitch * 0.55, 0, -0.32);
+          this.playerRig.weaponMount.position.set(0, -0.52, 0.05 - this.weaponRecoilKick * 0.2);
+          this.playerRig.weaponMount.rotation.set(Math.PI * 0.5, -0.04, 0);
+        } else {
+          // Two-handed rifle / SMG / shotgun / sniper cheek-weld grip
+          this.playerRig.rightArmPivot.rotation.set(
+            -Math.PI * 0.48 + this.camPitch * 0.72 - this.weaponRecoilKick * 1.2,
+            0,
+            0.14
+          );
+          this.playerRig.leftArmPivot.rotation.set(-Math.PI * 0.46 + this.camPitch * 0.72, 0, -0.48);
+          this.playerRig.weaponMount.position.set(-0.05, -0.5, 0.07 - this.weaponRecoilKick * 0.3);
+          this.playerRig.weaponMount.rotation.set(Math.PI * 0.48, -0.22, 0);
+        }
       } else {
-        this.playerRig.rightArmPivot.rotation.x = swing * 0.7;
+        // Natural relaxed/carry pose while walking or sprinting
+        this.playerRig.leftArmPivot.rotation.set(-swing * 0.65, 0, 0);
+        if (wId === 'pistol') {
+          this.playerRig.rightArmPivot.rotation.set(swing * 0.62, 0, 0);
+          this.playerRig.weaponMount.position.set(0, -0.52, 0.05);
+          this.playerRig.weaponMount.rotation.set(0.14, 0, 0);
+        } else if (wId === 'minigun') {
+          this.playerRig.rightArmPivot.rotation.set(-0.34 + swing * 0.16, 0, 0.1);
+          this.playerRig.weaponMount.position.set(-0.06, -0.49, 0.06);
+          this.playerRig.weaponMount.rotation.set(0.32, -0.14, 0);
+        } else {
+          this.playerRig.rightArmPivot.rotation.set(-0.28 + swing * 0.26, 0, 0.08);
+          this.playerRig.weaponMount.position.set(-0.03, -0.51, 0.06);
+          this.playerRig.weaponMount.rotation.set(0.28, -0.14, 0);
+        }
       }
     }
 
@@ -2007,16 +2972,39 @@ export class ViceEngine {
     this.playerRig.rightLegPivot.visible = !isFp;
     this.firstPersonWeaponGroup.visible = isFp && !this.currentVehicle;
 
-    // Gentle weapon sway in 1P
+    // Gentle weapon sway & live recoil kickback in 1P
     if (isFp) {
-      this.firstPersonWeaponGroup.position.x = (inp.aimHeld ? 0.0 : 0.24) + Math.sin(this.elapsedSec * 7) * horizSpeed * 0.002;
-      this.firstPersonWeaponGroup.position.y = (inp.aimHeld ? -0.15 : -0.22) + Math.abs(Math.cos(this.elapsedSec * 7)) * horizSpeed * 0.002;
+      this.firstPersonWeaponGroup.position.x =
+        (inp.aimHeld ? 0.0 : 0.24) + Math.sin(this.elapsedSec * 7) * horizSpeed * 0.002;
+      this.firstPersonWeaponGroup.position.y =
+        (inp.aimHeld ? -0.15 : -0.22) + Math.abs(Math.cos(this.elapsedSec * 7)) * horizSpeed * 0.002;
+      this.firstPersonWeaponGroup.position.z = -0.42 + this.weaponRecoilKick * 0.45;
+      this.firstPersonWeaponGroup.rotation.x = this.weaponRecoilKick * 0.85;
     }
 
     ch.district = getDistrictName(nx, nz);
   }
 
-  private enterVehicle(v: VehicleEntity) {
+  private enterVehicle(v: VehicleEntity, forceCarjack = false) {
+    // Entering an occupied Horizon Cab as passenger (unless forceCarjack with G / Shift+F)
+    if (v.kind === 'taxi' && v.hasDriver && !forceCarjack) {
+      this.currentVehicle = v;
+      this.lastLandVehicle = v;
+      v.occupiedByPlayer = true;
+      v.isTraffic = false;
+      v.speed = 0;
+      this.playerRig.root.visible = false;
+      this.firstPersonWeaponGroup.visible = false;
+      this.taxiMode = 'passenger';
+      this.taxiDestinationLabel = null;
+      this.taxiFareCash = 0;
+      this.audio.playUiChime('click');
+      this.stuntMessage = 'Horizon Cab: Vyber destináciu na mape!';
+      this.stuntTimer = 3.2;
+      this.callbacks.onTaxiMenuRequested?.();
+      return;
+    }
+
     // Carjacking: Eject live driver from traffic vehicle onto the street!
     if (v.hasDriver) {
       v.hasDriver = false;
@@ -2040,23 +3028,26 @@ export class ViceEngine {
     }
 
     this.currentVehicle = v;
-    if (v.kind !== 'boat' && v.kind !== 'plane') {
+    if (v.kind !== 'boat' && v.kind !== 'plane' && v.kind !== 'helicopter' && v.kind !== 'fighter_jet') {
       this.lastLandVehicle = v;
     }
     v.occupiedByPlayer = true;
     v.isTraffic = false;
-    // Keep player visible seated on motorcycles & speedboats!
     const riderVisible = v.kind === 'motorcycle' || v.kind === 'boat';
     this.playerRig.root.visible = riderVisible;
     this.firstPersonWeaponGroup.visible = false;
+    this.parachuteDeployed = false;
+    this.parachuteRig.visible = false;
     this.audio.playUiChime('click');
 
-    // Entering Police Car, Ambulance or Firetruck is strictly punished with police pursuit!
+    if (v.kind === 'taxi') {
+      this.startTaxiDriverShift();
+    }
+
+    // Entering Police Car, Ambulance or Firetruck triggers delayed police dispatch (time to flee!)
     const isEmergencyVehicle = v.kind === 'police' || v.kind === 'ambulance' || v.kind === 'firetruck';
     if (isEmergencyVehicle && !this.settings.gameplayMods.noPolice) {
-      this.addCrimeHeat(42);
-      this.stuntMessage = `Krádež zásahového vozidla (${v.name})! Polícia zahájila prenasledovanie!`;
-      this.stuntTimer = 3.5;
+      this.schedulePoliceDispatch(`Krádež zásahového vozidla (${v.name})`, 2, 7.0);
     }
   }
 
@@ -2064,7 +3055,19 @@ export class ViceEngine {
     if (!this.currentVehicle) return;
     const v = this.currentVehicle;
     v.occupiedByPlayer = false;
-    const sideOffset = v.kind === 'plane' ? 4.8 : v.kind === 'boat' ? 2.6 : 2.2;
+    if (this.taxiMode !== 'none') {
+      this.taxiMode = 'none';
+      this.taxiDestinationLabel = null;
+      this.taxiFareCash = 0;
+      if (this.taxiDropBeacon) this.taxiDropBeacon.visible = false;
+      this.clearGpsWaypoint();
+    }
+    const sideOffset =
+      v.kind === 'plane' || v.kind === 'fighter_jet' || v.kind === 'helicopter'
+        ? 4.8
+        : v.kind === 'boat'
+          ? 2.6
+          : 2.2;
     const sideX = Math.cos(v.heading) * sideOffset;
     const sideZ = -Math.sin(v.heading) * sideOffset;
     const exitResolved = this.resolveBuildingCollision(v.x + sideX, v.z + sideZ, 0.5, Math.max(0, v.y), true, v);
@@ -2078,7 +3081,7 @@ export class ViceEngine {
     this.playerVelX = v.vx * 0.25;
     this.playerVelZ = v.vz * 0.25;
     this.playerVelY = 0;
-    this.playerGrounded = v.y <= 0.5;
+    this.playerGrounded = v.y <= this.getGroundHeightAt(exitResolved.x, exitResolved.z, v.y) + 0.5;
     this.currentVehicle = null;
   }
 
@@ -2086,57 +3089,286 @@ export class ViceEngine {
     const ch = this.characters[this.activeCharId];
     const luciaBonus = this.activeCharId === 'lucia' ? 1.15 : 1.0;
     const turbo = this.settings.gameplayMods.turboVehicles ? 1.55 : 1.0;
+    const engineMult = 1 + v.upgrades.engineLevel * 0.08 + (v.upgrades.turbo ? 0.14 : 0);
+    const accelMult = 1 + v.upgrades.engineLevel * 0.1 + (v.upgrades.turbo ? 0.18 : 0);
+    const gripBonus = 1 + v.upgrades.suspensionLevel * 0.14;
+    const flyingSkillBonus = 1 + ((ch.skills?.flying ?? 50) - 50) * 0.0025;
 
-    const maxSpd = v.maxSpeed * luciaBonus * turbo;
-    const accel = v.accel * luciaBonus * turbo;
+    const maxSpd = v.maxSpeed * luciaBonus * turbo * engineMult;
+    const accel = v.accel * luciaBonus * turbo * accelMult;
 
-    // 1. AIRCRAFT 3D FLIGHT PHYSICS
-    if (v.kind === 'plane') {
-      if (inp.throttle > 0.05) {
-        v.speed += accel * inp.throttle * dt;
+    // Damage smoke & fire particles when vehicle health < 35%
+    const hpRatio = v.health / Math.max(1, v.maxHealth);
+    if (hpRatio < 0.35 && !v.destroyed) {
+      this.smokeTimer -= dt;
+      if (this.smokeTimer <= 0) {
+        this.smokeTimer = 0.12;
+        const hoodX = v.x + Math.sin(v.heading) * 1.3;
+        const hoodZ = v.z + Math.cos(v.heading) * 1.3;
+        const col = hpRatio < 0.16 ? 0xf97316 : 0x475569;
+        this.spawnParticleBurst(new THREE.Vector3(hoodX, v.y + 0.9, hoodZ), col, 2);
+      }
+    }
+
+    // 0. TAXI PASSENGER AUTOPILOT
+    if (this.taxiMode === 'passenger' && v.kind === 'taxi') {
+      if (this.taxiDestinationLabel) {
+        const route = computeGpsRoute(v.x, v.z, this.taxiTargetX, this.taxiTargetZ);
+        let navPt = { x: this.taxiTargetX, z: this.taxiTargetZ };
+        for (const pt of route) {
+          if (Math.hypot(pt.x - v.x, pt.z - v.z) > 12) {
+            navPt = pt;
+            break;
+          }
+        }
+        const totalDist = Math.hypot(this.taxiTargetX - v.x, this.taxiTargetZ - v.z);
+        if (totalDist < 14) {
+          const paid = Math.min(this.cash, this.taxiFareCash);
+          this.cash -= paid;
+          this.callbacks.onCashChange(this.cash);
+          this.stuntMessage = `Horizon Cab dorazil do ${this.taxiDestinationLabel} (-$${paid})`;
+          this.stuntTimer = 3.6;
+          this.audio.playUiChime('mission');
+          this.exitCurrentVehicle();
+          return;
+        }
+        const desiredHeading = Math.atan2(navPt.x - v.x, navPt.z - v.z);
+        let hDiff = desiredHeading - v.heading;
+        while (hDiff > Math.PI) hDiff -= Math.PI * 2;
+        while (hDiff < -Math.PI) hDiff += Math.PI * 2;
+        v.steerAngle = THREE.MathUtils.clamp(hDiff * 1.3, -0.5, 0.5);
+        v.heading += THREE.MathUtils.clamp(hDiff, -2.6 * dt, 2.6 * dt);
+        v.speed = THREE.MathUtils.damp(v.speed, totalDist < 36 ? 12 : 24, 3.5, dt);
+        v.vx = Math.sin(v.heading) * v.speed;
+        v.vz = Math.cos(v.heading) * v.speed;
+        const col = this.resolveBuildingCollision(v.x + v.vx * dt, v.z + v.vz * dt, 1.5, Math.max(0, v.y), true, v);
+        v.x = col.x;
+        v.z = col.z;
+        v.y = this.getGroundHeightAt(v.x, v.z, v.y);
+        v.rig.root.position.set(v.x, v.y, v.z);
+        v.rig.root.rotation.y = v.heading;
+        v.wheelSpin += (v.speed / 0.34) * dt;
+        v.rig.wheels.forEach((w) => (w.rotation.x = v.wheelSpin));
+        v.rig.frontSteerPivots.forEach((p) => (p.rotation.y = v.steerAngle * 0.8));
       } else {
-        v.speed *= Math.exp(-0.22 * dt);
+        v.speed = THREE.MathUtils.damp(v.speed, 0, 5, dt);
       }
-      if (inp.brake > 0.05) {
-        v.speed -= accel * 0.95 * inp.brake * dt;
-      }
-      v.speed = THREE.MathUtils.clamp(v.speed, -6, maxSpd);
+      this.playerRig.root.position.set(v.x, v.y, v.z);
+      ch.district = getDistrictName(v.x, v.z);
+      return;
+    }
 
-      const groundH = isWaterAt(v.x, v.z) ? -0.35 : this.getGroundHeightAt(v.x, v.z);
+    // 0b. TAXI DRIVER SHIFT PROGRESS
+    if (v.kind === 'taxi' && (this.taxiMode === 'driver_waiting' || this.taxiMode === 'driver_active')) {
+      if (this.taxiMode === 'driver_waiting') {
+        if (Math.hypot(v.x - this.taxiPickupX, v.z - this.taxiPickupZ) < 12) {
+          this.taxiMode = 'driver_active';
+          if (this.taxiDropBeacon) {
+            this.taxiDropBeacon.position.set(this.taxiTargetX, 0.25, this.taxiTargetZ);
+          }
+          this.setGpsWaypoint(this.taxiTargetX, this.taxiTargetZ, `Vyložiť zákazníka: ${this.taxiDestinationLabel || 'Cieľ'}`);
+          this.stuntMessage = `Zákazník nastúpil! Odvez ho do ${this.taxiDestinationLabel}`;
+          this.stuntTimer = 3.2;
+          this.audio.playUiChime('switch');
+        }
+      } else if (this.taxiMode === 'driver_active') {
+        if (Math.hypot(v.x - this.taxiTargetX, v.z - this.taxiTargetZ) < 14) {
+          this.cash += this.taxiFareCash;
+          this.callbacks.onCashChange(this.cash);
+          this.stuntMessage = `Zákazník vyložený! Zárobok +$${this.taxiFareCash}`;
+          this.stuntTimer = 3.5;
+          this.audio.playUiChime('mission');
+          this.taxiMode = 'none';
+          this.taxiDestinationLabel = null;
+          this.taxiFareCash = 0;
+          if (this.taxiDropBeacon) this.taxiDropBeacon.visible = false;
+          this.clearGpsWaypoint();
+        }
+      }
+    }
+
+    // 1. HELICOPTER 3D HOVER & ROTOR PHYSICS
+    if (v.kind === 'helicopter') {
+      const groundH = isWaterAt(v.x, v.z) ? 0.1 : this.getGroundHeightAt(v.x, v.z, v.y);
       const isAirborne = v.y > groundH + 0.35;
 
-      // Spin propeller
+      // Spin Main Rotor & Tail Rotor
+      if (v.rig.propeller) v.rig.propeller.rotation.y += (isAirborne ? 24 : 11) * dt;
+      if (v.rig.tailRotor) v.rig.tailRotor.rotation.x += (isAirborne ? 36 : 16) * dt;
+
+      // Ascend (Space / R2-climb assist / Pitch) & Descend (Shift / L2 / Pitch)
+      const heliStickY =
+        Math.abs(inp.padRightStickY) > 0.2 ? inp.padRightStickY : inp.stickConfig.moveStick === 'right' ? inp.padLeftStickY : 0;
+      const heliClimbAxis = inp.stickConfig.pitchInvert ? -heliStickY : heliStickY;
+      let targetVy = isAirborne ? -0.45 : 0;
+      if (inp.jumpHeld || inp.pitchUpHeld || heliClimbAxis > 0.2) {
+        targetVy = 14.5 * flyingSkillBonus;
+      } else if (inp.sprint || inp.pitchDownHeld || heliClimbAxis < -0.2) {
+        targetVy = -12.5;
+      }
+      v.vy = THREE.MathUtils.damp(v.vy, targetVy, 5.5, dt);
+
+      const thrust = (inp.throttle - inp.brake * 0.75) * (isAirborne ? 1 : 0.35);
+      v.speed = THREE.MathUtils.damp(v.speed, thrust * maxSpd, 2.4, dt);
+
+      const yawBumper = (inp.r1Held ? 1 : 0) - (inp.l1Held ? 1 : 0);
+      const yawCmd = inp.stickConfig.yawSource === 'bumpers' && yawBumper !== 0 ? yawBumper : inp.moveX;
+      const yawRate = -yawCmd * 2.0 * dt;
+      v.heading += yawRate;
+
+      const targetPitch = -thrust * 0.24;
+      const targetRoll = -inp.moveX * 0.32;
+      v.pitch = THREE.MathUtils.damp(v.pitch, isAirborne ? targetPitch : 0, 5.5, dt);
+      v.roll = THREE.MathUtils.damp(v.roll, isAirborne ? targetRoll : 0, 5.5, dt);
+
+      v.vx = Math.sin(v.heading) * v.speed;
+      v.vz = Math.cos(v.heading) * v.speed;
+
+      let nx = v.x + v.vx * dt;
+      let ny = THREE.MathUtils.clamp(v.y + v.vy * dt, groundH, 195);
+      let nz = v.z + v.vz * dt;
+
+      if (isOutOfBoundsSeaAt(nx, nz)) {
+        this.triggerDeepOceanDeath();
+        return;
+      }
+
+      if (ny < 68) {
+        const heliCol = this.resolveBuildingCollision(nx, nz, 2.6, Math.max(0, ny), true, v);
+        if (heliCol.collided) {
+          nx = heliCol.x;
+          nz = heliCol.z;
+          v.speed *= 0.5;
+          this.audio.playImpact(0.5);
+        }
+      }
+
+      if (ny > groundH + 2) this.addSkillXp('flying', dt * 2.4);
+
+      v.x = nx;
+      v.y = ny;
+      v.z = nz;
+      v.rig.root.position.set(v.x, v.y, v.z);
+      v.rig.root.rotation.y = v.heading;
+      v.rig.bodyGroup.rotation.x = -v.pitch;
+      v.rig.bodyGroup.rotation.z = v.roll;
+      this.playerRig.root.position.set(v.x, v.y + 0.6, v.z);
+      ch.district = v.y > 16 ? 'Vzdušný priestor Leonida' : getDistrictName(v.x, v.z);
+      return;
+    }
+
+    // 2. AIRCRAFT & FIGHTER JET 3D FLIGHT PHYSICS (GTA V Inverted Pitch: Pull Stick DOWN = Nose UP / Climb!)
+    if (v.kind === 'plane' || v.kind === 'fighter_jet') {
+      const isJet = v.kind === 'fighter_jet';
+      const afterburner = isJet && inp.sprint && inp.throttle > 0.1;
+      const effMaxSpd = maxSpd * (afterburner ? 1.32 : 1.0);
+      const effAccel = accel * (afterburner ? 1.45 : 1.0);
+
+      if (inp.throttle > 0.05) {
+        v.speed += effAccel * inp.throttle * dt;
+      } else {
+        v.speed *= Math.exp(-0.2 * dt);
+      }
+      if (inp.brake > 0.05) {
+        v.speed -= effAccel * 0.9 * inp.brake * dt;
+      }
+      v.speed = THREE.MathUtils.clamp(v.speed, -6, effMaxSpd);
+
+      const groundH = isWaterAt(v.x, v.z) ? -0.35 : this.getGroundHeightAt(v.x, v.z, v.y);
+      const isAirborne = v.y > groundH + 0.35;
+
       if (v.rig.propeller) {
         v.rig.propeller.rotation.z += (8 + Math.abs(v.speed) * 1.15) * dt;
       }
+      if (v.rig.afterburners) {
+        const glow = afterburner ? 3.8 : inp.throttle > 0.1 ? 1.6 : 0.35;
+        for (const ab of v.rig.afterburners) {
+          (ab.material as THREE.MeshStandardMaterial).emissiveIntensity = glow;
+        }
+        if (afterburner && Math.random() < 0.6) {
+          this.spawnParticleBurst(
+            new THREE.Vector3(v.x - Math.sin(v.heading) * 3.5, v.y + 0.85, v.z - Math.cos(v.heading) * 3.5),
+            0x38bdf8,
+            1
+          );
+        }
+      }
 
-      // Climb (Space/X) & Dive (Shift/Circle)
-      if (v.speed >= 18 && inp.jumpHeld) {
-        v.pitch = THREE.MathUtils.clamp(v.pitch + 0.72 * dt, -0.45, 0.48);
-      } else if (isAirborne && inp.sprint) {
-        v.pitch = THREE.MathUtils.clamp(v.pitch - 0.72 * dt, -0.45, 0.48);
+      // Stick Y: up = +1, down = -1. With pitchInvert = true (default): stick DOWN (< -0.15) => Climb (+pitch), stick UP (> +0.15) => Dive (-pitch)!
+      const primaryStickY = inp.stickConfig.moveStick === 'right' ? inp.padRightStickY : inp.padLeftStickY;
+      const altStickY = inp.stickConfig.moveStick === 'right' ? inp.padLeftStickY : inp.padRightStickY;
+      const stickPitchRaw =
+        Math.abs(primaryStickY) > 0.15 ? primaryStickY : Math.abs(altStickY) > 0.15 ? altStickY : 0;
+      const stickPitchCmd = inp.stickConfig.pitchInvert ? -stickPitchRaw : stickPitchRaw;
+
+      const kbClimb = inp.stickConfig.pitchInvert ? inp.pitchDownHeld : inp.pitchUpHeld;
+      const kbDive = inp.stickConfig.pitchInvert ? inp.pitchUpHeld : inp.pitchDownHeld;
+      const analogClimb = stickPitchCmd > 0.15 ? stickPitchCmd : 0;
+      const analogDive = stickPitchCmd < -0.15 ? -stickPitchCmd : 0;
+      const climbStrength = Math.max(analogClimb, inp.jumpHeld || kbClimb ? 1 : 0);
+      const diveStrength = Math.max(analogDive, kbDive || (!isJet && inp.sprint) ? 1 : 0);
+
+      const takeoffSpeed = isJet ? 22 : 17;
+      if (v.speed >= takeoffSpeed && climbStrength > 0.05) {
+        v.pitch = THREE.MathUtils.clamp(v.pitch + 0.88 * climbStrength * flyingSkillBonus * dt, -0.52, 0.56);
+      } else if (isAirborne && diveStrength > 0.05) {
+        v.pitch = THREE.MathUtils.clamp(v.pitch - 0.88 * diveStrength * flyingSkillBonus * dt, -0.52, 0.56);
       } else {
         v.pitch = THREE.MathUtils.damp(v.pitch, isAirborne ? 0.01 : 0, 3.5, dt);
       }
 
-      const targetRoll = -inp.moveX * (isAirborne ? 0.58 : 0.08);
+      const rollInput = inp.moveX;
+      const targetRoll = -rollInput * (isAirborne ? 0.68 : 0.08);
       v.roll = THREE.MathUtils.damp(v.roll, targetRoll, 6, dt);
 
-      const turnFactor = isAirborne ? 1.35 : Math.min(1, Math.abs(v.speed) / 10) * 1.1;
-      v.heading -= inp.moveX * turnFactor * dt;
+      const bumperYaw = (inp.r1Held ? 1 : 0) - (inp.l1Held ? 1 : 0);
+      const yawCmd =
+        inp.stickConfig.yawSource === 'bumpers'
+          ? bumperYaw * 0.9 + rollInput * 0.55
+          : inp.stickConfig.yawSource === 'right_x'
+            ? inp.padRightStickX + (Math.abs(inp.padRightStickX) < 0.05 ? rollInput * 0.7 : 0)
+            : rollInput;
+      const turnFactor = isAirborne ? (isJet ? 1.55 : 1.35) : Math.min(1, Math.abs(v.speed) / 10) * 1.1;
+      v.heading -= yawCmd * turnFactor * dt;
 
       const cosP = Math.cos(v.pitch);
       v.vx = Math.sin(v.heading) * v.speed * cosP;
       v.vz = Math.cos(v.heading) * v.speed * cosP;
 
-      if (v.speed >= 18 && (v.pitch > 0.04 || isAirborne)) {
-        v.vy = Math.sin(v.pitch) * Math.max(v.speed, 22) - (v.speed < 20 ? 3.5 : 0.25);
+      if (v.speed >= takeoffSpeed && (v.pitch > 0.03 || isAirborne)) {
+        v.vy = Math.sin(v.pitch) * Math.max(v.speed, 24) - (v.speed < 20 ? 3.5 : 0.2);
       } else {
         v.vy += -18 * dt;
       }
 
+      // Armed Fighter Jet Twin Rockets!
+      if (isJet && inp.shootHeld && this.fireCooldown <= 0) {
+        this.fireCooldown = 0.28;
+        this.audio.playGunshot('rpg');
+        const fwdX = Math.sin(v.heading) * cosP;
+        const fwdY = Math.sin(v.pitch);
+        const fwdZ = Math.cos(v.heading) * cosP;
+        const rocketMesh = new THREE.Mesh(
+          new THREE.CapsuleGeometry(0.11, 0.45, 4, 8),
+          new THREE.MeshStandardMaterial({ color: 0x38bdf8, emissive: 0x0ea5e9, emissiveIntensity: 1.8 })
+        );
+        rocketMesh.rotation.x = Math.PI / 2;
+        rocketMesh.position.set(v.x + fwdX * 3.8, v.y + 0.9, v.z + fwdZ * 3.8);
+        this.scene.add(rocketMesh);
+        this.rockets.push({
+          mesh: rocketMesh,
+          x: rocketMesh.position.x,
+          y: rocketMesh.position.y,
+          z: rocketMesh.position.z,
+          vx: fwdX * 135,
+          vy: fwdY * 135,
+          vz: fwdZ * 135,
+          life: 2.8,
+        });
+      }
+
       let nx = v.x + v.vx * dt;
-      let ny = THREE.MathUtils.clamp(v.y + v.vy * dt, groundH, 165);
+      let ny = THREE.MathUtils.clamp(v.y + v.vy * dt, groundH, 230);
       let nz = v.z + v.vz * dt;
 
       if (isOutOfBoundsSeaAt(nx, nz)) {
@@ -2150,16 +3382,18 @@ export class ViceEngine {
         if (v.pitch < 0) v.pitch = 0;
       }
 
-      if (ny < 62) {
-        const planeCol = this.resolveBuildingCollision(nx, nz, 2.5, Math.max(0, ny), true, v);
+      if (ny < 64) {
+        const planeCol = this.resolveBuildingCollision(nx, nz, 2.8, Math.max(0, ny), true, v);
         if (planeCol.collided) {
           nx = planeCol.x;
           nz = planeCol.z;
-          v.speed *= 0.6;
+          v.speed *= 0.55;
           this.audio.playImpact(0.65);
           this.input.triggerVibration(180, 0.55, 0.65);
         }
       }
+
+      if (isAirborne) this.addSkillXp('flying', dt * 2.5);
 
       v.x = nx;
       v.y = ny;
@@ -2175,11 +3409,11 @@ export class ViceEngine {
       }
 
       this.playerRig.root.position.set(v.x, v.y + 0.5, v.z);
-      ch.district = v.y > 14 ? 'Vzdušný priestor Leonida' : getDistrictName(v.x, v.z);
+      ch.district = v.y > 16 ? 'Vzdušný priestor Leonida' : getDistrictName(v.x, v.z);
       return;
     }
 
-    // 2. WATER SPEEDBOAT PHYSICS (Open Sea around Entire 5x Island)
+    // 3. WATER SPEEDBOAT PHYSICS (Open Sea around Entire 15x Island)
     if (v.kind === 'boat') {
       const forwardX = Math.sin(v.heading);
       const forwardZ = Math.cos(v.heading);
@@ -2258,7 +3492,7 @@ export class ViceEngine {
       return;
     }
 
-    // 3. CARS & MOTORCYCLES GROUND / BRIDGE / DRIFT ("ŠMYK") PHYSICS
+    // 4. CARS & MOTORCYCLES GROUND / BRIDGE / OVERPASS / UNDERPASS / DRIFT ("ŠMYK") PHYSICS
     const forwardX = Math.sin(v.heading);
     const forwardZ = Math.cos(v.heading);
     const rightX = Math.cos(v.heading);
@@ -2278,7 +3512,7 @@ export class ViceEngine {
       }
     }
 
-    const handbrake = inp.jumpHeld;
+    const handbrake = inp.handbrakeHeld;
     v.rig.brakeLightsMat.emissiveIntensity = inp.brake > 0.1 || handbrake ? 2.4 : 0.6;
 
     const drag = handbrake ? 2.05 : 0.52;
@@ -2293,15 +3527,16 @@ export class ViceEngine {
     const turnRate = v.steerAngle * turnMult * speedFactor * steerDir * (handbrake ? 1.46 : 1.0);
     v.heading += turnRate * dt;
 
-    // Authentic Drift Physics: Handbrake or high-speed sharp turns reduce rear lateral grip so tail kicks out smoothly!
+    // Authentic Drift Physics
     const highSpeedCorner = Math.abs(vForward) > 16 && Math.abs(v.steerAngle) > 0.34;
-    const lateralGrip = handbrake
-      ? 1.55
-      : highSpeedCorner
-        ? 4.4
-        : v.kind === 'motorcycle'
-          ? 11.2
-          : 8.6;
+    const lateralGrip =
+      (handbrake
+        ? 1.55
+        : highSpeedCorner
+          ? 4.4
+          : v.kind === 'motorcycle'
+            ? 11.2
+            : 8.6) * gripBonus;
     vLateral *= Math.exp(-lateralGrip * dt);
 
     const newFwdX = Math.sin(v.heading);
@@ -2312,6 +3547,10 @@ export class ViceEngine {
     v.vx = newFwdX * vForward + newRightX * vLateral;
     v.vz = newFwdZ * vForward + newRightZ * vLateral;
     v.speed = vForward;
+
+    if (Math.abs(vForward) > 14) {
+      this.addSkillXp('driving', dt * 1.3);
+    }
 
     const grav = this.settings.gameplayMods.lowGravity ? -9.5 : -24.0;
     v.vy += grav * dt;
@@ -2339,6 +3578,18 @@ export class ViceEngine {
         this.audio.playImpact(Math.min(1, impactSpeed / 30));
         this.input.triggerVibration(160, 0.4, Math.min(1, impactSpeed / 28));
       }
+      if (impactSpeed > 10) {
+        const armorMit = 1 - v.upgrades.armorLevel * 0.25;
+        v.health -= impactSpeed * 0.85 * armorMit;
+        deformVehicleRig(v.rig, (col.hitX ? (v.vx > 0 ? 0.8 : -0.8) : 0), (col.hitZ ? 1.5 : 0.8), Math.min(1.1, impactSpeed / 24));
+        if (v.health <= 0 && !v.destroyed) {
+          v.destroyed = true;
+          this.triggerExplosion(v.x, v.z, 8.5);
+          this.damagePlayer(95);
+          this.scene.remove(v.rig.root);
+          return;
+        }
+      }
       if (col.hitX) v.vx *= -0.35;
       if (col.hitZ) v.vz *= -0.35;
       nx = col.x;
@@ -2346,7 +3597,7 @@ export class ViceEngine {
     }
 
     const waterUnder = isWaterAt(nx, nz);
-    const groundH = waterUnder ? -0.45 : this.getGroundHeightAt(nx, nz);
+    const groundH = waterUnder ? -0.45 : this.getGroundHeightAt(nx, nz, v.y);
     if (waterUnder && ny <= 0.05) {
       v.vx *= Math.exp(-4.5 * dt);
       v.vz *= Math.exp(-4.5 * dt);
@@ -2388,7 +3639,6 @@ export class ViceEngine {
     v.rig.root.position.set(v.x, v.y, v.z);
     v.rig.root.rotation.y = v.heading;
 
-    // Suspension roll, pitch & drift visual feedback (skid marks + tire smoke + audio screech!)
     const slipSpeed = Math.abs(vLateral);
     const onGround = !waterUnder && ny <= groundH + 0.12;
     const driftingNow =
@@ -2564,10 +3814,10 @@ export class ViceEngine {
         this.updateVehicleBeacon(v);
 
         if (v.kind === 'boat') {
-          // Autonomous Boats Orbiting Around the 5x Island Coastline
+          // Autonomous Boats Orbiting Around the 15x Island Coastline
           v.speed = THREE.MathUtils.damp(v.speed, 13.5, 2.5, dt);
-          const orbitAng = Math.atan2(v.z, v.x) + 0.032 * dt;
-          const targetR = 468;
+          const orbitAng = Math.atan2(v.z, v.x) + 0.018 * dt;
+          const targetR = 1690;
           const tx = Math.cos(orbitAng) * targetR;
           const tz = Math.sin(orbitAng) * targetR;
           v.heading = Math.atan2(tx - v.x, tz - v.z);
@@ -2611,7 +3861,16 @@ export class ViceEngine {
 
         if (!shouldBrake) {
           for (const other of this.vehicles) {
-            if (other === v || other.destroyed || other.kind === 'boat' || other.kind === 'plane') continue;
+            if (
+              other === v ||
+              other.destroyed ||
+              other.kind === 'boat' ||
+              other.kind === 'plane' ||
+              other.kind === 'helicopter' ||
+              other.kind === 'fighter_jet'
+            ) {
+              continue;
+            }
             const ox = other.x - v.x;
             const oz = other.z - v.z;
             const od = Math.hypot(ox, oz);
@@ -2668,7 +3927,7 @@ export class ViceEngine {
 
         v.vx = Math.sin(v.heading) * v.speed;
         v.vz = Math.cos(v.heading) * v.speed;
-        v.y = getBridgeElevationAt(v.x, v.z);
+        v.y = this.getGroundHeightAt(v.x, v.z, v.y);
         v.rig.root.position.set(v.x, v.y, v.z);
         v.rig.root.rotation.y = v.heading;
         v.wheelSpin += (v.speed / 0.36) * dt;
@@ -2676,8 +3935,8 @@ export class ViceEngine {
         v.rig.frontSteerPivots.forEach((p) => (p.rotation.y = v.steerAngle * 0.8));
       }
 
-      // Vehicle-to-Player-Car elastic bump collision
-      if (this.currentVehicle) {
+      // Vehicle-to-Player-Car elastic bump + real-time deformation
+      if (this.currentVehicle && Math.abs(this.currentVehicle.y - v.y) < 3.0) {
         const dx = this.currentVehicle.x - v.x;
         const dz = this.currentVehicle.z - v.z;
         const d = Math.hypot(dx, dz);
@@ -2696,6 +3955,11 @@ export class ViceEngine {
             this.input.triggerVibration(140, 0.5, 0.7);
             v.stoppedByPlayer = true;
             v.stopHoldTimer = 5.0;
+            const armorMit = 1 - this.currentVehicle.upgrades.armorLevel * 0.25;
+            this.currentVehicle.health -= relSpeed * 0.7 * armorMit;
+            v.health -= relSpeed * 0.9;
+            deformVehicleRig(this.currentVehicle.rig, 0, 1.35, Math.min(1.0, relSpeed / 22));
+            deformVehicleRig(v.rig, 0, -1.2, Math.min(1.0, relSpeed / 22));
             if (v.isPolice && !this.settings.gameplayMods.noPolice) {
               this.addCrimeHeat(22);
             }
@@ -2920,7 +4184,7 @@ export class ViceEngine {
   }
 
   private damagePlayer(amount: number) {
-    if (this.wastedTimer > 0 || this.bustedTimer > 0) return;
+    if (this.wastedTimer > 0 || this.bustedTimer > 0 || this.godModeActive) return;
     const ch = this.characters[this.activeCharId];
     if (this.currentVehicle) amount *= 0.45; // vehicle chassis absorbs partial damage
 
@@ -2935,6 +4199,9 @@ export class ViceEngine {
 
     if (ch.health <= 0 && this.wastedTimer <= 0) {
       this.wastedTimer = 3.2;
+      this.wastedReason = null;
+      this.parachuteDeployed = false;
+      this.parachuteRig.visible = false;
       this.exitCurrentVehicle();
       this.clearPolicePursuit();
       this.audio.playImpact(1.0);
@@ -2961,7 +4228,55 @@ export class ViceEngine {
     this.callbacks.onInventoryChange(structuredClone(this.inventory));
   }
 
-  private fireEquippedWeapon() {
+  private findAutoAimTarget(): { x: number; y: number; z: number } | null {
+    const def = WEAPON_CATALOG[this.inventory.equippedWeapon];
+    const origin = this.camera.position;
+    const forward = _v1.set(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
+    let bestScore = -1;
+    let bestPos: { x: number; y: number; z: number } | null = null;
+    const hasActiveMission = Boolean(this.activeMission);
+
+    for (const npc of this.npcs) {
+      if (!npc.alive) continue;
+      // During mission prioritize enemies; in free roam snap to armed/hostile/nearby targets
+      if (hasActiveMission && npc.kind === 'civilian' && npc.behavior !== 'fight') continue;
+      const ty = 1.15;
+      const dx = npc.x - origin.x;
+      const dy = ty - origin.y;
+      const dz = npc.z - origin.z;
+      const dist = Math.hypot(dx, dy, dz);
+      if (dist < 1.5 || dist > def.range) continue;
+      const dot = (dx * forward.x + dy * forward.y + dz * forward.z) / dist;
+      if (dot > 0.89) {
+        const priority = (npc.kind === 'enemy' ? 0.08 : npc.kind === 'police' ? 0.04 : 0) + dot - dist * 0.0008;
+        if (priority > bestScore) {
+          bestScore = priority;
+          bestPos = { x: npc.x, y: ty, z: npc.z };
+        }
+      }
+    }
+
+    for (const rt of this.rangeTargets) {
+      if (!rt.alive) continue;
+      const dx = rt.x - origin.x;
+      const dy = rt.y - origin.y;
+      const dz = rt.z - origin.z;
+      const dist = Math.hypot(dx, dy, dz);
+      if (dist < 1.5 || dist > def.range) continue;
+      const dot = (dx * forward.x + dy * forward.y + dz * forward.z) / dist;
+      if (dot > 0.91) {
+        const priority = dot + 0.03 - dist * 0.0008;
+        if (priority > bestScore) {
+          bestScore = priority;
+          bestPos = { x: rt.x, y: rt.y, z: rt.z };
+        }
+      }
+    }
+
+    return bestPos;
+  }
+
+  private fireEquippedWeapon(isAiming = false) {
     const owned = this.inventory.weapons.find((w) => w.id === this.inventory.equippedWeapon);
     const def = WEAPON_CATALOG[this.inventory.equippedWeapon];
     if (!owned) return;
@@ -2980,7 +4295,8 @@ export class ViceEngine {
     this.audio.playGunshot(def.id);
     this.input.triggerVibration(70, 0.35, def.id === 'shotgun' ? 0.85 : 0.3);
 
-    // Subtle recoil pitch kick
+    // Subtle camera + weapon recoil kickback
+    this.weaponRecoilKick = def.id === 'shotgun' || def.id === 'rpg' ? 0.14 : def.id === 'minigun' ? 0.045 : 0.065;
     this.camPitch = THREE.MathUtils.clamp(this.camPitch - (def.id === 'shotgun' ? 0.032 : 0.011), -0.55, 0.85);
 
     // Firing into the air scatters nearby crowd, without spawning random police!
@@ -3002,13 +4318,25 @@ export class ViceEngine {
     this.muzzleFlashMesh.visible = true;
     this.muzzleFlashTimer = 0.055;
 
+    // Soft Auto-Aim lock onto closest NPC / Mission Enemy / Range Target when aiming
+    const lockTarget = isAiming && !this.currentVehicle ? this.findAutoAimTarget() : null;
+    this.autoAimLocked = Boolean(lockTarget);
+
     // Aim ray from camera center
     const mateoSpreadMult = this.activeCharId === 'mateo' ? 0.78 : 1.0;
-    const spread = def.spread * mateoSpreadMult;
+    const spread = def.spread * mateoSpreadMult * (lockTarget ? 0.45 : 1.0);
 
     // Rocket Launcher fires a 3D explosive projectile!
     if (def.id === 'rpg') {
-      _rayDir.set(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
+      if (lockTarget) {
+        _rayDir.set(
+          lockTarget.x - this.camera.position.x,
+          lockTarget.y - this.camera.position.y,
+          lockTarget.z - this.camera.position.z
+        ).normalize();
+      } else {
+        _rayDir.set(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
+      }
       const rocketMesh = new THREE.Mesh(
         new THREE.CapsuleGeometry(0.08, 0.36, 4, 8),
         new THREE.MeshStandardMaterial({ color: 0xf97316, emissive: 0xef4444, emissiveIntensity: 1.5 })
@@ -3030,7 +4358,15 @@ export class ViceEngine {
     }
 
     for (let p = 0; p < def.pellets; p++) {
-      _rayDir.set(0, 0, -1).applyQuaternion(this.camera.quaternion);
+      if (lockTarget) {
+        _rayDir.set(
+          lockTarget.x - this.camera.position.x,
+          lockTarget.y - this.camera.position.y,
+          lockTarget.z - this.camera.position.z
+        ).normalize();
+      } else {
+        _rayDir.set(0, 0, -1).applyQuaternion(this.camera.quaternion);
+      }
       _rayDir.x += (Math.random() - 0.5) * spread;
       _rayDir.y += (Math.random() - 0.5) * spread;
       _rayDir.z += (Math.random() - 0.5) * spread;
@@ -3040,6 +4376,7 @@ export class ViceEngine {
       let bestDist = def.range;
       let hitPoint = _v2.copy(rayOrigin).addScaledVector(_rayDir, bestDist);
       let hitNpc: NpcEntity | null = null;
+      let hitRangeTarget: RangeTargetEntity | null = null;
       let hitBarrel: ExplosiveBarrelEntity | null = null;
       let hitVehicle: VehicleEntity | null = null;
 
@@ -3058,7 +4395,23 @@ export class ViceEngine {
         }
       }
 
-      // 2. Check Explosive Barrels
+      // 2. Check Shooting Range Targets
+      for (const rt of this.rangeTargets) {
+        if (!rt.alive) continue;
+        _v3.set(rt.x, rt.y, rt.z);
+        const t = _v3.clone().sub(rayOrigin).dot(_rayDir);
+        if (t > 1 && t < bestDist) {
+          const closest = _rayOrigin.copy(rayOrigin).addScaledVector(_rayDir, t);
+          if (closest.distanceTo(_v3) < 0.65) {
+            bestDist = t;
+            hitPoint.copy(closest);
+            hitRangeTarget = rt;
+            hitNpc = null;
+          }
+        }
+      }
+
+      // 3. Check Explosive Barrels
       for (const b of this.barrels) {
         if (!b.alive) continue;
         _v3.set(b.x, 0.6, b.z);
@@ -3069,12 +4422,13 @@ export class ViceEngine {
             bestDist = t;
             hitPoint.copy(closest);
             hitBarrel = b;
+            hitRangeTarget = null;
             hitNpc = null;
           }
         }
       }
 
-      // 3. Check Vehicles
+      // 4. Check Vehicles
       for (const veh of this.vehicles) {
         if (veh === this.currentVehicle || veh.destroyed) continue;
         _v3.set(veh.x, veh.y + 0.85, veh.z);
@@ -3086,6 +4440,7 @@ export class ViceEngine {
             hitPoint.copy(closest);
             hitVehicle = veh;
             hitBarrel = null;
+            hitRangeTarget = null;
             hitNpc = null;
           }
         }
@@ -3095,9 +4450,24 @@ export class ViceEngine {
 
       if (hitNpc) {
         this.damageNpc(hitNpc, def.damage);
+        this.addSkillXp('shooting', 3.5);
         this.hitMarkerTimer = 0.14;
         this.audio.playHitMarker();
         this.spawnParticleBurst(hitPoint, 0xef4444, 4);
+      } else if (hitRangeTarget) {
+        hitRangeTarget.alive = false;
+        hitRangeTarget.mesh.visible = false;
+        hitRangeTarget.respawnTimer = 4.5;
+        this.hitMarkerTimer = 0.16;
+        this.audio.playHitMarker();
+        this.spawnParticleBurst(hitPoint, 0x38bdf8, 5);
+        this.cash += 120;
+        this.stats.shootingRangeScore = (this.stats.shootingRangeScore || 0) + 100;
+        this.addSkillXp('shooting', 10);
+        this.stuntMessage = 'Zásah terča! +$120 · +100 bodov strelnice';
+        this.stuntTimer = 2.0;
+        this.callbacks.onCashChange(this.cash);
+        this.callbacks.onStatsChange({ ...this.stats });
       } else if (hitBarrel) {
         this.detonateBarrel(hitBarrel);
         this.hitMarkerTimer = 0.14;
@@ -3106,7 +4476,7 @@ export class ViceEngine {
         this.spawnParticleBurst(hitPoint, 0xfbbf24, 5);
         this.hitMarkerTimer = 0.12;
         if (hitVehicle.isPolice && !this.settings.gameplayMods.noPolice) {
-          this.addCrimeHeat(18);
+          this.schedulePoliceDispatch('Poškodenie policajného vozidla VCPD', 1, 6.5);
         }
         if (hitVehicle.health <= 0 && !hitVehicle.destroyed) {
           hitVehicle.destroyed = true;
@@ -3153,9 +4523,13 @@ export class ViceEngine {
         this.stuntTimer = 2.0;
       }
 
-      // Police chase triggers ONLY upon killing someone (civilian or police), not randomly!
+      // Delayed Police Dispatch upon eliminating civilian or police — gives player time to escape!
       if (!this.settings.gameplayMods.noPolice && (npc.kind === 'civilian' || npc.kind === 'police')) {
-        this.addCrimeHeat(npc.kind === 'police' ? 48 : 32);
+        this.schedulePoliceDispatch(
+          npc.kind === 'police' ? 'Útok na príslušníka VCPD' : 'Nahlásený trestný čin v okrese',
+          npc.kind === 'police' ? 2 : 1,
+          7.5
+        );
       }
     }
   }
@@ -3310,6 +4684,17 @@ export class ViceEngine {
         if (b.respawnTimer <= 0) {
           b.alive = true;
           b.mesh.visible = true;
+        }
+      }
+    }
+
+    // Respawn shooting range targets after hit
+    for (const rt of this.rangeTargets) {
+      if (!rt.alive) {
+        rt.respawnTimer -= dt;
+        if (rt.respawnTimer <= 0) {
+          rt.alive = true;
+          rt.mesh.visible = true;
         }
       }
     }
@@ -3472,6 +4857,22 @@ export class ViceEngine {
     const py = this.playerRig.root.position.y;
     const pz = this.playerRig.root.position.z;
 
+    // Firm Vehicle Camera Auto-Follow: when driving/flying/boating, smoothly align camera behind vehicle heading on turns!
+    if (this.currentVehicle && !this.activeCutscene && this.switchSwoopTimer <= 0) {
+      const diff = Math.atan2(
+        Math.sin(this.currentVehicle.heading - this.camYaw),
+        Math.cos(this.currentVehicle.heading - this.camYaw)
+      );
+      if (this.cameraMode === 'first_person') {
+        if (Math.abs(this.currentVehicle.speed) > 0.8 || Math.abs(this.currentVehicle.steerAngle) > 0.04) {
+          this.camYaw += diff * Math.min(1, dt * 6.5);
+        }
+      } else if (!isAiming && (Math.abs(this.currentVehicle.speed) > 1.2 || this.taxiMode === 'passenger')) {
+        const followRate = this.taxiMode === 'passenger' ? 5.2 : 6.2;
+        this.camYaw += diff * Math.min(1, dt * followRate);
+      }
+    }
+
     // Dynamic FOV boost when sprinting, aiming (with Sniper optical zoom!), or driving/flying fast
     let targetFov = this.settings.graphics.fov;
     if (isAiming && !this.currentVehicle) {
@@ -3484,7 +4885,18 @@ export class ViceEngine {
       this.camera.updateProjectionMatrix();
     }
 
-    if (this.switchSwoopTimer > 0) {
+    if (this.activeCutscene) {
+      // Cinematic Cutscene Orbit Camera around Speaker / Target
+      const line = this.cutsceneLines[this.activeCutscene.lineIndex];
+      const focusX = line?.cameraFocus === 'target' ? this.cutsceneTargetPos.x : px;
+      const focusZ = line?.cameraFocus === 'target' ? this.cutsceneTargetPos.z : pz;
+      const focusY = line?.cameraFocus === 'target' ? Math.max(1.5, this.cutsceneTargetPos.y) : py + 1.4;
+      const orbitAng = this.elapsedSec * 0.38;
+      const radius = line?.cameraFocus === 'panoramic' ? 18 : 6.5;
+      const height = line?.cameraFocus === 'panoramic' ? 8.5 : 2.6;
+      _camGoal.set(focusX + Math.sin(orbitAng) * radius, focusY + height, focusZ + Math.cos(orbitAng) * radius);
+      _lookGoal.set(focusX, focusY + 0.6, focusZ);
+    } else if (this.switchSwoopTimer > 0) {
       // Dramatic high aerial swoop on character switch!
       _camGoal.set(px, py + 38, pz + 24);
       _lookGoal.set(px, py + 1.2, pz);
@@ -3493,12 +4905,19 @@ export class ViceEngine {
         const v = this.currentVehicle;
         const fwdX = Math.sin(v.heading);
         const fwdZ = Math.cos(v.heading);
-        const cockpitY = v.kind === 'plane' ? 1.82 : v.kind === 'boat' ? 1.55 : 1.38;
-        _camGoal.set(v.x + fwdX * 0.45, v.y + cockpitY, v.z + fwdZ * 0.45);
+        const cockpitY =
+          v.kind === 'plane' || v.kind === 'fighter_jet'
+            ? 1.78
+            : v.kind === 'helicopter'
+              ? 1.65
+              : v.kind === 'boat'
+                ? 1.55
+                : 1.38;
+        _camGoal.set(v.x + fwdX * 0.48, v.y + cockpitY, v.z + fwdZ * 0.48);
         _lookGoal.set(
-          _camGoal.x + Math.sin(this.camYaw) * 12,
+          _camGoal.x + Math.sin(this.camYaw) * 14,
           _camGoal.y - Math.sin(this.camPitch) * 8,
-          _camGoal.z + Math.cos(this.camYaw) * 12
+          _camGoal.z + Math.cos(this.camYaw) * 14
         );
       } else {
         _camGoal.set(px, py + 1.56, pz);
@@ -3511,11 +4930,14 @@ export class ViceEngine {
     } else {
       // Third Person or Far Third Person
       const isFar = this.cameraMode === 'third_person_far';
-      const isPlane = this.currentVehicle?.kind === 'plane';
-      const baseDist = isPlane
+      const isAircraft =
+        this.currentVehicle?.kind === 'plane' ||
+        this.currentVehicle?.kind === 'helicopter' ||
+        this.currentVehicle?.kind === 'fighter_jet';
+      const baseDist = isAircraft
         ? isFar
-          ? 17.5
-          : 12.5
+          ? 18.5
+          : 13.0
         : this.currentVehicle
           ? isFar
             ? 10.5
@@ -3525,10 +4947,10 @@ export class ViceEngine {
             : isAiming
               ? 2.5
               : 4.1;
-      const baseHeight = isPlane
+      const baseHeight = isAircraft
         ? isFar
-          ? 5.8
-          : 4.0
+          ? 6.2
+          : 4.3
         : this.currentVehicle
           ? isFar
             ? 4.2
@@ -3647,9 +5069,10 @@ export class ViceEngine {
 
     const { aabbs, circles } = this.queryNearbyColliders(x - radius - 2, x + radius + 2, z - radius - 2, z + radius + 2);
 
-    // 1. Solid AABB Colliders (Buildings, Shop Walls, Counters, Bridge Guardrails)
+    // 1. Solid AABB Colliders (Buildings, Shop Walls, Counters, Bridge Guardrails, Overpass Columns)
     for (const c of aabbs) {
       if (entityY > c.height + 0.15) continue;
+      if (c.minY !== undefined && entityY + 1.65 < c.minY) continue;
       const closestX = THREE.MathUtils.clamp(rx, c.minX, c.maxX);
       const closestZ = THREE.MathUtils.clamp(rz, c.minZ, c.maxZ);
       const dx = rx - closestX;
@@ -3754,11 +5177,37 @@ export class ViceEngine {
     return { x: rx, z: rz, collided, hitX, hitZ };
   }
 
-  private getGroundHeightAt(x: number, z: number): number {
+  private getGroundHeightAt(x: number, z: number, curY = 0): number {
     let maxH = getBridgeElevationAt(x, z);
-    // Marina wooden piers allow walking over harbor water (x: 204..284, z: 240 & z: 278)
-    if (x >= 204 && x <= 284 && ((z >= 234.5 && z <= 245.5) || (z >= 272.5 && z <= 283.5))) {
-      maxH = Math.max(maxH, 0.52);
+    const overpassH = getOverpassDeckHeightAt(x, z, curY);
+    if (overpassH !== null) maxH = Math.max(maxH, overpassH);
+    const underpassH = getUnderpassFloorHeightAt(x, z, curY);
+    if (underpassH !== null) maxH = Math.min(maxH, underpassH);
+
+    // Walkable multi-floor interior slabs, balconies & rooftops
+    for (const fs of this.floorSurfaces) {
+      if (x >= fs.minX && x <= fs.maxX && z >= fs.minZ && z <= fs.maxZ) {
+        const minSupportY = fs.minY ?? fs.height - 0.8;
+        if (curY >= minSupportY - 0.7) {
+          maxH = Math.max(maxH, fs.height);
+        }
+      }
+    }
+
+    // Working 3D building elevators
+    for (const el of this.elevators) {
+      if (Math.hypot(x - el.x, z - el.z) <= el.radius && curY >= el.currentY - 1.3) {
+        maxH = Math.max(maxH, el.currentY);
+      }
+    }
+
+    // Marina wooden piers allow walking over harbor water
+    if (
+      x >= 550 &&
+      x <= 770 &&
+      (Math.abs(z - 700) <= 6.2 || Math.abs(z - 840) <= 6.2 || Math.abs(z - 960) <= 6.2)
+    ) {
+      maxH = Math.max(maxH, 0.6);
     }
     for (const r of this.ramps) {
       const dx = x - r.x;
@@ -3787,16 +5236,37 @@ export class ViceEngine {
       blips.push({
         x: shop.x,
         z: shop.z,
-        type: 'shop',
+        type: shop.category === 'shooting_range' ? 'shooting_range' : 'shop',
         label: shop.name,
         shopCategory: shop.category,
         color: shop.color,
+      });
+    }
+    for (const lot of PARKING_LOTS) {
+      blips.push({
+        x: lot.x,
+        z: lot.z,
+        type: 'parking',
+        label: lot.name,
       });
     }
     for (const mb of this.missionStartBeacons) {
       if (mb.group.visible) {
         blips.push({ x: mb.mission.startX, z: mb.mission.startZ, type: 'mission', label: mb.mission.title });
       }
+    }
+    for (const sm of SIDE_DISCOVERY_MISSIONS) {
+      if (this.discoveredSideMissions.has(sm.id)) {
+        blips.push({ x: sm.startX, z: sm.startZ, type: 'side_mission', label: sm.title });
+      }
+    }
+    for (const vis of this.remotePlayers.values()) {
+      blips.push({
+        x: vis.root.position.x,
+        z: vis.root.position.z,
+        type: 'friend',
+        label: vis.state.displayName,
+      });
     }
     for (const npc of this.npcs) {
       if (!npc.alive) continue;
@@ -3813,9 +5283,15 @@ export class ViceEngine {
             ? 'boat'
             : v.kind === 'plane'
               ? 'plane'
-              : v.kind === 'motorcycle'
-                ? 'motorcycle'
-                : 'vehicle';
+              : v.kind === 'helicopter'
+                ? 'helicopter'
+                : v.kind === 'fighter_jet'
+                  ? 'fighter_jet'
+                  : v.kind === 'taxi'
+                    ? 'taxi'
+                    : v.kind === 'motorcycle'
+                      ? 'motorcycle'
+                      : 'vehicle';
         blips.push({ x: v.x, z: v.z, type: bType, label: `${v.brand} ${v.name}` });
       }
     }
@@ -3836,6 +5312,13 @@ export class ViceEngine {
     const gpsRoute = gpsTarget ? computeGpsRoute(px, pz, gpsTarget.x, gpsTarget.z) : [];
     const gpsDistanceM = gpsTarget ? Math.round(Math.hypot(gpsTarget.x - px, gpsTarget.z - pz)) : 0;
 
+    const vehicleHealthPct = this.currentVehicle
+      ? Math.max(0, Math.round((this.currentVehicle.health / Math.max(1, this.currentVehicle.maxHealth)) * 100))
+      : 100;
+    const nearbyTuningAvailable = SHOPS.some(
+      (s) => s.category === 'garage' && Math.hypot(s.doorX - px, s.doorZ - pz) < 9.5
+    );
+
     this.callbacks.onTelemetry({
       fps: this.currentFps,
       health: Math.round(ch.health),
@@ -3844,18 +5327,39 @@ export class ViceEngine {
       maxArmor: ch.maxArmor,
       stamina: Math.round(this.playerStamina),
       cash: Math.round(this.cash),
+      skills: { ...ch.skills },
       wantedStars: this.wantedStars,
       wantedEvading: this.wantedEvading,
       evasionProgress: Math.round(this.evasionProgress),
+      policeDispatchTimer: Math.max(0, Math.ceil(this.policeDispatchTimer)),
+      policeDispatchReason: this.policeDispatchReason,
+      autoAimLocked: this.autoAimLocked,
       inVehicle: Boolean(this.currentVehicle),
       vehicleKind: this.currentVehicle?.kind ?? null,
       vehicleBrand: this.currentVehicle?.brand || '',
       vehicleName: this.currentVehicle?.name || '',
+      vehicleHealthPct,
+      vehicleBurning: Boolean(this.currentVehicle && this.currentVehicle.health < this.currentVehicle.maxHealth * 0.25),
+      nearbyRepairCost: this.getNearbyRepairCost(),
+      nearbyTuningAvailable,
       speedKmh: this.currentVehicle ? Math.round(Math.abs(this.currentVehicle.speed) * 3.6) : 0,
       altitudeM: Math.max(0, Math.round(this.currentVehicle ? this.currentVehicle.y : py)),
       inWater: isWaterAt(px, pz) && py < 0.2,
-      handbrake: Boolean(this.currentVehicle && inp.jumpHeld),
+      handbrake: Boolean(this.currentVehicle && inp.handbrakeHeld),
       isDrifting: Boolean(this.currentVehicle?.isDrifting),
+      taxiMode: this.taxiMode,
+      taxiFareCash: this.taxiFareCash,
+      taxiDestinationLabel: this.taxiDestinationLabel,
+      hangarCount: this.savedGarage.hangarVehicles.length,
+      garageCount: this.savedGarage.safehouseVehicles.length,
+      parkedFacilityNotice: this.parkedFacilityNotice,
+      hasParachute: Boolean(this.inventory.hasParachute),
+      parachuteDeployed: this.parachuteDeployed,
+      godModeActive: this.godModeActive,
+      gameClockStr: this.getGameClockString(),
+      gameTimeNormalized: this.gameTimeNormalized,
+      cloudCoverage: this.cloudCoverage,
+      controlCategory: this.getControlCategoryForVehicle(this.currentVehicle),
       equippedWeapon: this.inventory.equippedWeapon,
       ammoInClip: owned?.ammoInClip ?? 0,
       reserveAmmo: owned?.reserveAmmo ?? 0,
@@ -3864,11 +5368,14 @@ export class ViceEngine {
       cameraMode: this.cameraMode,
       district: ch.district,
       nearbyPrompt,
+      activeSidePrompt: this.activeSidePrompt,
       activeMissionTitle: this.activeMission?.title ?? null,
       activeObjectiveLabel: stage?.label ?? null,
       missionTimerRemaining:
         this.missionTimerRemaining !== null ? Math.max(0, Math.ceil(this.missionTimerRemaining)) : null,
       missionNotification: this.missionNotification,
+      activeCutscene: this.activeCutscene,
+      remotePlayersCount: this.remotePlayers.size,
       controllerConnected: inp.controllerConnected,
       controllerType: inp.controllerType,
       controllerName: inp.controllerName,

@@ -1,10 +1,11 @@
 import React from 'react';
-import { CheckCircle2, Lock, MapPin, Navigation, Play, Square, X } from 'lucide-react';
+import { CheckCircle2, Clock, Compass, Lock, MapPin, Navigation, Play, Square, X } from 'lucide-react';
 import { MissionProgressRecord } from '../types/game';
-import { isMissionUnlocked, MISSIONS } from '../data/defaults';
+import { isMissionUnlocked, MISSIONS, SIDE_DISCOVERY_MISSIONS } from '../data/defaults';
 
 interface MissionsModalProps {
   missionsProgress: Record<string, MissionProgressRecord>;
+  discoveredSideIds: string[];
   activeMissionId: string | null;
   accentColor: string;
   onStartMission: (missionId: string) => void;
@@ -15,6 +16,7 @@ interface MissionsModalProps {
 
 export const MissionsModal: React.FC<MissionsModalProps> = ({
   missionsProgress,
+  discoveredSideIds,
   activeMissionId,
   accentColor,
   onStartMission,
@@ -23,6 +25,7 @@ export const MissionsModal: React.FC<MissionsModalProps> = ({
   onClose,
 }) => {
   const orderedMissions = [...MISSIONS].sort((a, b) => a.storyOrder - b.storyOrder);
+  const discoveredSides = SIDE_DISCOVERY_MISSIONS.filter((sm) => discoveredSideIds.includes(sm.id));
 
   return (
     <div className="fixed inset-0 z-30 flex items-center justify-center bg-slate-950/80 p-6">
@@ -31,7 +34,7 @@ export const MissionsModal: React.FC<MissionsModalProps> = ({
           <div>
             <h2 className="font-display text-2xl font-bold text-white">Príbeh a misie Leonidy</h2>
             <p className="text-xs text-slate-400">
-              Dokonči aktuálnu kapitolu pre odomknutie ďalšej časti príbehu alebo si zapni GPS trasu k začiatku.
+              {MISSIONS.length} hlavných kapitol s postupnou náročnosťou a tajné objavy na ostrove.
             </p>
           </div>
           <button
@@ -66,10 +69,30 @@ export const MissionsModal: React.FC<MissionsModalProps> = ({
                     <span className="font-mono-tabular text-emerald-400 font-semibold">
                       Odmena ${m.rewardCash.toLocaleString('sk-SK')}
                     </span>
-                    {m.timeLimitSec && (
+                    {m.difficulty && (
                       <>
                         <span>·</span>
-                        <span>Limit {m.timeLimitSec}s</span>
+                        <span
+                          className={
+                            m.difficulty === 'Extrémna'
+                              ? 'text-rose-400 font-semibold'
+                              : m.difficulty === 'Ťažká'
+                                ? 'text-amber-300 font-semibold'
+                                : m.difficulty === 'Stredná'
+                                  ? 'text-sky-300'
+                                  : 'text-slate-300'
+                          }
+                        >
+                          {m.difficulty}
+                        </span>
+                      </>
+                    )}
+                    {m.estimatedMinutes && (
+                      <>
+                        <span>·</span>
+                        <span className="inline-flex items-center gap-1 text-slate-300">
+                          <Clock className="w-3 h-3" /> {m.estimatedMinutes}
+                        </span>
                       </>
                     )}
                     {isDone && (
@@ -77,7 +100,7 @@ export const MissionsModal: React.FC<MissionsModalProps> = ({
                         <span>·</span>
                         <span className="inline-flex items-center gap-1 text-emerald-400">
                           <CheckCircle2 className="w-3.5 h-3.5" />
-                          Splnené {prog.completedCount}× (najlepší čas {prog.bestTimeSec}s)
+                          Splnené {prog.completedCount}× ({prog.bestTimeSec}s)
                         </span>
                       </>
                     )}
@@ -145,6 +168,78 @@ export const MissionsModal: React.FC<MissionsModalProps> = ({
               </div>
             );
           })}
+
+          {/* Discovered Side Missions */}
+          <div className="pt-3 border-t border-white/10 space-y-3">
+            <div className="text-xs font-semibold uppercase tracking-wider text-purple-300 flex items-center gap-1.5">
+              <Compass className="w-4 h-4" />
+              Objavené tajné vedľajšie misie ({discoveredSides.length}/{SIDE_DISCOVERY_MISSIONS.length})
+            </div>
+            {discoveredSides.length === 0 ? (
+              <div className="p-4 rounded-xl bg-slate-900/50 border border-white/8 text-xs text-slate-400">
+                Preskúmaj 15× ostrov (lesné chodníky, maják, vraky, letisko, prístav) — objavené tajné misie sa zobrazia tu.
+              </div>
+            ) : (
+              discoveredSides.map((sm) => {
+                const prog = missionsProgress[sm.id];
+                const isRunning = activeMissionId === sm.id;
+                const isDone = (prog?.completedCount ?? 0) > 0;
+                return (
+                  <div
+                    key={sm.id}
+                    className="p-4 rounded-xl bg-slate-900/65 border border-purple-400/25 flex flex-col md:flex-row md:items-center justify-between gap-3"
+                  >
+                    <div className="space-y-1">
+                      <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
+                        <span className="text-purple-300 font-semibold">Tajný objav</span>
+                        <span>·</span>
+                        <span className="font-mono-tabular text-emerald-400 font-semibold">
+                          ${sm.rewardCash.toLocaleString('sk-SK')}
+                        </span>
+                        {sm.estimatedMinutes && (
+                          <>
+                            <span>·</span>
+                            <span>{sm.estimatedMinutes}</span>
+                          </>
+                        )}
+                        {isDone && (
+                          <>
+                            <span>·</span>
+                            <span className="text-emerald-400">Splnené {prog.completedCount}×</span>
+                          </>
+                        )}
+                      </div>
+                      <h4 className="font-display text-base font-bold text-white">{sm.title}</h4>
+                      <p className="text-xs text-slate-300">{sm.subtitle}</p>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        onClick={() => {
+                          onNavigateGps(sm.startX, sm.startZ, sm.title);
+                          onClose();
+                        }}
+                        className="px-3 py-2 rounded-lg text-xs font-medium bg-slate-800 text-sky-300 hover:bg-slate-700 flex items-center gap-1"
+                      >
+                        <Navigation className="w-3.5 h-3.5" /> GPS
+                      </button>
+                      {!isRunning && (
+                        <button
+                          onClick={() => {
+                            onStartMission(sm.id);
+                            onClose();
+                          }}
+                          className="px-3.5 py-2 rounded-lg text-xs font-semibold text-slate-950 flex items-center gap-1"
+                          style={{ backgroundColor: accentColor }}
+                        >
+                          <Play className="w-3.5 h-3.5" /> Spustiť
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
         </div>
       </div>
     </div>

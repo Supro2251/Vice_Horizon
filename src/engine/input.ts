@@ -1,13 +1,23 @@
-import { ControlSettings, GamepadButtonAction, KeyAction } from '../types/game';
+import {
+  ControlSettings,
+  GamepadButtonAction,
+  KeyAction,
+  StickControlConfig,
+  VehicleControlCategory,
+} from '../types/game';
 import { DEFAULT_SETTINGS } from '../data/defaults';
 
 export interface InputFrameState {
   moveX: number; // -1 left, +1 right
   moveY: number; // -1 back, +1 forward
-  leftStickX: number; // -1..1 raw analog/keyboard fallback
+  leftStickX: number; // -1..1 analog + keyboard fallback
   leftStickY: number; // -1..1
   rightStickX: number; // -1..1
   rightStickY: number; // -1..1
+  padLeftStickX: number; // -1..1 raw gamepad stick only (up = +1, down = -1)
+  padLeftStickY: number; // -1..1 raw gamepad stick only
+  padRightStickX: number; // -1..1 raw gamepad stick only
+  padRightStickY: number; // -1..1 raw gamepad stick only
   lookDeltaX: number;
   lookDeltaY: number;
   throttle: number; // 0..1
@@ -15,6 +25,7 @@ export interface InputFrameState {
   sprint: boolean;
   jumpPressed: boolean;
   jumpHeld: boolean;
+  handbrakeHeld: boolean;
   shootHeld: boolean;
   shootPressed: boolean;
   aimHeld: boolean;
@@ -28,6 +39,7 @@ export interface InputFrameState {
   l3Pressed: boolean;
   pitchUpHeld: boolean;
   pitchDownHeld: boolean;
+  stickConfig: StickControlConfig;
   controllerConnected: boolean;
   controllerType: 'playstation' | 'xbox' | 'none';
   controllerName: string;
@@ -97,6 +109,10 @@ export function formatKeyCode(code: string): string {
   if (code === 'Mouse1') return 'MMB';
   if (code === 'Space') return 'Medzerník';
   if (code === 'ShiftLeft' || code === 'ShiftRight') return 'Shift';
+  if (code === 'ArrowUp') return '↑';
+  if (code === 'ArrowDown') return '↓';
+  if (code === 'ArrowLeft') return '←';
+  if (code === 'ArrowRight') return '→';
   if (code.startsWith('Key')) return code.slice(3);
   if (code.startsWith('Digit')) return code.slice(5);
   return code;
@@ -115,6 +131,7 @@ export class InputManager {
   public isPointerLocked = false;
   public paused = false;
   public inAircraft = false;
+  public controlCategory: VehicleControlCategory = 'foot';
 
   // Callbacks for global modal triggers
   public onActionTriggered?: (
@@ -129,6 +146,7 @@ export class InputManager {
       | 'quickHeal'
       | 'quickArmor'
       | 'toggleDock'
+      | 'phone'
   ) => void;
 
   private boundKeyDown: (e: KeyboardEvent) => void;
@@ -145,24 +163,27 @@ export class InputManager {
       if (this.paused) return;
       this.keysDown.add(e.code);
 
-      if (e.code === this.settings.keyBindings.inventory) {
+      if (e.code === this.getKeyBinding('inventory')) {
         e.preventDefault();
         this.onActionTriggered?.('inventory');
-      } else if (e.code === this.settings.keyBindings.characterWheel) {
+      } else if (e.code === this.getKeyBinding('characterWheel')) {
         e.preventDefault();
         this.onActionTriggered?.('characterWheel');
-      } else if (e.code === this.settings.keyBindings.wardrobe) {
+      } else if (e.code === this.getKeyBinding('wardrobe')) {
         e.preventDefault();
         this.onActionTriggered?.('wardrobe');
-      } else if (e.code === this.settings.keyBindings.missions) {
+      } else if (e.code === this.getKeyBinding('missions')) {
         e.preventDefault();
         this.onActionTriggered?.('missions');
-      } else if (e.code === this.settings.keyBindings.openMap) {
+      } else if (e.code === this.getKeyBinding('openMap')) {
         e.preventDefault();
         this.onActionTriggered?.('openMap');
-      } else if (e.code === this.settings.keyBindings.toggleDock) {
+      } else if (e.code === this.getKeyBinding('toggleDock')) {
         e.preventDefault();
         this.onActionTriggered?.('toggleDock');
+      } else if (e.code === this.getKeyBinding('phone')) {
+        e.preventDefault();
+        this.onActionTriggered?.('phone');
       } else if (e.code === 'Digit1') {
         this.onActionTriggered?.('quickHeal');
       } else if (e.code === 'Digit2') {
@@ -254,6 +275,36 @@ export class InputManager {
     this.settings = structuredClone(settings);
   }
 
+  public setControlCategory(cat: VehicleControlCategory) {
+    this.controlCategory = cat;
+  }
+
+  private getKeyBinding(action: KeyAction): string {
+    const override = this.settings.vehicleOverrides?.[this.controlCategory]?.keyBindings?.[action];
+    return override || this.settings.keyBindings[action];
+  }
+
+  private getGamepadBinding(action: GamepadButtonAction): number {
+    const override = this.settings.vehicleOverrides?.[this.controlCategory]?.gamepadBindings?.[action];
+    return override !== undefined ? override : this.settings.gamepadBindings[action];
+  }
+
+  private getStickConfig(): StickControlConfig {
+    const defPitchInvert = this.controlCategory === 'plane' || this.controlCategory === 'fighter_jet';
+    const defYaw: StickControlConfig['yawSource'] =
+      this.controlCategory === 'plane' ||
+      this.controlCategory === 'fighter_jet' ||
+      this.controlCategory === 'helicopter'
+        ? 'bumpers'
+        : 'left_x';
+    const ov = this.settings.vehicleOverrides?.[this.controlCategory]?.stickConfig;
+    return {
+      moveStick: ov?.moveStick ?? 'left',
+      pitchInvert: ov?.pitchInvert ?? defPitchInvert,
+      yawSource: ov?.yawSource ?? defYaw,
+    };
+  }
+
   public clearKeys() {
     this.keysDown.clear();
     this.mouseButtonsDown.clear();
@@ -262,7 +313,7 @@ export class InputManager {
   }
 
   private isKeyBindingDown(action: KeyAction): boolean {
-    const code = this.settings.keyBindings[action];
+    const code = this.getKeyBinding(action);
     if (!code) return false;
     if (code === 'Mouse0') return this.mouseButtonsDown.has(0);
     if (code === 'Mouse1') return this.mouseButtonsDown.has(1);
@@ -300,7 +351,7 @@ export class InputManager {
 
   private isGamepadButtonDown(pad: Gamepad | null, action: GamepadButtonAction): boolean {
     if (!pad) return false;
-    const idx = this.settings.gamepadBindings[action];
+    const idx = this.getGamepadBinding(action);
     if (idx === undefined || idx < 0 || idx >= pad.buttons.length) return false;
     const btn = pad.buttons[idx];
     return btn.pressed || btn.value > 0.35;
@@ -308,7 +359,7 @@ export class InputManager {
 
   private getGamepadTriggerValue(pad: Gamepad | null, action: GamepadButtonAction): number {
     if (!pad) return 0;
-    const idx = this.settings.gamepadBindings[action];
+    const idx = this.getGamepadBinding(action);
     if (idx === undefined || idx < 0 || idx >= pad.buttons.length) return 0;
     return pad.buttons[idx].value ?? (pad.buttons[idx].pressed ? 1 : 0);
   }
@@ -327,36 +378,45 @@ export class InputManager {
     // Handle edge-triggered gamepad menu shortcuts even when paused/unpaused
     if (pad) {
       const checkPadEdge = (btnIdx: number): boolean => {
+        if (btnIdx < 0 || btnIdx >= pad.buttons.length) return false;
         const down = Boolean(pad.buttons[btnIdx]?.pressed);
         const wasDown = this.prevGamepadButtons.get(btnIdx) ?? false;
         this.prevGamepadButtons.set(btnIdx, down);
         return down && !wasDown;
       };
 
-      if (checkPadEdge(this.settings.gamepadBindings.pause)) {
+      if (checkPadEdge(this.getGamepadBinding('pause'))) {
         this.onActionTriggered?.('pause');
       }
       if (!this.paused) {
-        if (!this.inAircraft && checkPadEdge(this.settings.gamepadBindings.inventory)) {
+        if (!this.inAircraft && checkPadEdge(this.getGamepadBinding('inventory'))) {
           this.onActionTriggered?.('inventory');
         }
-        if (!this.inAircraft && checkPadEdge(this.settings.gamepadBindings.characterWheel)) {
+        if (!this.inAircraft && checkPadEdge(this.getGamepadBinding('characterWheel'))) {
           this.onActionTriggered?.('characterWheel');
         }
-        if (checkPadEdge(this.settings.gamepadBindings.openMap)) {
+        if (checkPadEdge(this.getGamepadBinding('openMap'))) {
           this.onActionTriggered?.('openMap');
         }
-        if (checkPadEdge(this.settings.gamepadBindings.toggleDock)) {
+        if (checkPadEdge(this.getGamepadBinding('toggleDock'))) {
           this.onActionTriggered?.('toggleDock');
         }
-        // D-pad up (12) = quick heal, D-pad down (13) = quick armor
-        if (checkPadEdge(12)) this.onActionTriggered?.('quickHeal');
-        if (checkPadEdge(13)) this.onActionTriggered?.('quickArmor');
-        if (this.settings.gamepadBindings.openMap !== 15 && checkPadEdge(15)) {
+        const phoneBtn = this.getGamepadBinding('phone');
+        const mapBtn = this.getGamepadBinding('openMap');
+        const dockBtn = this.getGamepadBinding('toggleDock');
+        if (checkPadEdge(phoneBtn)) {
+          this.onActionTriggered?.('phone');
+        }
+        // Quick heal / armor / weapon cycle only on unbound D-pad directions so nothing collides with GTA 5 phone (D-pad Up 12)
+        if (phoneBtn !== 13 && checkPadEdge(13)) this.onActionTriggered?.('quickArmor');
+        if (phoneBtn !== 12 && checkPadEdge(12)) this.onActionTriggered?.('quickHeal');
+        if (mapBtn !== 15 && dockBtn !== 15 && checkPadEdge(15)) {
           this.onActionTriggered?.('weaponNext');
         }
       }
     }
+
+    const stickConfig = this.getStickConfig();
 
     if (this.paused) {
       this.mouseDeltaX = 0;
@@ -368,6 +428,10 @@ export class InputManager {
         leftStickY: 0,
         rightStickX: 0,
         rightStickY: 0,
+        padLeftStickX: 0,
+        padLeftStickY: 0,
+        padRightStickX: 0,
+        padRightStickY: 0,
         lookDeltaX: 0,
         lookDeltaY: 0,
         throttle: 0,
@@ -375,6 +439,7 @@ export class InputManager {
         sprint: false,
         jumpPressed: false,
         jumpHeld: false,
+        handbrakeHeld: false,
         shootHeld: false,
         shootPressed: false,
         aimHeld: false,
@@ -388,6 +453,7 @@ export class InputManager {
         l3Pressed: false,
         pitchUpHeld: false,
         pitchDownHeld: false,
+        stickConfig,
         controllerConnected,
         controllerType,
         controllerName: pad?.id || '',
@@ -403,19 +469,23 @@ export class InputManager {
     // Movement axes
     let moveX = (this.isKeyBindingDown('moveRight') ? 1 : 0) - (this.isKeyBindingDown('moveLeft') ? 1 : 0);
     let moveY = (this.isKeyBindingDown('moveForward') ? 1 : 0) - (this.isKeyBindingDown('moveBackward') ? 1 : 0);
+    if (this.keysDown.has('ArrowRight')) moveX = Math.max(moveX, 1);
+    if (this.keysDown.has('ArrowLeft')) moveX = Math.min(moveX, -1);
 
     let leftStickX = moveX;
     let leftStickY = moveY;
     let rightStickX = 0;
     let rightStickY = 0;
+    let padLeftStickX = 0;
+    let padLeftStickY = 0;
+    let padRightStickX = 0;
+    let padRightStickY = 0;
 
     if (pad && pad.axes.length >= 2) {
       const lx = applyDz(pad.axes[0]);
-      const ly = applyDz(-pad.axes[1]);
-      if (Math.abs(lx) > Math.abs(moveX)) moveX = lx;
-      if (Math.abs(ly) > Math.abs(moveY)) moveY = ly;
-      if (Math.abs(lx) > Math.abs(leftStickX)) leftStickX = lx;
-      if (Math.abs(ly) > Math.abs(leftStickY)) leftStickY = ly;
+      const ly = applyDz(-pad.axes[1]); // up = +1, down = -1
+      padLeftStickX = lx;
+      padLeftStickY = ly;
     }
 
     // Look delta
@@ -428,10 +498,26 @@ export class InputManager {
     if (pad && pad.axes.length >= 4) {
       const rx = applyDz(pad.axes[2]);
       const ry = applyDz(pad.axes[3]);
+      padRightStickX = rx;
+      padRightStickY = -ry; // up = +1, down = -1
       rightStickX = rx;
       rightStickY = -ry;
-      lookDeltaX += rx * 2.6 * this.settings.gamepadSensitivity * dt;
-      lookDeltaY += ry * 2.1 * this.settings.gamepadSensitivity * dt * ySign;
+    }
+
+    // Apply per-vehicle primary stick selection (left vs right stick for movement/steering)
+    const activeAnalogX = stickConfig.moveStick === 'right' ? padRightStickX : padLeftStickX;
+    const activeAnalogY = stickConfig.moveStick === 'right' ? padRightStickY : padLeftStickY;
+    const camStickX = stickConfig.moveStick === 'right' ? padLeftStickX : padRightStickX;
+    const camStickY = stickConfig.moveStick === 'right' ? -padLeftStickY : -padRightStickY;
+
+    if (Math.abs(activeAnalogX) > Math.abs(moveX)) moveX = activeAnalogX;
+    if (Math.abs(activeAnalogY) > Math.abs(moveY)) moveY = activeAnalogY;
+    if (Math.abs(padLeftStickX) > Math.abs(leftStickX)) leftStickX = padLeftStickX;
+    if (Math.abs(padLeftStickY) > Math.abs(leftStickY)) leftStickY = padLeftStickY;
+
+    if (!this.inAircraft || stickConfig.moveStick === 'left') {
+      lookDeltaX += camStickX * 2.6 * this.settings.gamepadSensitivity * dt;
+      lookDeltaY += camStickY * 2.1 * this.settings.gamepadSensitivity * dt * ySign;
     }
 
     // Triggers & Actions
@@ -445,9 +531,10 @@ export class InputManager {
     const sprint =
       this.isKeyBindingDown('sprint') ||
       this.isGamepadButtonDown(pad, 'sprint') ||
-      l3Down;
+      (this.controlCategory === 'foot' && l3Down);
     const jumpHeld = this.isKeyBindingDown('jump') || this.isGamepadButtonDown(pad, 'jump');
-    const shootHeld = this.isKeyBindingDown('shoot') || r2Val > 0.4;
+    const handbrakeHeld = jumpHeld || (this.controlCategory === 'car' || this.controlCategory === 'motorcycle' ? Boolean(pad && pad.buttons[5]?.pressed) : false);
+    const shootHeld = this.isKeyBindingDown('shoot') || (this.getGamepadBinding('shoot') === 7 ? r2Val > 0.4 : this.isGamepadButtonDown(pad, 'shoot'));
     const aimHeld = this.isKeyBindingDown('aim') || l2Val > 0.4;
     const reloadDown = this.isKeyBindingDown('reload') || this.isGamepadButtonDown(pad, 'reload');
     const enterDown = this.isKeyBindingDown('enterVehicle') || this.isGamepadButtonDown(pad, 'enterVehicle');
@@ -457,11 +544,11 @@ export class InputManager {
     const carjackModifier = shiftHeld || Boolean(pad && pad.buttons[4]?.pressed);
     const dedicatedCarjackDown = this.keysDown.has('KeyG');
 
-    // Touchpad (17) or Share (8) also cycles camera on PS4/PS5 controllers
+    const camPadBtn = this.getGamepadBinding('switchCamera');
     const camDown =
       this.isKeyBindingDown('switchCamera') ||
       this.isGamepadButtonDown(pad, 'switchCamera') ||
-      Boolean(pad && pad.buttons[8]?.pressed);
+      (camPadBtn === 17 && Boolean(pad && pad.buttons[8]?.pressed));
     const hornHeld = this.isKeyBindingDown('horn') || l3Down;
 
     const pitchUpHeld = this.keysDown.has('ArrowUp');
@@ -485,6 +572,10 @@ export class InputManager {
       leftStickY: Math.max(-1, Math.min(1, leftStickY)),
       rightStickX: Math.max(-1, Math.min(1, rightStickX)),
       rightStickY: Math.max(-1, Math.min(1, rightStickY)),
+      padLeftStickX: Math.max(-1, Math.min(1, padLeftStickX)),
+      padLeftStickY: Math.max(-1, Math.min(1, padLeftStickY)),
+      padRightStickX: Math.max(-1, Math.min(1, padRightStickX)),
+      padRightStickY: Math.max(-1, Math.min(1, padRightStickY)),
       lookDeltaX,
       lookDeltaY,
       throttle,
@@ -492,6 +583,7 @@ export class InputManager {
       sprint,
       jumpPressed: edge('jump', jumpHeld),
       jumpHeld,
+      handbrakeHeld,
       shootHeld,
       shootPressed: edge('shoot', shootHeld),
       aimHeld,
@@ -505,6 +597,7 @@ export class InputManager {
       l3Pressed: edge('l3', l3Down),
       pitchUpHeld,
       pitchDownHeld,
+      stickConfig,
       controllerConnected,
       controllerType,
       controllerName: pad?.id || '',

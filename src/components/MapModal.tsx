@@ -12,6 +12,8 @@ import { isMissionUnlocked, MISSIONS, SHOPS } from '../data/defaults';
 import {
   BRIDGE_SPANS,
   getIslandOutlinePoints,
+  OVERPASS_SPANS,
+  PARKING_LOTS,
   RoadSegmentDef,
 } from '../engine/navigation';
 import { drawShopMapIcon } from '../engine/mapIcons';
@@ -28,9 +30,9 @@ interface MapModalProps {
   onClose: () => void;
 }
 
-const WORLD_MIN = -455;
-const WORLD_MAX = 455;
-const ISLAND_COAST = getIslandOutlinePoints(120);
+const WORLD_MIN = -1820;
+const WORLD_MAX = 1820;
+const ISLAND_COAST = getIslandOutlinePoints(140);
 
 type HoveredPoi =
   | { kind: 'shop'; shop: ShopDef; screenX: number; screenY: number }
@@ -119,43 +121,54 @@ export const MapModal: React.FC<MapModalProps> = ({
     ctx.fill();
 
     // Northern foothills green parks
-    const foothill = worldToCanvas(-25, -268, w, h);
+    const foothill = worldToCanvas(0, -1040, w, h);
     ctx.fillStyle = '#1d3629';
     ctx.beginPath();
-    ctx.ellipse(foothill.x, foothill.y, 175 * scale, 52 * scale, 0, 0, Math.PI * 2);
+    ctx.ellipse(foothill.x, foothill.y, 760 * scale, 220 * scale, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    // 4. Vice Canal (x: -108..425, z: 124..152)
-    const canalTL = worldToCanvas(-108, 124, w, h);
+    // 4. Vice Canal (x: -340..1560, z: 392..468) & North Emerald River (x: -820..860, z: -815..-765)
+    const canalTL = worldToCanvas(-340, 392, w, h);
     ctx.fillStyle = '#0369a1';
-    ctx.fillRect(canalTL.x, canalTL.y, (425 - -108) * scale, 28 * scale);
+    ctx.fillRect(canalTL.x, canalTL.y, 1900 * scale, 76 * scale);
+    const northRiverTL = worldToCanvas(-820, -815, w, h);
+    ctx.fillRect(northRiverTL.x, northRiverTL.y, 1680 * scale, 50 * scale);
 
-    // 5. Marina Harbor Basin (x: 208..395, z: 215..315)
-    const marinaTL = worldToCanvas(208, 215, w, h);
+    // 5. Marina Harbor Basin (x: 560..1280, z: 620..1120)
+    const marinaTL = worldToCanvas(560, 620, w, h);
     ctx.fillStyle = '#0369a1';
-    ctx.fillRect(marinaTL.x, marinaTL.y, (395 - 208) * scale, (315 - 215) * scale);
+    ctx.fillRect(marinaTL.x, marinaTL.y, 720 * scale, 500 * scale);
 
     // Marina Wooden Piers
     ctx.fillStyle = '#7c5838';
-    const pier1 = worldToCanvas(204, 234.5, w, h);
-    ctx.fillRect(pier1.x, pier1.y, 80 * scale, 11 * scale);
-    const pier2 = worldToCanvas(204, 272.5, w, h);
-    ctx.fillRect(pier2.x, pier2.y, 80 * scale, 11 * scale);
+    const pier1 = worldToCanvas(550, 668, w, h);
+    ctx.fillRect(pier1.x, pier1.y, 175 * scale, 22 * scale);
+    const pier2 = worldToCanvas(550, 745, w, h);
+    ctx.fillRect(pier2.x, pier2.y, 175 * scale, 22 * scale);
 
-    // 6. Airport Runway (x: -295..-153, z: 224..246)
-    const runwayTL = worldToCanvas(-295, 224, w, h);
+    // 6. Bayshore International Airport Runways (-1350..-570, z: 774..806 & z: 906..934)
+    const runway1TL = worldToCanvas(-1350, 774, w, h);
     ctx.fillStyle = '#0f172a';
-    ctx.fillRect(runwayTL.x, runwayTL.y, 142 * scale, 22 * scale);
+    ctx.fillRect(runway1TL.x, runway1TL.y, 780 * scale, 32 * scale);
+    const runway2TL = worldToCanvas(-1320, 906, w, h);
+    ctx.fillRect(runway2TL.x, runway2TL.y, 720 * scale, 28 * scale);
     ctx.strokeStyle = '#e2e8f0';
     ctx.lineWidth = 1;
-    ctx.setLineDash([6, 6]);
+    ctx.setLineDash([5, 5]);
     ctx.beginPath();
-    ctx.moveTo(runwayTL.x + 6, runwayTL.y + 11 * scale);
-    ctx.lineTo(runwayTL.x + 142 * scale - 6, runwayTL.y + 11 * scale);
+    ctx.moveTo(runway1TL.x + 4, runway1TL.y + 16 * scale);
+    ctx.lineTo(runway1TL.x + 780 * scale - 4, runway1TL.y + 16 * scale);
     ctx.stroke();
     ctx.setLineDash([]);
 
-    // 7. Curved Road Network & Highways
+    // Parking Lots
+    ctx.fillStyle = '#1e293b';
+    for (const lot of PARKING_LOTS) {
+      const lp = worldToCanvas(lot.x - lot.width * 0.5, lot.z - lot.depth * 0.5, w, h);
+      ctx.fillRect(lp.x, lp.y, lot.width * scale, lot.depth * scale);
+    }
+
+    // 7. Curved Road Network, Dirt Trails & Highways
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     for (const seg of roadSegments) {
@@ -167,46 +180,52 @@ export const MapModal: React.FC<MapModalProps> = ({
         else ctx.lineTo(c.x, c.y);
       });
       if (seg.closed) ctx.closePath();
-      ctx.strokeStyle = seg.isHighway ? '#3a4a63' : '#263348';
-      ctx.lineWidth = Math.max(2, seg.width * scale);
+      ctx.strokeStyle = seg.isDirtTrail ? '#5c4936' : seg.isHighway ? '#3a4a63' : '#263348';
+      ctx.lineWidth = Math.max(1.5, seg.width * scale);
       ctx.stroke();
 
       if (seg.isHighway) {
         ctx.strokeStyle = 'rgba(245, 158, 11, 0.35)';
-        ctx.lineWidth = 1.2;
+        ctx.lineWidth = 1.0;
         ctx.stroke();
       }
     }
 
-    // Bridge Decks over Vice Canal
+    // Bridge Decks & Overpasses
     for (const b of BRIDGE_SPANS) {
       const bp = worldToCanvas(b.x - b.width * 0.5, b.zStart, w, h);
       ctx.fillStyle = '#5a6b82';
-      ctx.fillRect(bp.x, bp.y, b.width * scale, (b.zEnd - b.zStart) * scale);
+      ctx.fillRect(bp.x, bp.y, Math.max(2, b.width * scale), (b.zEnd - b.zStart) * scale);
+    }
+    for (const ov of OVERPASS_SPANS) {
+      const ox = ov.axis === 'x' ? ov.centerX - ov.length * 0.5 : ov.centerX - ov.width * 0.5;
+      const oz = ov.axis === 'x' ? ov.centerZ - ov.width * 0.5 : ov.centerZ - ov.length * 0.5;
+      const ow = ov.axis === 'x' ? ov.length : ov.width;
+      const od = ov.axis === 'x' ? ov.width : ov.length;
+      const op = worldToCanvas(ox, oz, w, h);
+      ctx.fillStyle = '#64748b';
+      ctx.fillRect(op.x, op.y, Math.max(2, ow * scale), Math.max(2, od * scale));
     }
 
     // 8. Buildings
     for (const b of buildingFootprints) {
       const p = worldToCanvas(b.x - b.w / 2, b.z - b.d / 2, w, h);
       ctx.fillStyle = '#3b4a62';
-      ctx.fillRect(p.x, p.y, Math.max(1.5, b.w * scale), Math.max(1.5, b.d * scale));
-      ctx.strokeStyle = 'rgba(255,255,255,0.06)';
-      ctx.lineWidth = 0.5;
-      ctx.strokeRect(p.x, p.y, Math.max(1.5, b.w * scale), Math.max(1.5, b.d * scale));
+      ctx.fillRect(p.x, p.y, Math.max(1.2, b.w * scale), Math.max(1.2, b.d * scale));
     }
 
     // District Labels
     ctx.font = '700 10px Inter, sans-serif';
-    ctx.fillStyle = 'rgba(226,232,240,0.48)';
+    ctx.fillStyle = 'rgba(226,232,240,0.5)';
     ctx.textAlign = 'center';
     const labels: [string, number, number][] = [
-      ['DOWNTOWN CORE', -45, -70],
-      ['CORAL STRIP', 175, -60],
-      ['NORTH HEIGHTS', 10, -278],
-      ['BAYSHORE AIRPORT', -224, 260],
-      ['MARINA DOCKS', 248, 256],
-      ['VICE CANAL', 48, 140],
-      ['VICE OCEAN', 385, -320],
+      ['DOWNTOWN CORE', -40, -140],
+      ['CORAL STRIP', 660, -140],
+      ['NORTH HEIGHTS', 20, -1040],
+      ['BAYSHORE AIRPORT', -960, 860],
+      ['MARINA HARBOR', 760, 820],
+      ['VICE CANAL', 420, 430],
+      ['VICE OCEAN', 1420, -1260],
     ];
     for (const [text, lx, lz] of labels) {
       const pt = worldToCanvas(lx, lz, w, h);
@@ -216,7 +235,7 @@ export const MapModal: React.FC<MapModalProps> = ({
     // 9. Active GPS Route Line
     if (telemetry.gpsRoute.length > 1) {
       ctx.strokeStyle = telemetry.activeMissionTitle ? '#f59e0b' : '#38bdf8';
-      ctx.lineWidth = 3.5;
+      ctx.lineWidth = 3.2;
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
       ctx.beginPath();
@@ -228,25 +247,28 @@ export const MapModal: React.FC<MapModalProps> = ({
       ctx.stroke();
     }
 
-    // 10. Vehicle Blips (boats, planes, motorcycles, cars)
+    // 10. Blips (vehicles, aircraft, parking, friends, side missions)
     for (const blip of telemetry.minimapBlips) {
-      if (
-        blip.type !== 'boat' &&
-        blip.type !== 'plane' &&
-        blip.type !== 'motorcycle' &&
-        blip.type !== 'vehicle'
-      ) {
-        continue;
-      }
       const p = worldToCanvas(blip.x, blip.z, w, h);
-      if (blip.type === 'plane') {
-        ctx.fillStyle = '#f8fafc';
+      if (blip.type === 'plane' || blip.type === 'fighter_jet') {
+        ctx.fillStyle = blip.type === 'fighter_jet' ? '#fb7185' : '#f8fafc';
         ctx.beginPath();
         ctx.moveTo(p.x, p.y - 5);
         ctx.lineTo(p.x + 5, p.y + 4);
         ctx.lineTo(p.x - 5, p.y + 4);
         ctx.closePath();
         ctx.fill();
+      } else if (blip.type === 'helicopter') {
+        ctx.fillStyle = '#38bdf8';
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 4.2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(p.x - 5, p.y);
+        ctx.lineTo(p.x + 5, p.y);
+        ctx.stroke();
       } else if (blip.type === 'boat') {
         ctx.fillStyle = '#38bdf8';
         ctx.beginPath();
@@ -256,14 +278,40 @@ export const MapModal: React.FC<MapModalProps> = ({
         ctx.lineTo(p.x - 4, p.y);
         ctx.closePath();
         ctx.fill();
+      } else if (blip.type === 'taxi') {
+        ctx.fillStyle = '#facc15';
+        ctx.fillRect(p.x - 2.5, p.y - 2.5, 5, 5);
       } else if (blip.type === 'motorcycle') {
         ctx.fillStyle = '#c084fc';
         ctx.beginPath();
-        ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+        ctx.arc(p.x, p.y, 2.8, 0, Math.PI * 2);
         ctx.fill();
-      } else {
+      } else if (blip.type === 'parking') {
+        ctx.fillStyle = '#1e40af';
+        ctx.fillRect(p.x - 4.5, p.y - 4.5, 9, 9);
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 7px Inter, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('P', p.x, p.y + 2.5);
+      } else if (blip.type === 'side_mission') {
+        ctx.fillStyle = '#a855f7';
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 5.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+      } else if (blip.type === 'friend') {
+        ctx.fillStyle = '#22c55e';
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 5.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      } else if (blip.type === 'vehicle') {
         ctx.fillStyle = '#94a3b8';
-        ctx.fillRect(p.x - 2, p.y - 2, 4, 4);
+        ctx.fillRect(p.x - 1.8, p.y - 1.8, 3.6, 3.6);
       }
     }
 
@@ -337,10 +385,16 @@ export const MapModal: React.FC<MapModalProps> = ({
     const cy = ((e.clientY - rect.top) / rect.height) * canvas.height;
     const world = canvasToWorld(cx, cy, canvas.width, canvas.height);
 
-    // Snap if clicked close to a Shop
+    // Snap if clicked close to a Shop or Parking Lot
     for (const s of SHOPS) {
-      if (Math.hypot(s.x - world.x, s.z - world.z) < 22) {
+      if (Math.hypot(s.x - world.x, s.z - world.z) < 62) {
         onSetGps(s.doorX, s.doorZ, s.name);
+        return;
+      }
+    }
+    for (const lot of PARKING_LOTS) {
+      if (Math.hypot(lot.x - world.x, lot.z - world.z) < 55) {
+        onSetGps(lot.x, lot.z, lot.name);
         return;
       }
     }
@@ -348,7 +402,7 @@ export const MapModal: React.FC<MapModalProps> = ({
     for (const m of orderedMissions) {
       if (
         isMissionUnlocked(m.id, missionsProgress) &&
-        Math.hypot(m.startX - world.x, m.startZ - world.z) < 24
+        Math.hypot(m.startX - world.x, m.startZ - world.z) < 68
       ) {
         onSetGps(m.startX, m.startZ, m.title);
         return;
@@ -371,13 +425,13 @@ export const MapModal: React.FC<MapModalProps> = ({
     const relY = e.clientY - rect.top;
 
     for (const s of SHOPS) {
-      if (Math.hypot(s.x - world.x, s.z - world.z) < 22) {
+      if (Math.hypot(s.x - world.x, s.z - world.z) < 62) {
         setHoveredPoi({ kind: 'shop', shop: s, screenX: relX, screenY: relY });
         return;
       }
     }
     for (const m of orderedMissions) {
-      if (Math.hypot(m.startX - world.x, m.startZ - world.z) < 24) {
+      if (Math.hypot(m.startX - world.x, m.startZ - world.z) < 68) {
         setHoveredPoi({
           kind: 'mission',
           mission: m,

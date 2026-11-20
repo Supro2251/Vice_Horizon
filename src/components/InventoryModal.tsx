@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { Crosshair, Package, Shield, ShoppingBag, X } from 'lucide-react';
+import { Crosshair, Package, Shield, ShoppingBag, Umbrella, X } from 'lucide-react';
 import { InventoryState, WeaponId } from '../types/game';
-import { WEAPON_CATALOG } from '../data/defaults';
+import { PARACHUTE_PRICE, WEAPON_CATALOG } from '../data/defaults';
 
 interface InventoryModalProps {
   inventory: InventoryState;
@@ -14,6 +14,7 @@ interface InventoryModalProps {
   onChangeWeaponSkin: (id: WeaponId, color: string) => void;
   onUseConsumable: (id: string) => void;
   onBuyConsumable: (id: string) => void;
+  onBuyParachute: () => void;
   onSellContraband: (id: string) => void;
   onClose: () => void;
 }
@@ -37,6 +38,7 @@ export const InventoryModal: React.FC<InventoryModalProps> = ({
   onChangeWeaponSkin,
   onUseConsumable,
   onBuyConsumable,
+  onBuyParachute,
   onSellContraband,
   onClose,
 }) => {
@@ -244,6 +246,36 @@ export const InventoryModal: React.FC<InventoryModalProps> = ({
                   </div>
                 </div>
               ))}
+
+              {/* Tactical Parachute Card */}
+              <div className="p-4 rounded-xl bg-slate-900/60 border border-sky-400/20 flex flex-col justify-between gap-4">
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-sky-400 flex items-center gap-1">
+                      <Umbrella className="w-3.5 h-3.5" /> Letecká výbava
+                    </span>
+                    <span className="font-mono-tabular text-xs font-bold text-white">
+                      {inventory.hasParachute ? 'Vlastníš' : 'Chýba'}
+                    </span>
+                  </div>
+                  <h3 className="font-display text-lg font-bold text-white">Taktický padák</h3>
+                  <p className="text-xs text-slate-400 leading-relaxed">
+                    Umožňuje bezpečný zoskok z lietadiel, vrtuľníkov a mrakodrapov. Aktivuj vo vzduchu klávesom Medzerník.
+                  </p>
+                </div>
+
+                <button
+                  onClick={onBuyParachute}
+                  disabled={inventory.hasParachute || cash < PARACHUTE_PRICE}
+                  className="w-full py-2 px-3 rounded-lg text-xs font-semibold transition-colors disabled:opacity-50"
+                  style={{
+                    backgroundColor: inventory.hasParachute ? 'rgba(16,185,129,0.2)' : accentColor,
+                    color: inventory.hasParachute ? '#34d399' : '#090d16',
+                  }}
+                >
+                  {inventory.hasParachute ? 'Padák vybavený' : `Kúpiť padák ($${PARACHUTE_PRICE})`}
+                </button>
+              </div>
             </div>
           )}
 

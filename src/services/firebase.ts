@@ -9,18 +9,24 @@ import {
 } from 'firebase/auth';
 import {
   collection,
+  deleteDoc,
   doc,
   getDoc,
   getDocFromServer,
   getDocs,
   getFirestore,
+  limit,
+  query,
   serverTimestamp,
+  setDoc,
+  where,
   writeBatch,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 import {
   CharacterId,
   CharacterState,
+  FriendRecord,
   GameSettings,
   GameStats,
   InventoryState,
@@ -102,7 +108,6 @@ export async function testFirestoreConnection(): Promise<boolean> {
       console.error('Firebase configuration offline or unreachable.');
       return false;
     }
-    // Permission denied on nonexistent test/connection still confirms server reachability
     return true;
   }
 }
@@ -118,6 +123,105 @@ export async function signInWithGoogle(): Promise<User> {
 
 export async function signOutUser(): Promise<void> {
   await signOut(auth);
+}
+
+export function computeFriendCode(uid: string): string {
+  return `VH-${uid.slice(0, 6).toUpperCase()}`;
+}
+
+export async function ensurePublicUserCard(user: User): Promise<void> {
+  const uid = user.uid;
+  const displayName = (user.displayName || user.email?.split('@')[0] || 'Hráč').slice(0, 80);
+  const friendCode = computeFriendCode(uid);
+  const emailLower = (user.email || '').trim().toLowerCase().slice(0, 160);
+  try {
+    await setDoc(doc(db, 'publicUsers', uid), {
+      uid,
+      displayName,
+      emailLower,
+      friendCode,
+      updatedAt: serverTimestamp(),
+    });
+  } catch {
+    // non-fatal if unverified
+  }
+}
+
+export async function fetchFriends(user: User): Promise<FriendRecord[]> {
+  try {
+    const snap = await getDocs(collection(db, 'users', user.uid, 'friends'));
+    const list: FriendRecord[] = [];
+    snap.forEach((d) => {
+      const data = d.data();
+      list.push({
+        uid: String(data.uid || d.id),
+        displayName: String(data.displayName || 'Hráč'),
+        email: typeof data.email === 'string' ? data.email : undefined,
+        friendCode: String(data.friendCode || computeFriendCode(d.id)),
+        addedAt: String(data.addedAt || new Date().toISOString()),
+      });
+    });
+    return list;
+  } catch {
+    return [];
+  }
+}
+
+export async function addFriendByQuery(user: User, inputQuery: string): Promise<FriendRecord> {
+  const clean = inputQuery.trim();
+  if (!clean) {
+    throw new Error('Zadaj e-mail alebo kód priateľa (napr. VH-XXXXXX).');
+  }
+  const upper = clean.toUpperCase();
+  const lower = clean.toLowerCase();
+
+  let foundDoc: Record<string, unknown> | null = null;
+  const col = collection(db, 'publicUsers');
+
+  if (upper.startsWith('VH-')) {
+    const q = query(col, where('friendCode', '==', upper), limit(1));
+    const snap = await getDocs(q);
+    if (!snap.empty) foundDoc = snap.docs[0].data();
+  } else if (lower.includes('@')) {
+    const q = query(col, where('emailLower', '==', lower), limit(1));
+    const snap = await getDocs(q);
+    if (!snap.empty) foundDoc = snap.docs[0].data();
+  } else {
+    const byUid = await getDoc(doc(db, 'publicUsers', clean));
+    if (byUid.exists()) foundDoc = byUid.data();
+  }
+
+  if (!foundDoc) {
+    throw new Error('Hráč sa nenašiel. Musí sa aspoň raz prihlásiť do Vice Horizon.');
+  }
+
+  const friendUid = String(foundDoc.uid);
+  if (friendUid === user.uid) {
+    throw new Error('Nemôžeš pridať sám seba do priateľov.');
+  }
+
+  const record: FriendRecord = {
+    uid: friendUid,
+    displayName: String(foundDoc.displayName || 'Kamarát'),
+    email: typeof foundDoc.emailLower === 'string' ? foundDoc.emailLower : undefined,
+    friendCode: String(foundDoc.friendCode || computeFriendCode(friendUid)),
+    addedAt: new Date().toISOString(),
+  };
+
+  await setDoc(doc(db, 'users', user.uid, 'friends', friendUid), {
+    uid: record.uid,
+    ownerId: user.uid,
+    displayName: record.displayName,
+    email: record.email || '',
+    friendCode: record.friendCode,
+    addedAt: record.addedAt,
+  });
+
+  return record;
+}
+
+export async function removeFriend(user: User, friendUid: string): Promise<void> {
+  await deleteDoc(doc(db, 'users', user.uid, 'friends', friendUid));
 }
 
 export interface CloudSavePayload {
@@ -154,6 +258,7 @@ export async function saveGameToCloud(user: User, payload: CloudSavePayload): Pr
       totalEliminations: clamp(Math.round(payload.stats.totalEliminations), 0, 1000000),
       policeEscapes: clamp(Math.round(payload.stats.policeEscapes), 0, 1000000),
       stuntJumps: clamp(Math.round(payload.stats.stuntJumps), 0, 1000000),
+      shootingRangeScore: clamp(Math.round(payload.stats.shootingRangeScore || 0), 0, 10000000),
       updatedAt: serverTimestamp(),
     };
 
@@ -168,6 +273,7 @@ export async function saveGameToCloud(user: User, payload: CloudSavePayload): Pr
         totalEliminations: baseProfile.totalEliminations,
         policeEscapes: baseProfile.policeEscapes,
         stuntJumps: baseProfile.stuntJumps,
+        shootingRangeScore: baseProfile.shootingRangeScore,
         updatedAt: serverTimestamp(),
       });
     }
@@ -179,11 +285,18 @@ export async function saveGameToCloud(user: User, payload: CloudSavePayload): Pr
       batch.set(charRef, {
         id: cid,
         ownerId: uid,
+        cash: clamp(Math.round(ch.cash ?? DEFAULT_CHARACTERS[cid].cash), 0, 999999999),
+        skills: {
+          driving: clamp(Math.round(ch.skills?.driving ?? 50), 0, 100),
+          shooting: clamp(Math.round(ch.skills?.shooting ?? 50), 0, 100),
+          flying: clamp(Math.round(ch.skills?.flying ?? 50), 0, 100),
+          stamina: clamp(Math.round(ch.skills?.stamina ?? 50), 0, 100),
+        },
         health: clamp(ch.health, 0, 200),
         armor: clamp(ch.armor, 0, 200),
-        posX: clamp(ch.posX, -900, 900),
-        posY: clamp(ch.posY, -40, 400),
-        posZ: clamp(ch.posZ, -900, 900),
+        posX: clamp(ch.posX, -2400, 2400),
+        posY: clamp(ch.posY, -60, 1100),
+        posZ: clamp(ch.posZ, -2400, 2400),
         heading: Number.isFinite(ch.heading) ? ch.heading : 0,
         appearance: { ...ch.appearance },
         customOutfits: (ch.customOutfits || []).slice(0, 12),
@@ -195,6 +308,7 @@ export async function saveGameToCloud(user: User, payload: CloudSavePayload): Pr
     batch.set(invRef, {
       ownerId: uid,
       equippedWeapon: payload.inventory.equippedWeapon,
+      hasParachute: Boolean(payload.inventory.hasParachute),
       weapons: payload.inventory.weapons.slice(0, 16),
       consumables: payload.inventory.consumables.slice(0, 24),
       contraband: payload.inventory.contraband.slice(0, 32),
@@ -231,9 +345,10 @@ export async function saveGameToCloud(user: User, payload: CloudSavePayload): Pr
         name: String(v.name || 'Vehicle').slice(0, 48),
         kind: String(v.kind || 'sedan').slice(0, 24),
         color: String(v.color || '#38bdf8').slice(0, 16),
-        x: clamp(Number(v.x) || 0, -900, 900),
-        z: clamp(Number(v.z) || 0, -900, 900),
+        x: clamp(Number(v.x) || 0, -2400, 2400),
+        z: clamp(Number(v.z) || 0, -2400, 2400),
         heading: Number.isFinite(v.heading) ? v.heading : 0,
+        upgrades: v.upgrades || { engineLevel: 0, turbo: false, armorLevel: 0, suspensionLevel: 0 },
       }));
 
     const garageRef = doc(db, 'users', uid, 'garage', 'stored');
@@ -245,6 +360,7 @@ export async function saveGameToCloud(user: User, payload: CloudSavePayload): Pr
     });
 
     await batch.commit();
+    await ensurePublicUserCard(user);
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, userPath);
   }
@@ -255,6 +371,7 @@ export async function loadGameFromCloud(user: User): Promise<CloudSavePayload | 
   const userPath = `users/${uid}`;
 
   try {
+    await ensurePublicUserCard(user);
     const userRef = doc(db, 'users', uid);
     const userSnap = await getDoc(userRef);
     if (!userSnap.exists()) {
@@ -263,11 +380,10 @@ export async function loadGameFromCloud(user: User): Promise<CloudSavePayload | 
 
     const userData = userSnap.data();
 
-    // Load characters
     const characters: Record<CharacterId, CharacterState> = {
-      lucia: { ...DEFAULT_CHARACTERS.lucia },
-      mateo: { ...DEFAULT_CHARACTERS.mateo },
-      kairo: { ...DEFAULT_CHARACTERS.kairo },
+      lucia: structuredClone(DEFAULT_CHARACTERS.lucia),
+      mateo: structuredClone(DEFAULT_CHARACTERS.mateo),
+      kairo: structuredClone(DEFAULT_CHARACTERS.kairo),
     };
 
     const charSnap = await getDocs(collection(db, 'users', uid, 'characters'));
@@ -277,6 +393,8 @@ export async function loadGameFromCloud(user: User): Promise<CloudSavePayload | 
       if (cid === 'lucia' || cid === 'mateo' || cid === 'kairo') {
         characters[cid] = {
           ...DEFAULT_CHARACTERS[cid],
+          cash: typeof d.cash === 'number' ? d.cash : DEFAULT_CHARACTERS[cid].cash,
+          skills: d.skills ? { ...DEFAULT_CHARACTERS[cid].skills, ...d.skills } : DEFAULT_CHARACTERS[cid].skills,
           health: typeof d.health === 'number' ? d.health : DEFAULT_CHARACTERS[cid].health,
           armor: typeof d.armor === 'number' ? d.armor : DEFAULT_CHARACTERS[cid].armor,
           posX: typeof d.posX === 'number' ? d.posX : DEFAULT_CHARACTERS[cid].posX,
@@ -289,7 +407,6 @@ export async function loadGameFromCloud(user: User): Promise<CloudSavePayload | 
       }
     });
 
-    // Load inventory
     let inventory: InventoryState = structuredClone(DEFAULT_INVENTORY);
     const invSnap = await getDoc(doc(db, 'users', uid, 'inventory', 'loadout'));
     if (invSnap.exists()) {
@@ -301,13 +418,13 @@ export async function loadGameFromCloud(user: User): Promise<CloudSavePayload | 
       });
       inventory = {
         equippedWeapon: idata.equippedWeapon || DEFAULT_INVENTORY.equippedWeapon,
+        hasParachute: Boolean(idata.hasParachute),
         weapons: mergedWeapons,
         consumables: Array.isArray(idata.consumables) ? idata.consumables : DEFAULT_INVENTORY.consumables,
         contraband: Array.isArray(idata.contraband) ? idata.contraband : DEFAULT_INVENTORY.contraband,
       };
     }
 
-    // Load settings
     let settings: GameSettings = structuredClone(DEFAULT_SETTINGS);
     const settingsSnap = await getDoc(doc(db, 'users', uid, 'settings', 'preferences'));
     if (settingsSnap.exists()) {
@@ -326,18 +443,20 @@ export async function loadGameFromCloud(user: User): Promise<CloudSavePayload | 
             ...DEFAULT_SETTINGS.controls.gamepadBindings,
             ...(sdata.controls?.gamepadBindings || {}),
           },
+          vehicleOverrides: {
+            ...(sdata.controls?.vehicleOverrides || {}),
+          },
         },
         hudMod: { ...DEFAULT_SETTINGS.hudMod, ...(sdata.hudMod || {}) },
         gameplayMods: { ...DEFAULT_SETTINGS.gameplayMods, ...(sdata.gameplayMods || {}) },
       };
     }
 
-    // Load missions
     const missions: Record<string, MissionProgressRecord> = structuredClone(DEFAULT_MISSIONS);
     const missionsSnap = await getDocs(collection(db, 'users', uid, 'missions'));
     missionsSnap.forEach((docSnap) => {
       const m = docSnap.data();
-      if (m.id && missions[m.id]) {
+      if (m.id) {
         missions[m.id] = {
           id: m.id,
           status: m.status || 'available',
@@ -368,11 +487,12 @@ export async function loadGameFromCloud(user: User): Promise<CloudSavePayload | 
 
     return {
       activeCharacterId,
-      cash: typeof userData.cash === 'number' ? userData.cash : 2500,
+      cash: typeof userData.cash === 'number' ? userData.cash : characters[activeCharacterId].cash,
       stats: {
         totalEliminations: typeof userData.totalEliminations === 'number' ? userData.totalEliminations : 0,
         policeEscapes: typeof userData.policeEscapes === 'number' ? userData.policeEscapes : 0,
         stuntJumps: typeof userData.stuntJumps === 'number' ? userData.stuntJumps : 0,
+        shootingRangeScore: typeof userData.shootingRangeScore === 'number' ? userData.shootingRangeScore : 0,
       },
       characters,
       inventory,
@@ -383,4 +503,19 @@ export async function loadGameFromCloud(user: User): Promise<CloudSavePayload | 
   } catch (error) {
     handleFirestoreError(error, OperationType.GET, userPath);
   }
+}
+
+export async function resetCloudProgress(user: User): Promise<void> {
+  const uid = user.uid;
+  const defaults: CloudSavePayload = {
+    activeCharacterId: 'lucia',
+    cash: DEFAULT_CHARACTERS.lucia.cash,
+    stats: { ...DEFAULT_STATS },
+    characters: structuredClone(DEFAULT_CHARACTERS),
+    inventory: structuredClone(DEFAULT_INVENTORY),
+    settings: structuredClone(DEFAULT_SETTINGS),
+    missions: structuredClone(DEFAULT_MISSIONS),
+    garage: { hangarVehicles: [], safehouseVehicles: [] },
+  };
+  await saveGameToCloud(user, defaults);
 }
