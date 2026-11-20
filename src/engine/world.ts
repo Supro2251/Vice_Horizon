@@ -105,6 +105,13 @@ export interface ClubShowRig {
   performers: ClubPerformerRig[];
 }
 
+export interface ShopInteriorGroup {
+  x: number;
+  z: number;
+  radius: number;
+  group: THREE.Group;
+}
+
 export interface WorldBuildResult {
   worldGroup: THREE.Group;
   colliders: AABBCollider[];
@@ -118,6 +125,7 @@ export interface WorldBuildResult {
   wettableRoadMaterials: THREE.MeshStandardMaterial[];
   extraTextures: THREE.Texture[];
   clubShow: ClubShowRig | null;
+  shopInteriors: ShopInteriorGroup[];
   spinners: THREE.Object3D[];
   oceanMesh: THREE.Mesh;
   skyMat: THREE.ShaderMaterial;
@@ -452,6 +460,7 @@ export function buildOpenWorld(textures: ProceduralTextureSet): WorldBuildResult
   const wettableRoadMaterials: THREE.MeshStandardMaterial[] = [];
   const extraTextures: THREE.Texture[] = [];
   let clubShow: ClubShowRig | null = null;
+  const shopInteriors: ShopInteriorGroup[] = [];
   const spinners: THREE.Object3D[] = [];
   const roadRects: { x: number; z: number; w: number; l: number }[] = [];
   const buildingFootprints: { x: number; z: number; w: number; d: number; color: string }[] = [];
@@ -1804,6 +1813,17 @@ float tFbm(vec2 p) {
   const woodShelfMat = new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.7 });
   const chromeMat = new THREE.MeshStandardMaterial({ color: 0xe2e8f0, metalness: 0.85, roughness: 0.18 });
   const clothPalette = [0xf43f5e, 0x06b6d4, 0xf59e0b, 0xec4899, 0x10b981, 0x6366f1];
+  const clothMats = clothPalette.map((color) => new THREE.MeshStandardMaterial({ color, roughness: 0.78 }));
+  const boxColors = [0xef4444, 0x3b82f6, 0x22c55e, 0xfbbf24, 0xa855f7];
+  const boxMats = boxColors.map((color) => new THREE.MeshStandardMaterial({ color, roughness: 0.6 }));
+  const hospBedMat = new THREE.MeshStandardMaterial({ color: 0xe2e8f0, roughness: 0.4 });
+  const hospPillowMat = new THREE.MeshStandardMaterial({ color: 0x38bdf8, roughness: 0.7 });
+  const hospMonMat = new THREE.MeshStandardMaterial({ color: 0x0f172a, emissive: 0x10b981, emissiveIntensity: 0.85 });
+  const pcMonitorMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, emissive: 0x38bdf8, emissiveIntensity: 0.7 });
+  const fireLockerMat = new THREE.MeshStandardMaterial({ color: 0x7f1d1d, roughness: 0.5 });
+  const fireHelmetMat = new THREE.MeshStandardMaterial({ color: 0xfacc15, roughness: 0.3 });
+  const tireMat = new THREE.MeshStandardMaterial({ color: 0x111827, roughness: 0.85 });
+  const counterMat = new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.4, metalness: 0.4 });
 
   const addEnterableShopBuilding = (shop: ShopDef) => {
     const isGarage = shop.category === 'garage';
@@ -1994,7 +2014,11 @@ float tFbm(vec2 p) {
       addWallSeg(0, wz, doorHalf * 2, wallThick, Math.max(1.4, h - 4.4), 4.4);
     }
 
-    // Authentic Detailed Spacious Walk-In Interior Furniture by Category!
+    // Authentic Detailed Spacious Walk-In Interior Furniture by Category (inside proximity-culled group)
+    const interiorG = new THREE.Group();
+    g.add(interiorG);
+    shopInteriors.push({ x: shop.x, z: shop.z, radius: isLounge ? 95 : 75, group: interiorG });
+
     if (isBoutique) {
       // Multi-aisle Boutique with 8 clothing racks + mannequins + fitting booths + velvet ottoman + tall mirror
       const rackPositions: [number, number][] = [
@@ -2007,29 +2031,29 @@ float tFbm(vec2 p) {
         [4.5, 3.2],
         [4.5, 8.0],
       ];
+      const barGeo = new THREE.CylinderGeometry(0.05, 0.05, 4.4, 8);
+      const legGeo = new THREE.CylinderGeometry(0.05, 0.05, 1.65, 8);
+      const garmentGeo = new THREE.BoxGeometry(0.32, 0.98, 0.56);
       rackPositions.forEach(([rx, rz], rIdx) => {
-        const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 4.4, 8), chromeMat);
+        const bar = new THREE.Mesh(barGeo, chromeMat);
         bar.rotation.z = Math.PI / 2;
         bar.position.set(rx, 1.65, rz);
-        const legL = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 1.65, 8), chromeMat);
+        const legL = new THREE.Mesh(legGeo, chromeMat);
         legL.position.set(rx - 2.15, 0.82, rz);
-        const legR = legL.clone();
-        legR.position.x = rx + 2.15;
-        g.add(bar, legL, legR);
+        const legR = new THREE.Mesh(legGeo, chromeMat);
+        legR.position.set(rx + 2.15, 0.82, rz);
+        interiorG.add(bar, legL, legR);
         for (let c = 0; c < 7; c++) {
-          const garment = new THREE.Mesh(
-            new THREE.BoxGeometry(0.32, 0.98, 0.56),
-            new THREE.MeshStandardMaterial({ color: clothPalette[(rIdx + c) % clothPalette.length], roughness: 0.78 })
-          );
+          const garment = new THREE.Mesh(garmentGeo, clothMats[(rIdx + c) % clothMats.length]);
           garment.position.set(rx - 1.65 + c * 0.55, 1.15, rz);
-          g.add(garment);
+          interiorG.add(garment);
         }
         colliders.push({ minX: shop.x + rx - 2.2, maxX: shop.x + rx + 2.2, minZ: shop.z + rz - 0.35, maxZ: shop.z + rz + 0.35, height: 1.7 });
       });
       // Center Velvet Ottoman + 2 Fashion Mannequins on pedestals
       const ottoman = new THREE.Mesh(new THREE.CylinderGeometry(1.4, 1.5, 0.55, 16), new THREE.MeshStandardMaterial({ color: 0x831843, roughness: 0.75 }));
       ottoman.position.set(-2.0, 0.28, 0);
-      g.add(ottoman);
+      interiorG.add(ottoman);
       [-5.5, 5.5].forEach((mz, mIdx) => {
         const ped = new THREE.Mesh(new THREE.CylinderGeometry(0.7, 0.8, 0.32, 12), chromeMat);
         ped.position.set(11.5, 0.16, mz);
@@ -2037,67 +2061,67 @@ float tFbm(vec2 p) {
         torso.position.set(11.5, 1.1, mz);
         const head = new THREE.Mesh(new THREE.SphereGeometry(0.16, 10, 8), chromeMat);
         head.position.set(11.5, 1.76, mz);
-        g.add(ped, torso, head);
+        interiorG.add(ped, torso, head);
       });
       const mirror = new THREE.Mesh(new THREE.BoxGeometry(0.28, 3.2, 4.6), chromeMat);
       mirror.position.set(w * 0.5 - 1.4, 1.6, 0);
-      g.add(mirror);
+      interiorG.add(mirror);
     } else if (isMarket) {
       // 4 Supermarket Aisles with colorful stocked boxes + glowing cold drink fridges along back wall + promo island
-      const boxColors = [0xef4444, 0x3b82f6, 0x22c55e, 0xfbbf24, 0xa855f7];
+      const itemGeo = new THREE.BoxGeometry(1.52, 0.42, 1.1);
       [-9.5, -3.5, 3.5, 9.5].forEach((ax, aIdx) => {
         const shelf = new THREE.Mesh(new THREE.BoxGeometry(1.4, 2.3, 13.5), woodShelfMat);
         shelf.position.set(ax, 1.15, 0);
         const topTrim = new THREE.Mesh(new THREE.BoxGeometry(1.46, 0.18, 13.54), neonMat);
         topTrim.position.set(ax, 2.35, 0);
-        g.add(shelf, topTrim);
+        interiorG.add(shelf, topTrim);
         for (let b = -5.5; b <= 5.5; b += 2.2) {
-          const item = new THREE.Mesh(
-            new THREE.BoxGeometry(1.52, 0.42, 1.1),
-            new THREE.MeshStandardMaterial({ color: boxColors[(aIdx + Math.round(b + 6)) % boxColors.length], roughness: 0.6 })
-          );
+          const item = new THREE.Mesh(itemGeo, boxMats[(aIdx + Math.round(b + 6)) % boxMats.length]);
           item.position.set(ax, 1.45, b);
-          g.add(item);
+          interiorG.add(item);
         }
         colliders.push({ minX: shop.x + ax - 0.75, maxX: shop.x + ax + 0.75, minZ: shop.z - 6.75, maxZ: shop.z + 6.75, height: 2.4 });
       });
       // Illuminated Cold Beverage Coolers on east interior wall
       const cooler = new THREE.Mesh(new THREE.BoxGeometry(1.2, 2.8, 12), new THREE.MeshStandardMaterial({ color: 0x0ea5e9, emissive: 0x0284c7, emissiveIntensity: 0.65, roughness: 0.2 }));
       cooler.position.set(w * 0.5 - 2.0, 1.4, 0);
-      g.add(cooler);
+      interiorG.add(cooler);
     } else if (isWeapons) {
       // Tactical Gun Walls with mounted weapon bars, green/amber ammo crates & Kevlar armor stands
+      const gunBarGeo = new THREE.BoxGeometry(0.85, 0.22, 1.4);
       [-11.5, 11.5].forEach((wx) => {
         const rack = new THREE.Mesh(new THREE.BoxGeometry(0.7, 3.2, 14.0), rackMetalMat);
         rack.position.set(wx, 1.6, 0);
         const glow = new THREE.Mesh(new THREE.BoxGeometry(0.74, 0.16, 14.0), neonMat);
         glow.position.set(wx, 3.2, 0);
-        g.add(rack, glow);
+        interiorG.add(rack, glow);
         for (let rz = -5; rz <= 5; rz += 2.5) {
-          const gunBar = new THREE.Mesh(new THREE.BoxGeometry(0.85, 0.22, 1.4), chromeMat);
+          const gunBar = new THREE.Mesh(gunBarGeo, chromeMat);
           gunBar.position.set(wx, 1.85, rz);
-          g.add(gunBar);
+          interiorG.add(gunBar);
         }
       });
       // Green military ammo crates & ballistic armor stand
+      const crateMat = new THREE.MeshStandardMaterial({ color: 0x3f6212, roughness: 0.75 });
       [-6.5, 6.5].forEach((cx) => {
-        const crate = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.95, 1.4), new THREE.MeshStandardMaterial({ color: 0x3f6212, roughness: 0.75 }));
+        const crate = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.95, 1.4), crateMat);
         crate.position.set(cx, 0.48, 5.5);
-        g.add(crate);
+        interiorG.add(crate);
       });
       const vestStand = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.45, 1.55, 10), new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.65 }));
       vestStand.position.set(0, 0.78, 5.5);
-      g.add(vestStand);
+      interiorG.add(vestStand);
     } else if (isRange) {
       const firingBench = new THREE.Mesh(new THREE.BoxGeometry(w - 4, 1.05, 1.2), rackMetalMat);
       firingBench.position.set(0, 0.52, -5.5);
-      g.add(firingBench);
+      interiorG.add(firingBench);
       colliders.push({ minX: shop.x - (w - 4) * 0.5, maxX: shop.x + (w - 4) * 0.5, minZ: shop.z - 6.1, maxZ: shop.z - 4.9, height: 1.2 });
       // Lane dividers & ammo trays along shooting stalls
+      const divGeo = new THREE.BoxGeometry(0.16, 2.2, 2.4);
       [-6.75, -2.25, 2.25, 6.75].forEach((dx) => {
-        const div = new THREE.Mesh(new THREE.BoxGeometry(0.16, 2.2, 2.4), wallMat);
+        const div = new THREE.Mesh(divGeo, wallMat);
         div.position.set(dx, 1.1, -6.2);
-        g.add(div);
+        interiorG.add(div);
       });
 
       [-9, -4.5, 0, 4.5, 9].forEach((tx, tIdx) => {
@@ -2129,27 +2153,24 @@ float tFbm(vec2 p) {
         mirror.position.set(cx, 1.9, 6.2);
         const frameGlow = new THREE.Mesh(new THREE.BoxGeometry(2.05, 0.1, 0.2), neonMat);
         frameGlow.position.set(cx, 3.05, 6.2);
-        g.add(base, cushion, backrest, mirror, frameGlow);
+        interiorG.add(base, cushion, backrest, mirror, frameGlow);
       });
       // Waiting bench
       const waitSofa = new THREE.Mesh(new THREE.BoxGeometry(5.5, 0.75, 1.3), chairMat);
       waitSofa.position.set(6.5, 0.38, -7.2);
-      g.add(waitSofa);
+      interiorG.add(waitSofa);
     } else if (isHospital) {
       // Hospital beds + IV drip stands + vital monitors + reception glass divider
       [-8.5, -3.5, 2.5].forEach((bx) => {
-        const bed = new THREE.Mesh(
-          new THREE.BoxGeometry(2.2, 0.75, 4.2),
-          new THREE.MeshStandardMaterial({ color: 0xe2e8f0, roughness: 0.4 })
-        );
+        const bed = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.75, 4.2), hospBedMat);
         bed.position.set(bx, 0.4, 2.0);
-        const pillow = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.18, 0.65), new THREE.MeshStandardMaterial({ color: 0x38bdf8, roughness: 0.7 }));
+        const pillow = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.18, 0.65), hospPillowMat);
         pillow.position.set(bx, 0.84, 0.35);
         const ivPole = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 2.1, 8), chromeMat);
         ivPole.position.set(bx + 1.3, 1.05, 0.5);
-        const monitor = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.45, 0.35), new THREE.MeshStandardMaterial({ color: 0x0f172a, emissive: 0x10b981, emissiveIntensity: 0.85 }));
+        const monitor = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.45, 0.35), hospMonMat);
         monitor.position.set(bx - 1.3, 1.35, 0.4);
-        g.add(bed, pillow, ivPole, monitor);
+        interiorG.add(bed, pillow, ivPole, monitor);
         colliders.push({ minX: shop.x + bx - 1.1, maxX: shop.x + bx + 1.1, minZ: shop.z - 0.1, maxZ: shop.z + 4.1, height: 1.0 });
       });
     } else if (isPoliceStation) {
@@ -2158,31 +2179,34 @@ float tFbm(vec2 p) {
       for (let z = -7; z <= 3; z += 5) {
         const desk = new THREE.Mesh(new THREE.BoxGeometry(2.8, 0.85, 1.5), rackMetalMat);
         desk.position.set(-7.5, 0.42, z);
-        const pc = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.48, 0.12), new THREE.MeshStandardMaterial({ color: 0x1e293b, emissive: 0x38bdf8, emissiveIntensity: 0.7 }));
+        const pc = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.48, 0.12), pcMonitorMat);
         pc.position.set(-7.5, 1.1, z);
-        g.add(desk, pc);
+        interiorG.add(desk, pc);
       }
       // Barred Holding Cell enclosure on back-west side
+      const barGeo = new THREE.CylinderGeometry(0.05, 0.05, 3.6, 6);
       for (let bx = -12; bx <= -4; bx += 0.9) {
-        const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 3.6, 6), barMat);
+        const bar = new THREE.Mesh(barGeo, barMat);
         bar.position.set(bx, 1.8, -8.5);
-        g.add(bar);
+        interiorG.add(bar);
       }
       const crimeBoard = new THREE.Mesh(new THREE.BoxGeometry(0.25, 2.4, 5.2), new THREE.MeshStandardMaterial({ color: 0x1e3a8a, emissive: 0x2563eb, emissiveIntensity: 0.55 }));
       crimeBoard.position.set(12.8, 2.2, 0);
-      g.add(crimeBoard);
+      interiorG.add(crimeBoard);
     } else if (isFire) {
       // VCFD Fire Station: Turnout gear lockers with red coats/helmets & coiled hose wall racks
+      const lockerGeo = new THREE.BoxGeometry(1.4, 2.8, 2.6);
+      const helmetGeo = new THREE.SphereGeometry(0.26, 8, 6);
       for (let lz = -7; lz <= 7; lz += 3.5) {
-        const locker = new THREE.Mesh(new THREE.BoxGeometry(1.4, 2.8, 2.6), new THREE.MeshStandardMaterial({ color: 0x7f1d1d, roughness: 0.5 }));
+        const locker = new THREE.Mesh(lockerGeo, fireLockerMat);
         locker.position.set(-13.5, 1.4, lz);
-        const helmet = new THREE.Mesh(new THREE.SphereGeometry(0.26, 8, 6), new THREE.MeshStandardMaterial({ color: 0xfacc15, roughness: 0.3 }));
+        const helmet = new THREE.Mesh(helmetGeo, fireHelmetMat);
         helmet.position.set(-13.1, 2.1, lz);
-        g.add(locker, helmet);
+        interiorG.add(locker, helmet);
       }
       const dispatchTable = new THREE.Mesh(new THREE.BoxGeometry(4.2, 0.95, 2.0), rackMetalMat);
       dispatchTable.position.set(10.5, 0.48, -6.5);
-      g.add(dispatchTable);
+      interiorG.add(dispatchTable);
     } else if (isSafehouse) {
       const sofa = new THREE.Mesh(
         new THREE.BoxGeometry(5.6, 0.95, 2.0),
@@ -2201,7 +2225,7 @@ float tFbm(vec2 p) {
       const rug = new THREE.Mesh(new THREE.PlaneGeometry(7.5, 6.5), new THREE.MeshStandardMaterial({ color: 0x0284c7, roughness: 0.85 }));
       rug.rotation.x = -Math.PI / 2;
       rug.position.set(-7.0, floor2Y + 0.04, -2.5);
-      g.add(sofa, coffeeTable, tvScreen, closetRack, bed, rug);
+      interiorG.add(sofa, coffeeTable, tvScreen, closetRack, bed, rug);
       colliders.push(
         { minX: shop.x - 10.3, maxX: shop.x - 4.7, minZ: shop.z + 2.0, maxZ: shop.z + 4.0, height: 1.0 },
         { minX: shop.x - 12.2, maxX: shop.x - 10.8, minZ: shop.z - 7.2, maxZ: shop.z - 0.8, height: 2.6 }
@@ -2236,25 +2260,25 @@ float tFbm(vec2 p) {
       [-1.1, 1.1].forEach((tz) => {
         const deckPlate = new THREE.Mesh(new THREE.CylinderGeometry(0.45, 0.45, 0.08, 16), chromeMat);
         deckPlate.position.set(-12.2, 1.4, tz);
-        g.add(deckPlate);
+        interiorG.add(deckPlate);
       });
+      const spkMat = new THREE.MeshStandardMaterial({ color: 0x090d16, roughness: 0.5 });
       [-4.8, 4.8].forEach((sz) => {
-        const spk = new THREE.Mesh(new THREE.BoxGeometry(1.6, 3.6, 1.8), new THREE.MeshStandardMaterial({ color: 0x090d16, roughness: 0.5 }));
+        const spk = new THREE.Mesh(new THREE.BoxGeometry(1.6, 3.6, 1.8), spkMat);
         spk.position.set(-13.8, 1.8, sz);
         const cone = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.55, 0.14, 14), neonMat);
         cone.rotation.z = Math.PI / 2;
         cone.position.set(-12.95, 2.3, sz);
-        g.add(spk, cone);
+        interiorG.add(spk, cone);
       });
       const eqBars: THREE.Mesh[] = [];
+      const eqMatA = new THREE.MeshBasicMaterial({ color: 0xd946ef });
+      const eqMatB = new THREE.MeshBasicMaterial({ color: 0x06b6d4 });
+      const eqGeo = new THREE.BoxGeometry(0.25, 1.0, 0.48);
       for (let i = 0; i < 9; i++) {
-        const barCol = i % 2 === 0 ? 0xd946ef : 0x06b6d4;
-        const eq = new THREE.Mesh(
-          new THREE.BoxGeometry(0.25, 1.0, 0.48),
-          new THREE.MeshBasicMaterial({ color: barCol })
-        );
+        const eq = new THREE.Mesh(eqGeo, i % 2 === 0 ? eqMatA : eqMatB);
         eq.position.set(-16.2, 2.4, (i - 4) * 1.15);
-        g.add(eq);
+        interiorG.add(eq);
         eqBars.push(eq);
       }
 
@@ -2268,7 +2292,7 @@ float tFbm(vec2 p) {
       const discoChain = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 1.2, 6), chromeMat);
       discoChain.position.y = 0.9;
       discoGroup.add(discoCore, discoChain);
-      g.add(discoGroup);
+      interiorG.add(discoGroup);
 
       // Sweeping Additive Spotlight Cones above the stage
       const spotlights: THREE.Mesh[] = [];
@@ -2290,7 +2314,7 @@ float tFbm(vec2 p) {
         });
         const cone = new THREE.Mesh(coneGeo, coneMat);
         cone.position.set(sx, sy, sz);
-        g.add(cone);
+        interiorG.add(cone);
         spotlights.push(cone);
       });
 
@@ -2332,7 +2356,7 @@ float tFbm(vec2 p) {
         rig.root.position.set(dm.baseX, dm.baseY, dm.baseZ);
         if (dm.style === 'dj') rig.root.rotation.y = Math.PI / 2;
         else if (dm.style === 'patron') rig.root.rotation.y = -Math.PI / 2;
-        g.add(rig.root);
+        interiorG.add(rig.root);
         performers.push({ rig, baseX: dm.baseX, baseY: dm.baseY, baseZ: dm.baseZ, phase: dm.phase, style: dm.style });
       }
 
@@ -2340,24 +2364,22 @@ float tFbm(vec2 p) {
       for (let bz = -2.2; bz <= 2.2; bz += 1.45) {
         const stool = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.24, 0.85, 10), chromeMat);
         stool.position.set(w * 0.5 - 7.1, 0.42, bz);
-        g.add(stool);
+        interiorG.add(stool);
       }
       const bottleShelf = new THREE.Mesh(new THREE.BoxGeometry(0.4, 2.2, 5.2), new THREE.MeshStandardMaterial({ color: 0x06b6d4, emissive: 0x0891b2, emissiveIntensity: 0.75 }));
       bottleShelf.position.set(w * 0.5 - 1.6, 1.8, 0);
-      g.add(bottleShelf);
+      interiorG.add(bottleShelf);
 
-      g.add(stage, stageRing, dancePole, podiumL, podiumLRing, podiumR, podiumRRing, djBooth);
+      interiorG.add(stage, stageRing, dancePole, podiumL, podiumLRing, podiumR, podiumRRing, djBooth);
       colliders.push(
         { minX: shop.x - 13.6, maxX: shop.x - 11.4, minZ: shop.z - 3.1, maxZ: shop.z + 3.1, height: 1.4 }
       );
       // VIP Sofas along north/south walls
+      const vipBoothMat = new THREE.MeshStandardMaterial({ color: 0x701a75, roughness: 0.65 });
       [-8.5, 8.5].forEach((vz) => {
-        const booth = new THREE.Mesh(
-          new THREE.BoxGeometry(6.8, 0.9, 2.0),
-          new THREE.MeshStandardMaterial({ color: 0x701a75, roughness: 0.65 })
-        );
+        const booth = new THREE.Mesh(new THREE.BoxGeometry(6.8, 0.9, 2.0), vipBoothMat);
         booth.position.set(1.5, 0.45, vz);
-        g.add(booth);
+        interiorG.add(booth);
         colliders.push({ minX: shop.x - 1.9, maxX: shop.x + 4.9, minZ: shop.z + vz - 1.0, maxZ: shop.z + vz + 1.0, height: 1.0 });
       });
 
@@ -2374,31 +2396,29 @@ float tFbm(vec2 p) {
       const bayPad = new THREE.Mesh(new THREE.RingGeometry(3.2, 3.65, 28), neonMat);
       bayPad.rotation.x = -Math.PI / 2;
       bayPad.position.set(0, 0.06, 0);
-      g.add(bayPad);
+      interiorG.add(bayPad);
       [-8.5, 8.5].forEach((px) => {
         [-3.5, 3.5].forEach((pz) => {
           const post = new THREE.Mesh(new THREE.BoxGeometry(0.5, 4.2, 0.5), neonMat);
           post.position.set(px, 2.1, pz);
-          g.add(post);
+          interiorG.add(post);
         });
       });
       const toolCab = new THREE.Mesh(new THREE.BoxGeometry(2.6, 1.3, 0.9), new THREE.MeshStandardMaterial({ color: 0xdc2626, roughness: 0.4 }));
       toolCab.position.set(-12.5, 0.65, -9.2);
-      g.add(toolCab);
+      interiorG.add(toolCab);
+      const tireGeo = new THREE.TorusGeometry(0.42, 0.16, 8, 16);
       for (let t = 0; t < 3; t++) {
-        const tire = new THREE.Mesh(new THREE.TorusGeometry(0.42, 0.16, 8, 16), new THREE.MeshStandardMaterial({ color: 0x111827, roughness: 0.85 }));
+        const tire = new THREE.Mesh(tireGeo, tireMat);
         tire.rotation.x = Math.PI / 2;
         tire.position.set(12.2, 0.16 + t * 0.32, -9.0);
-        g.add(tire);
+        interiorG.add(tire);
       }
     }
 
     // Service Desk / Counter (positioned away from doorway & garage drive-in path)
     if (!isRange && !isGarage) {
-      const counter = new THREE.Mesh(
-        new THREE.CapsuleGeometry(0.48, 4.4, 6, 12),
-        new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.4, metalness: 0.4 })
-      );
+      const counter = new THREE.Mesh(new THREE.CapsuleGeometry(0.48, 4.4, 6, 12), counterMat);
       counter.rotation.z = Math.PI / 2;
       if (doorSide === 'west') {
         counter.rotation.y = Math.PI / 2;
@@ -2415,13 +2435,13 @@ float tFbm(vec2 p) {
         counter.position.set(-2.5, 0.6, d * 0.5 - 4.2);
         colliders.push({ minX: shop.x - 5.1, maxX: shop.x + 0.1, minZ: shop.z + d * 0.5 - 4.8, maxZ: shop.z + d * 0.5 - 3.6, height: 1.5 });
       }
-      g.add(counter);
+      interiorG.add(counter);
     }
 
     const interiorLight = new THREE.Mesh(new THREE.CapsuleGeometry(0.18, 6.2, 4, 8), neonMat);
     interiorLight.rotation.z = Math.PI / 2;
     interiorLight.position.set(0, h - 0.35, 0);
-    g.add(interiorLight);
+    interiorG.add(interiorLight);
 
     const ring = new THREE.Mesh(
       new THREE.TorusGeometry(isGarage ? 2.1 : 1.45, 0.1, 10, 28),
@@ -3226,6 +3246,46 @@ float tFbm(vec2 p) {
     worldGroup.add(poleInst, lampInst);
   }
 
+  // Freeze static scene graph matrices once so Three.js skips traversing 1,000+ static road/building/prop transforms every frame,
+  // while keeping dynamic animated nodes & their ancestor chains unfrozen.
+  worldGroup.updateMatrixWorld(true);
+  worldGroup.traverse((obj) => {
+    obj.matrixAutoUpdate = false;
+    obj.matrixWorldAutoUpdate = false;
+  });
+  const unfreezeChain = (node: THREE.Object3D | null | undefined, includeSubtree = false) => {
+    if (!node) return;
+    if (includeSubtree) {
+      node.traverse((child) => {
+        child.matrixAutoUpdate = true;
+        child.matrixWorldAutoUpdate = true;
+      });
+    } else {
+      node.matrixAutoUpdate = true;
+      node.matrixWorldAutoUpdate = true;
+    }
+    let p = node.parent;
+    while (p) {
+      p.matrixWorldAutoUpdate = true;
+      p = p.parent;
+    }
+  };
+  worldGroup.matrixAutoUpdate = true;
+  worldGroup.matrixWorldAutoUpdate = true;
+  unfreezeChain(cloudGroup, true);
+  for (const el of elevators) unfreezeChain(el.cabGroup, true);
+  for (const sp of spinners) unfreezeChain(sp, true);
+  for (const sr of shopRings) unfreezeChain(sr, false);
+  for (const b of barrels) unfreezeChain(b.mesh, true);
+  for (const rt of rangeTargets) unfreezeChain(rt.mesh, true);
+  const activeClubShow = clubShow as ClubShowRig | null;
+  if (activeClubShow) {
+    unfreezeChain(activeClubShow.discoBall, true);
+    for (const sl of activeClubShow.spotlights) unfreezeChain(sl, false);
+    for (const eq of activeClubShow.eqBars) unfreezeChain(eq, false);
+    for (const pf of activeClubShow.performers) unfreezeChain(pf.rig.root, true);
+  }
+
   return {
     worldGroup,
     colliders,
@@ -3239,6 +3299,7 @@ float tFbm(vec2 p) {
     wettableRoadMaterials,
     extraTextures,
     clubShow,
+    shopInteriors,
     spinners,
     oceanMesh,
     skyMat,

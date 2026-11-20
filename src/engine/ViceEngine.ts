@@ -67,6 +67,7 @@ import {
   ExplosiveBarrelEntity,
   getDistrictName,
   RangeTargetEntity,
+  ShopInteriorGroup,
   StuntRamp,
 } from './world';
 import {
@@ -107,6 +108,54 @@ const _skidMat = new THREE.MeshBasicMaterial({
   polygonOffsetFactor: -3,
 });
 const GRID_CELL_SIZE = 32;
+const gridKey = (gx: number, gz: number): number => (gx + 2048) * 4096 + (gz + 2048);
+
+// Pre-allocated Atmosphere Color Constants & Scratch Buffers (Zero GC in updateAtmosphere)
+const _cNightHor = new THREE.Color(0x0f172a);
+const _cNightMid = new THREE.Color(0x090d1a);
+const _cNightTop = new THREE.Color(0x020617);
+const _cDayHorBase = new THREE.Color(0xbae6fd);
+const _cDayMidBase = new THREE.Color(0x38bdf8);
+const _cDayTopBase = new THREE.Color(0x0284c7);
+const _cRainHor = new THREE.Color(0x64748b);
+const _cRainMid = new THREE.Color(0x475569);
+const _cRainTop = new THREE.Color(0x334155);
+const _cSunHor = new THREE.Color(0xfb923c);
+const _cSunMidBase = new THREE.Color(0x7e22ce);
+const _cSunTop = new THREE.Color(0x0f172a);
+const _cLightningA = new THREE.Color(0xe2e8f0);
+const _cLightningB = new THREE.Color(0xf8fafc);
+const _cSunLow = new THREE.Color(0x93c5fd);
+const _cSunHigh = new THREE.Color(0xfffbeb);
+const _cSunWarm = new THREE.Color(0xfdba74);
+const _cDayHor = new THREE.Color();
+const _cDayMid = new THREE.Color();
+const _cDayTop = new THREE.Color();
+const _cSunMid = new THREE.Color();
+const _cHor = new THREE.Color();
+const _cMid = new THREE.Color();
+const _cTop = new THREE.Color();
+const _cFog = new THREE.Color();
+const _cSunCol = new THREE.Color();
+
+// Cached static minimap blips (Shops & Parking lots never move)
+const STATIC_MINIMAP_BLIPS: MinimapBlip[] = [
+  ...SHOPS.map((shop) => ({
+    x: shop.x,
+    z: shop.z,
+    type: (shop.category === 'shooting_range' ? 'shooting_range' : 'shop') as MinimapBlip['type'],
+    label: shop.name,
+    shopCategory: shop.category,
+    color: shop.color,
+  })),
+  ...PARKING_LOTS.map((lot) => ({
+    x: lot.x,
+    z: lot.z,
+    type: 'parking' as MinimapBlip['type'],
+    label: lot.name,
+  })),
+];
+const MALIBU_CLUB = SHOPS.find((s) => s.category === 'lounge') || { x: 720, z: -340, doorX: 701, doorZ: -340 };
 
 interface VehicleEntity {
   id: string;
@@ -157,11 +206,14 @@ interface NpcEntity {
   z: number;
   heading: number;
   health: number;
-  kind: 'civilian' | 'police' | 'enemy';
+  kind: 'civilian' | 'police' | 'enemy' | 'bouncer';
   behavior: 'wander' | 'flee' | 'fight' | 'seek_shelter' | 'cheer';
   activity: 'stroll' | 'chat' | 'chill';
   chatTargetX?: number;
   chatTargetZ?: number;
+  guardHomeX?: number;
+  guardHomeZ?: number;
+  guardHeading?: number;
   panicTimer: number;
   shootCooldown: number;
   tackleCooldown: number;
@@ -175,6 +227,8 @@ interface NpcEntity {
 
 interface BulletTracer {
   mesh: THREE.Mesh;
+  mat: THREE.MeshBasicMaterial;
+  active: boolean;
   life: number;
   maxLife: number;
 }
@@ -192,6 +246,8 @@ interface RocketProjectile {
 
 interface ParticleBurst {
   mesh: THREE.Mesh;
+  mat: THREE.MeshBasicMaterial;
+  active: boolean;
   vx: number;
   vy: number;
   vz: number;
@@ -245,7 +301,10 @@ export class ViceEngine {
   private colliders: AABBCollider[] = [];
   private floorSurfaces: AABBCollider[] = [];
   private circleColliders: CircleCollider[] = [];
-  private colliderGrid = new Map<string, { aabb: AABBCollider[]; circle: CircleCollider[] }>();
+  private colliderGrid = new Map<number, { aabb: AABBCollider[]; circle: CircleCollider[] }>();
+  private floorGrid = new Map<number, AABBCollider[]>();
+  private _queryAabbs = new Set<AABBCollider>();
+  private _queryCircles = new Set<CircleCollider>();
   private ramps: StuntRamp[] = [];
   private barrels: ExplosiveBarrelEntity[] = [];
   private rangeTargets: RangeTargetEntity[] = [];
@@ -253,6 +312,7 @@ export class ViceEngine {
   private buildingWindowMaterials: THREE.Material[] = [];
   private spinners: THREE.Object3D[] = [];
   private shopRings: THREE.Mesh[] = [];
+  private shopInteriors: ShopInteriorGroup[] = [];
   private oceanMesh!: THREE.Mesh;
   private skyMat!: THREE.ShaderMaterial;
   private cloudGroup!: THREE.Group;
@@ -261,6 +321,9 @@ export class ViceEngine {
   private extraTextures: THREE.Texture[] = [];
   private clubShow: ClubShowRig | null = null;
   private clubEncoreTimer = 0;
+  private clubBouncersAlerted = false;
+  private clubBouncerRespawnTimer = 0;
+  private clubAlarmNoticeShown = false;
   public roadSegments: RoadSegmentDef[] = [];
   public roadRects: { x: number; z: number; w: number; l: number }[] = [];
   public buildingFootprints: { x: number; z: number; w: number; d: number; color: string }[] = [];
@@ -276,13 +339,25 @@ export class ViceEngine {
 
   private vehicles: VehicleEntity[] = [];
   private npcs: NpcEntity[] = [];
-  private tracers: BulletTracer[] = [];
+  private tracerPool: BulletTracer[] = [];
+  private tracerCursor = 0;
   private rockets: RocketProjectile[] = [];
-  private particles: ParticleBurst[] = [];
+  private particlePool: ParticleBurst[] = [];
+  private particleCursor = 0;
   private skidPool: THREE.Mesh[] = [];
   private skidCursor = 0;
   private skidEmitTimer = 0;
   private currentDriftIntensity = 0;
+  private interiorCullTimer = 0;
+  private atmosphereTimer = 0;
+  private lastShadowX = 999999;
+  private lastShadowZ = 999999;
+  private shadowCooldown = 0;
+  private cachedGpsTargetKey = '';
+  private cachedGpsX = 999999;
+  private cachedGpsZ = 999999;
+  private cachedGpsRoute: { x: number; z: number }[] = [];
+  private gpsRefreshTimer = 0;
 
   // Waypoint, Story Mission Beacons & Pickup visuals
   private waypointGroup: THREE.Group;
@@ -461,6 +536,8 @@ export class ViceEngine {
     this.renderer.toneMappingExposure = 0.94;
     this.renderer.shadowMap.enabled = !this.isSoftwareGl && this.settings.graphics.shadowQuality !== 'off';
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.shadowMap.autoUpdate = false;
+    this.renderer.shadowMap.needsUpdate = true;
     this.renderer.setPixelRatio(this.computePixelRatio());
     this.renderer.setSize(container.clientWidth || window.innerWidth, container.clientHeight || window.innerHeight);
     this.renderer.domElement.style.display = 'block';
@@ -543,6 +620,7 @@ export class ViceEngine {
     this.buildingWindowMaterials = world.buildingWindowMaterials;
     this.spinners = world.spinners;
     this.shopRings = world.shopRings;
+    this.shopInteriors = world.shopInteriors || [];
     this.oceanMesh = world.oceanMesh;
     this.skyMat = world.skyMat;
     this.cloudGroup = world.cloudGroup;
@@ -596,12 +674,26 @@ export class ViceEngine {
     this.rainPoints.visible = false;
     this.scene.add(this.rainPoints);
 
-    // Pooled asphalt drift skid-mark meshes (Zero GC)
+    // Pooled asphalt drift skid-mark, bullet tracer & particle meshes (Zero GC)
     for (let i = 0; i < 120; i++) {
       const m = new THREE.Mesh(_skidGeo, _skidMat);
       m.visible = false;
       this.scene.add(m);
       this.skidPool.push(m);
+    }
+    for (let i = 0; i < 32; i++) {
+      const mat = new THREE.MeshBasicMaterial({ color: 0xfef08a, transparent: true, opacity: 0.85 });
+      const mesh = new THREE.Mesh(_tracerGeo, mat);
+      mesh.visible = false;
+      this.scene.add(mesh);
+      this.tracerPool.push({ mesh, mat, active: false, life: 0, maxLife: 0.065 });
+    }
+    for (let i = 0; i < 64; i++) {
+      const mat = new THREE.MeshBasicMaterial({ color: 0xf97316, transparent: true, opacity: 0.95 });
+      const mesh = new THREE.Mesh(_particleGeo, mat);
+      mesh.visible = false;
+      this.scene.add(mesh);
+      this.particlePool.push({ mesh, mat, active: false, vx: 0, vy: 0, vz: 0, life: 0, maxLife: 0.3, growSpeed: 0 });
     }
 
     // 5. Player Rig, Parachute & First Person Weapon Viewmodel
@@ -700,9 +792,11 @@ export class ViceEngine {
     this.pickupBriefcase.visible = false;
     this.scene.add(this.pickupBriefcase);
 
-    // 7. Spawn Initial Diverse Fleet (Cars, Taxis, Helicopters, Fighter Jets, Boats, Planes) & Civilians
+    // 7. Spawn Initial Diverse Fleet (Cars, Taxis, Helicopters, Fighter Jets, Boats, Planes), Civilians & Club Bouncers
     this.spawnInitialVehicles();
     this.spawnAmbientCivilians();
+    this.spawnClubBouncers(true);
+    this.updateShopInteriorVisibility();
 
     // 8. Apply Graphics, Audio, Time-of-day, Controls
     this.applySettings(this.settings);
@@ -776,8 +870,9 @@ export class ViceEngine {
 
   private buildColliderGrid() {
     this.colliderGrid.clear();
+    this.floorGrid.clear();
     const insertCell = (cx: number, cz: number, itemAabb?: AABBCollider, itemCircle?: CircleCollider) => {
-      const key = `${cx},${cz}`;
+      const key = gridKey(cx, cz);
       let cell = this.colliderGrid.get(key);
       if (!cell) {
         cell = { aabb: [], circle: [] };
@@ -810,24 +905,52 @@ export class ViceEngine {
         }
       }
     }
+
+    for (const fs of this.floorSurfaces) {
+      const minCx = Math.floor((fs.minX - 1) / GRID_CELL_SIZE);
+      const maxCx = Math.floor((fs.maxX + 1) / GRID_CELL_SIZE);
+      const minCz = Math.floor((fs.minZ - 1) / GRID_CELL_SIZE);
+      const maxCz = Math.floor((fs.maxZ + 1) / GRID_CELL_SIZE);
+      for (let gx = minCx; gx <= maxCx; gx++) {
+        for (let gz = minCz; gz <= maxCz; gz++) {
+          const key = gridKey(gx, gz);
+          let list = this.floorGrid.get(key);
+          if (!list) {
+            list = [];
+            this.floorGrid.set(key, list);
+          }
+          list.push(fs);
+        }
+      }
+    }
   }
 
   private queryNearbyColliders(minX: number, maxX: number, minZ: number, maxZ: number) {
-    const aabbs = new Set<AABBCollider>();
-    const circles = new Set<CircleCollider>();
+    this._queryAabbs.clear();
+    this._queryCircles.clear();
     const minCx = Math.floor(minX / GRID_CELL_SIZE);
     const maxCx = Math.floor(maxX / GRID_CELL_SIZE);
     const minCz = Math.floor(minZ / GRID_CELL_SIZE);
     const maxCz = Math.floor(maxZ / GRID_CELL_SIZE);
     for (let gx = minCx; gx <= maxCx; gx++) {
       for (let gz = minCz; gz <= maxCz; gz++) {
-        const cell = this.colliderGrid.get(`${gx},${gz}`);
+        const cell = this.colliderGrid.get(gridKey(gx, gz));
         if (!cell) continue;
-        for (const a of cell.aabb) aabbs.add(a);
-        for (const c of cell.circle) circles.add(c);
+        for (const a of cell.aabb) this._queryAabbs.add(a);
+        for (const c of cell.circle) this._queryCircles.add(c);
       }
     }
-    return { aabbs, circles };
+    return { aabbs: this._queryAabbs, circles: this._queryCircles };
+  }
+
+  private updateShopInteriorVisibility() {
+    const px = this.playerRig ? this.playerRig.root.position.x : this.characters[this.activeCharId].posX;
+    const pz = this.playerRig ? this.playerRig.root.position.z : this.characters[this.activeCharId].posZ;
+    for (const si of this.shopInteriors) {
+      const dx = px - si.x;
+      const dz = pz - si.z;
+      si.group.visible = dx * dx + dz * dz <= si.radius * si.radius;
+    }
   }
 
   private spawnInitialVehicles() {
@@ -1254,6 +1377,133 @@ export class ViceEngine {
     });
   }
 
+  private spawnClubBouncers(initial = false) {
+    const cx = MALIBU_CLUB.x;
+    const cz = MALIBU_CLUB.z;
+    const spots: { x: number; z: number; heading: number; weapon: WeaponId }[] = initial
+      ? [
+          { x: MALIBU_CLUB.doorX - 1.6, z: cz - 3.6, heading: -Math.PI / 2, weapon: 'pistol' },
+          { x: MALIBU_CLUB.doorX - 1.6, z: cz + 3.6, heading: -Math.PI / 2, weapon: 'smg' },
+          { x: cx + 4.5, z: cz - 5.5, heading: -Math.PI / 2, weapon: 'smg' },
+        ]
+      : [
+          { x: cx + 6.5, z: cz - 6.0, heading: -Math.PI / 2, weapon: 'smg' },
+          { x: cx + 6.5, z: cz + 6.0, heading: -Math.PI / 2, weapon: 'pistol' },
+          { x: cx - 1.5, z: cz + 6.5, heading: Math.PI, weapon: 'smg' },
+        ];
+
+    for (let i = 0; i < spots.length; i++) {
+      const sp = spots[i];
+      const rig = createCharacterRig(
+        {
+          skinTone: i % 2 === 0 ? '#c68b67' : '#8d5524',
+          hairStyle: 'buzz',
+          hairColor: '#111827',
+          facialHair: i === 1 ? 'beard' : 'stubble',
+          glasses: 'aviators',
+          tattoo: 'none',
+          jacketStyle: 'suit',
+          jacketColor: '#09090b',
+          shirtColor: '#18181b',
+          pantsColor: '#09090b',
+          shoesColor: '#09090b',
+          accessory: 'watch',
+        },
+        this.textures.contactShadow
+      );
+      const wMesh = createWeaponMesh(sp.weapon, '#18181b');
+      wMesh.visible = !initial;
+      rig.weaponMount.add(wMesh);
+      rig.root.position.set(sp.x, 0, sp.z);
+      rig.root.rotation.y = sp.heading;
+      this.scene.add(rig.root);
+
+      this.npcs.push({
+        id: `bouncer_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 5)}`,
+        name: 'Ochranka klubu Malibu',
+        rig,
+        x: sp.x,
+        y: 0,
+        z: sp.z,
+        heading: sp.heading,
+        health: 110,
+        kind: 'bouncer',
+        behavior: initial ? 'wander' : 'fight',
+        activity: 'chill',
+        guardHomeX: sp.x,
+        guardHomeZ: sp.z,
+        guardHeading: sp.heading,
+        panicTimer: 0,
+        shootCooldown: 0.45 + i * 0.2,
+        tackleCooldown: 0,
+        wanderAngle: sp.heading,
+        wanderTimer: 2,
+        alive: true,
+        hasWeapon: true,
+        weaponId: sp.weapon,
+        weaponMesh: wMesh,
+      });
+    }
+  }
+
+  private alertClubBouncers(showNotice = true) {
+    let aliveBouncers = 0;
+    for (const n of this.npcs) {
+      if (n.alive && n.kind === 'bouncer') {
+        aliveBouncers += 1;
+        n.behavior = 'fight';
+        if (n.weaponMesh) n.weaponMesh.visible = true;
+        n.rig.rightArmPivot.rotation.x = -Math.PI / 2.2;
+      }
+    }
+    if (aliveBouncers === 0 && this.clubBouncerRespawnTimer <= 0) {
+      this.spawnClubBouncers(false);
+      this.clubBouncerRespawnTimer = 25;
+    }
+    this.clubBouncersAlerted = true;
+    if (showNotice && !this.clubAlarmNoticeShown) {
+      this.clubAlarmNoticeShown = true;
+      this.stuntMessage = 'Ochranka klubu Malibu spustila paľbu! Hľadaná osoba v klube!';
+      this.stuntTimer = 3.6;
+      this.audio.playUiChime('switch');
+    }
+  }
+
+  private stepClubSecurity(dt: number, px: number, py: number, pz: number) {
+    if (this.clubBouncerRespawnTimer > 0) {
+      this.clubBouncerRespawnTimer = Math.max(0, this.clubBouncerRespawnTimer - dt);
+    }
+
+    const inClub =
+      Math.abs(px - MALIBU_CLUB.x) <= 18.2 &&
+      Math.abs(pz - MALIBU_CLUB.z) <= 14.2 &&
+      py < 7.5;
+    const hasActivePolice = this.wantedStars > 0 && !this.settings.gameplayMods.noPolice;
+
+    if (inClub && hasActivePolice) {
+      if (!this.clubBouncersAlerted) {
+        this.alertClubBouncers(true);
+      } else {
+        // Ensure respawned reinforcements also mobilize if player stays inside while wanted
+        const anyAlive = this.npcs.some((n) => n.alive && n.kind === 'bouncer');
+        if (!anyAlive && this.clubBouncerRespawnTimer <= 0) {
+          this.spawnClubBouncers(false);
+          this.clubBouncerRespawnTimer = 25;
+        }
+      }
+    } else if (this.clubBouncersAlerted && !hasActivePolice && Math.hypot(px - MALIBU_CLUB.x, pz - MALIBU_CLUB.z) > 34) {
+      this.clubBouncersAlerted = false;
+      this.clubAlarmNoticeShown = false;
+      for (const n of this.npcs) {
+        if (n.alive && n.kind === 'bouncer') {
+          n.behavior = 'wander';
+          if (n.weaponMesh) n.weaponMesh.visible = false;
+          n.rig.rightArmPivot.rotation.x = 0;
+        }
+      }
+    }
+  }
+
   public syncEquippedWeaponMesh() {
     // 3rd person weapon mount
     while (this.playerRig.weaponMount.children.length > 1) {
@@ -1307,6 +1557,7 @@ export class ViceEngine {
       this.sunLight.shadow.map?.dispose();
       this.sunLight.shadow.map = null;
     }
+    this.renderer.shadowMap.needsUpdate = true;
 
     // Time of Day, Weather Override & Sandbox Mod Cheat Detection
     const tod = settings.gameplayMods.timeOfDay;
@@ -1471,6 +1722,13 @@ export class ViceEngine {
       }
     }
 
+    // Throttle expensive sky/fog/windowGlow material updates to ~12 Hz (instant on dt === 0 or lightning flash)
+    this.atmosphereTimer -= dt;
+    if (dt > 0 && this.lightningFlash <= 0.01 && this.atmosphereTimer > 0) {
+      return;
+    }
+    this.atmosphereTimer = 0.08;
+
     // Compute smooth solar elevation (-1 midnight .. 0 sunrise/sunset .. +1 noon)
     const sunAngle = (this.gameTimeNormalized - 0.25) * Math.PI * 2;
     const sunY = Math.sin(sunAngle);
@@ -1478,49 +1736,44 @@ export class ViceEngine {
     const dayWeight = THREE.MathUtils.smoothstep(sunY, -0.15, 0.35);
     const sunsetWeight = Math.exp(-Math.pow((sunY - 0.05) / 0.22, 2)) * (1 - this.rainIntensity * 0.7);
 
-    const nightHorizon = new THREE.Color(0x0f172a);
-    const nightMid = new THREE.Color(0x090d1a);
-    const nightTop = new THREE.Color(0x020617);
+    _cDayHor.copy(_cDayHorBase).lerp(_cRainHor, this.rainIntensity * 0.75);
+    _cDayMid.copy(_cDayMidBase).lerp(_cRainMid, this.rainIntensity * 0.82);
+    _cDayTop.copy(_cDayTopBase).lerp(_cRainTop, this.rainIntensity * 0.85);
+    _cSunMid.copy(_cSunMidBase).lerp(_cRainTop, 0.35);
 
-    const dayHorizon = new THREE.Color(0xbae6fd).lerp(new THREE.Color(0x64748b), this.rainIntensity * 0.75);
-    const dayMid = new THREE.Color(0x38bdf8).lerp(new THREE.Color(0x475569), this.rainIntensity * 0.82);
-    const dayTop = new THREE.Color(0x0284c7).lerp(new THREE.Color(0x334155), this.rainIntensity * 0.85);
-
-    const sunsetHorizon = new THREE.Color(0xfb923c);
-    const sunsetMid = new THREE.Color(0x7e22ce).lerp(new THREE.Color(0x334155), 0.35);
-    const sunsetTop = new THREE.Color(0x0f172a);
-
-    const horizon = nightHorizon.clone().lerp(dayHorizon, dayWeight).lerp(sunsetHorizon, sunsetWeight * 0.85);
-    const mid = nightMid.clone().lerp(dayMid, dayWeight).lerp(sunsetMid, sunsetWeight * 0.78);
-    const top = nightTop.clone().lerp(dayTop, dayWeight).lerp(sunsetTop, sunsetWeight * 0.7);
+    _cHor.copy(_cNightHor).lerp(_cDayHor, dayWeight).lerp(_cSunHor, sunsetWeight * 0.85);
+    _cMid.copy(_cNightMid).lerp(_cDayMid, dayWeight).lerp(_cSunMid, sunsetWeight * 0.78);
+    _cTop.copy(_cNightTop).lerp(_cDayTop, dayWeight).lerp(_cSunTop, sunsetWeight * 0.7);
 
     if (this.lightningFlash > 0.05) {
-      horizon.lerp(new THREE.Color(0xe2e8f0), this.lightningFlash * 0.45);
-      mid.lerp(new THREE.Color(0xf8fafc), this.lightningFlash * 0.35);
+      _cHor.lerp(_cLightningA, this.lightningFlash * 0.45);
+      _cMid.lerp(_cLightningB, this.lightningFlash * 0.35);
     }
 
-    this.skyMat.uniforms.uHorizonColor.value.copy(horizon);
-    this.skyMat.uniforms.uMidColor.value.copy(mid);
-    this.skyMat.uniforms.uTopColor.value.copy(top);
+    this.skyMat.uniforms.uHorizonColor.value.copy(_cHor);
+    this.skyMat.uniforms.uMidColor.value.copy(_cMid);
+    this.skyMat.uniforms.uTopColor.value.copy(_cTop);
     this.skyMat.uniforms.uSunDir.value.set(sunX * 0.8, Math.max(-0.2, sunY), 0.42).normalize();
     this.skyMat.uniforms.uSunColor.value.set(sunsetWeight > 0.4 ? 0xffedd5 : 0xfffbeb);
     this.skyMat.uniforms.uSunStrength.value = THREE.MathUtils.lerp(0.28, 1.05, Math.max(dayWeight, sunsetWeight)) * (1 - this.rainIntensity * 0.7);
 
-    const fogColor = horizon.clone().lerp(mid, 0.22);
+    _cFog.copy(_cHor).lerp(_cMid, 0.22);
     const baseFog = Math.max(0.0005, 0.24 / Math.max(200, this.settings.graphics.viewDistance));
     const fogDensity = baseFog * (1 + this.fogWeatherBoost * 1.45);
-    this.scene.background = fogColor;
+    if (this.scene.background instanceof THREE.Color) {
+      this.scene.background.copy(_cFog);
+    } else {
+      this.scene.background = _cFog.clone();
+    }
     if (this.scene.fog instanceof THREE.FogExp2) {
-      this.scene.fog.color.copy(fogColor);
+      this.scene.fog.color.copy(_cFog);
       this.scene.fog.density = fogDensity * THREE.MathUtils.lerp(1.12, 0.78, dayWeight);
     } else {
-      this.scene.fog = new THREE.FogExp2(fogColor.getHex(), fogDensity);
+      this.scene.fog = new THREE.FogExp2(_cFog.getHex(), fogDensity);
     }
 
-    const sunColor = new THREE.Color(0x93c5fd)
-      .lerp(new THREE.Color(0xfffbeb), dayWeight)
-      .lerp(new THREE.Color(0xfdba74), sunsetWeight * 0.8);
-    this.sunLight.color.copy(sunColor);
+    _cSunCol.copy(_cSunLow).lerp(_cSunHigh, dayWeight).lerp(_cSunWarm, sunsetWeight * 0.8);
+    this.sunLight.color.copy(_cSunCol);
     const rainDim = 1 - this.rainIntensity * 0.45;
     this.sunLight.intensity = THREE.MathUtils.lerp(0.45, 1.82, Math.max(dayWeight, sunsetWeight * 0.75)) * rainDim + this.lightningFlash * 2.1;
     this.rimLight.color.set(dayWeight > 0.5 ? 0xe0f2fe : 0x60a5fa);
@@ -1761,11 +2014,18 @@ export class ViceEngine {
     this.policeDispatchTimer = 0;
     this.policeDispatchReason = null;
     this.pendingDispatchStars = 0;
+    this.clubBouncersAlerted = false;
+    this.clubAlarmNoticeShown = false;
 
     this.npcs = this.npcs.filter((n) => {
       if (n.kind === 'police') {
         this.scene.remove(n.rig.root);
         return false;
+      }
+      if (n.kind === 'bouncer') {
+        n.behavior = 'wander';
+        if (n.weaponMesh) n.weaponMesh.visible = false;
+        n.rig.rightArmPivot.rotation.x = 0;
       }
       return true;
     });
@@ -2487,11 +2747,28 @@ export class ViceEngine {
     this.textures.oceanNormal.offset.x = (1 - ((this.elapsedSec * 0.018) % 1)) % 1;
     this.textures.oceanNormal.offset.y = (this.elapsedSec * 0.022) % 1;
 
-    // Keep sun shadow frustum centered near player
+    // Keep sun shadow frustum centered near player, snapped to shadow-map texels & updated only on displacement/cooldown
     const px = this.playerRig.root.position.x;
     const pz = this.playerRig.root.position.z;
-    this.sunLight.target.position.set(px, 0, pz);
-    this.sunLight.position.set(px + 65, 85, pz + 45);
+    this.shadowCooldown = Math.max(0, this.shadowCooldown - dt);
+    const shadowTexel = 150 / (this.sunLight.shadow.mapSize.width || 1024);
+    const snapX = Math.round(px / shadowTexel) * shadowTexel;
+    const snapZ = Math.round(pz / shadowTexel) * shadowTexel;
+    if (
+      this.sunLight.castShadow &&
+      (Math.abs(snapX - this.lastShadowX) > 0.65 ||
+        Math.abs(snapZ - this.lastShadowZ) > 0.65 ||
+        this.shadowCooldown <= 0 ||
+        this.lightningFlash > 0.05)
+    ) {
+      this.sunLight.target.position.set(snapX, 0, snapZ);
+      this.sunLight.position.set(snapX + 65, 85, snapZ + 45);
+      this.sunLight.target.updateMatrixWorld();
+      this.renderer.shadowMap.needsUpdate = true;
+      this.lastShadowX = snapX;
+      this.lastShadowZ = snapZ;
+      this.shadowCooldown = 0.022;
+    }
 
     const useBloom =
       !this.isSoftwareGl &&
@@ -2812,47 +3089,51 @@ export class ViceEngine {
       this.taxiDropBeacon.rotation.z += dt * 2.4;
     }
 
-    // Animate Malibu Neon Lounge stage show, disco ball, EQ bars & choreographed club performers
+    // Animate Malibu Neon Lounge stage show, disco ball, EQ bars & choreographed club performers (only when near club)
     if (this.clubShow) {
-      const tempo = this.clubEncoreTimer > 0 ? 5.6 : 3.2;
-      this.clubShow.discoBall.rotation.y += dt * (this.clubEncoreTimer > 0 ? 3.2 : 1.3);
-      for (let i = 0; i < this.clubShow.spotlights.length; i++) {
-        const sp = this.clubShow.spotlights[i];
-        sp.rotation.z = Math.sin(this.elapsedSec * tempo * 0.5 + i * 1.4) * 0.45;
-        sp.rotation.x = Math.cos(this.elapsedSec * tempo * 0.4 + i) * 0.3;
-      }
-      for (let i = 0; i < this.clubShow.eqBars.length; i++) {
-        const bar = this.clubShow.eqBars[i];
-        const pulse = 0.55 + Math.abs(Math.sin(this.elapsedSec * tempo * 1.7 + i * 0.75)) * (this.clubEncoreTimer > 0 ? 1.85 : 1.15);
-        bar.scale.y = pulse;
-      }
-      for (const pf of this.clubShow.performers) {
-        const ph = this.elapsedSec * tempo + pf.phase;
-        if (pf.style === 'pole') {
-          pf.rig.root.position.set(
-            pf.baseX + Math.sin(ph * 0.65) * 0.55,
-            pf.baseY + Math.abs(Math.sin(ph)) * 0.35,
-            pf.baseZ + Math.cos(ph * 0.65) * 0.55
-          );
-          pf.rig.root.rotation.y = ph * 0.9;
-          pf.rig.leftArmPivot.rotation.x = -1.4 + Math.sin(ph) * 0.4;
-          pf.rig.rightArmPivot.rotation.x = -1.4 - Math.sin(ph) * 0.4;
-          pf.rig.leftLegPivot.rotation.x = Math.sin(ph) * 0.45;
-          pf.rig.rightLegPivot.rotation.x = -Math.sin(ph) * 0.45;
-        } else if (pf.style === 'podiumL' || pf.style === 'podiumR') {
-          pf.rig.root.position.set(pf.baseX, pf.baseY + Math.abs(Math.sin(ph * 1.1)) * 0.14, pf.baseZ);
-          pf.rig.root.rotation.y = Math.sin(ph * 0.5) * 0.85;
-          pf.rig.leftArmPivot.rotation.set(-0.9 + Math.sin(ph) * 0.55, 0, -0.35);
-          pf.rig.rightArmPivot.rotation.set(-0.9 - Math.sin(ph) * 0.55, 0, 0.35);
-          pf.rig.leftLegPivot.rotation.x = Math.sin(ph) * 0.25;
-          pf.rig.rightLegPivot.rotation.x = -Math.sin(ph) * 0.25;
-        } else if (pf.style === 'dj') {
-          pf.rig.leftArmPivot.rotation.x = -0.8 + Math.sin(ph * 1.6) * 0.28;
-          pf.rig.rightArmPivot.rotation.x = -0.8 - Math.sin(ph * 1.6) * 0.28;
-        } else {
-          pf.rig.root.position.y = pf.baseY + Math.abs(Math.sin(ph * 1.2)) * 0.08;
-          pf.rig.leftArmPivot.rotation.x = this.clubEncoreTimer > 0 ? -1.8 + Math.sin(ph * 2) * 0.4 : -0.4 + Math.sin(ph) * 0.25;
-          pf.rig.rightArmPivot.rotation.x = this.clubEncoreTimer > 0 ? -1.8 - Math.sin(ph * 2) * 0.4 : -0.4 - Math.sin(ph) * 0.25;
+      const cdx = this.playerRig.root.position.x - this.clubShow.clubX;
+      const cdz = this.playerRig.root.position.z - this.clubShow.clubZ;
+      if (cdx * cdx + cdz * cdz < 6724) {
+        const tempo = this.clubEncoreTimer > 0 ? 5.6 : 3.2;
+        this.clubShow.discoBall.rotation.y += dt * (this.clubEncoreTimer > 0 ? 3.2 : 1.3);
+        for (let i = 0; i < this.clubShow.spotlights.length; i++) {
+          const sp = this.clubShow.spotlights[i];
+          sp.rotation.z = Math.sin(this.elapsedSec * tempo * 0.5 + i * 1.4) * 0.45;
+          sp.rotation.x = Math.cos(this.elapsedSec * tempo * 0.4 + i) * 0.3;
+        }
+        for (let i = 0; i < this.clubShow.eqBars.length; i++) {
+          const bar = this.clubShow.eqBars[i];
+          const pulse = 0.55 + Math.abs(Math.sin(this.elapsedSec * tempo * 1.7 + i * 0.75)) * (this.clubEncoreTimer > 0 ? 1.85 : 1.15);
+          bar.scale.y = pulse;
+        }
+        for (const pf of this.clubShow.performers) {
+          const ph = this.elapsedSec * tempo + pf.phase;
+          if (pf.style === 'pole') {
+            pf.rig.root.position.set(
+              pf.baseX + Math.sin(ph * 0.65) * 0.55,
+              pf.baseY + Math.abs(Math.sin(ph)) * 0.35,
+              pf.baseZ + Math.cos(ph * 0.65) * 0.55
+            );
+            pf.rig.root.rotation.y = ph * 0.9;
+            pf.rig.leftArmPivot.rotation.x = -1.4 + Math.sin(ph) * 0.4;
+            pf.rig.rightArmPivot.rotation.x = -1.4 - Math.sin(ph) * 0.4;
+            pf.rig.leftLegPivot.rotation.x = Math.sin(ph) * 0.45;
+            pf.rig.rightLegPivot.rotation.x = -Math.sin(ph) * 0.45;
+          } else if (pf.style === 'podiumL' || pf.style === 'podiumR') {
+            pf.rig.root.position.set(pf.baseX, pf.baseY + Math.abs(Math.sin(ph * 1.1)) * 0.14, pf.baseZ);
+            pf.rig.root.rotation.y = Math.sin(ph * 0.5) * 0.85;
+            pf.rig.leftArmPivot.rotation.set(-0.9 + Math.sin(ph) * 0.55, 0, -0.35);
+            pf.rig.rightArmPivot.rotation.set(-0.9 - Math.sin(ph) * 0.55, 0, 0.35);
+            pf.rig.leftLegPivot.rotation.x = Math.sin(ph) * 0.25;
+            pf.rig.rightLegPivot.rotation.x = -Math.sin(ph) * 0.25;
+          } else if (pf.style === 'dj') {
+            pf.rig.leftArmPivot.rotation.x = -0.8 + Math.sin(ph * 1.6) * 0.28;
+            pf.rig.rightArmPivot.rotation.x = -0.8 - Math.sin(ph * 1.6) * 0.28;
+          } else {
+            pf.rig.root.position.y = pf.baseY + Math.abs(Math.sin(ph * 1.2)) * 0.08;
+            pf.rig.leftArmPivot.rotation.x = this.clubEncoreTimer > 0 ? -1.8 + Math.sin(ph * 2) * 0.4 : -0.4 + Math.sin(ph) * 0.25;
+            pf.rig.rightArmPivot.rotation.x = this.clubEncoreTimer > 0 ? -1.8 - Math.sin(ph * 2) * 0.4 : -0.4 - Math.sin(ph) * 0.25;
+          }
         }
       }
     }
@@ -2868,6 +3149,17 @@ export class ViceEngine {
 
     const px = this.playerRig.root.position.x;
     const pz = this.playerRig.root.position.z;
+
+    // 5 Hz Shop Interior Proximity Culling & GPS Cache Timer + Malibu Club Security Check
+    this.interiorCullTimer -= dt;
+    if (this.interiorCullTimer <= 0) {
+      this.interiorCullTimer = 0.2;
+      this.updateShopInteriorVisibility();
+    }
+    if (this.gpsRefreshTimer > 0) {
+      this.gpsRefreshTimer = Math.max(0, this.gpsRefreshTimer - dt);
+    }
+    this.stepClubSecurity(dt, px, this.playerRig.root.position.y, pz);
 
     // Auto-clear custom GPS waypoint when player arrives
     if (!this.activeMission && this.gpsWaypoint && this.taxiMode === 'none') {
@@ -3127,9 +3419,9 @@ export class ViceEngine {
     activeChar.posZ = this.playerRig.root.position.z;
     activeChar.heading = this.camYaw;
 
-    // Push Telemetry to React HUD (~25Hz)
+    // Push Telemetry to React HUD (~18Hz)
     this.telemetryTimer += dt;
-    if (this.telemetryTimer >= 0.04) {
+    if (this.telemetryTimer >= 0.055) {
       this.telemetryTimer = 0;
       let prompt: string | null = null;
       if (this.currentVehicle && nearbyShop?.category === 'garage') {
@@ -4418,8 +4710,13 @@ export class ViceEngine {
 
     for (const v of this.vehicles) {
       if (v.occupiedByPlayer || v.destroyed) continue;
+      const dvx = v.x - px;
+      const dvz = v.z - pz;
+      const distSq = dvx * dvx + dvz * dvz;
+      const isAirVeh = v.kind === 'plane' || v.kind === 'helicopter' || v.kind === 'fighter_jet';
 
       if (v.isPolice && this.wantedStars > 0 && !this.settings.gameplayMods.noPolice) {
+        v.rig.root.visible = distSq <= 160000;
         this.updateVehicleBeacon(v);
         const dx = px - v.x;
         const dz = pz - v.z;
@@ -4459,10 +4756,17 @@ export class ViceEngine {
         v.y = this.getGroundHeightAt(v.x, v.z, v.y);
         v.rig.root.position.set(v.x, v.y, v.z);
         v.rig.root.rotation.y = v.heading;
-        v.wheelSpin += (v.speed / 0.36) * dt;
-        v.rig.wheels.forEach((w) => (w.rotation.x = v.wheelSpin));
-        v.rig.frontSteerPivots.forEach((p) => (p.rotation.y = v.steerAngle * 0.8));
+        if (distSq <= 19600) {
+          v.wheelSpin += (v.speed / 0.36) * dt;
+          v.rig.wheels.forEach((w) => (w.rotation.x = v.wheelSpin));
+          v.rig.frontSteerPivots.forEach((p) => (p.rotation.y = v.steerAngle * 0.8));
+        }
       } else if (v.isTraffic) {
+        const withinCull = distSq <= 115600;
+        if (!withinCull) {
+          v.rig.root.visible = false;
+          continue;
+        }
         activeTrafficCount += 1;
         v.rig.root.visible = activeTrafficCount <= trafficCap;
         if (!v.rig.root.visible) continue;
@@ -4612,9 +4916,16 @@ export class ViceEngine {
         v.y = this.getGroundHeightAt(v.x, v.z, v.y);
         v.rig.root.position.set(v.x, v.y, v.z);
         v.rig.root.rotation.y = v.heading;
-        v.wheelSpin += (v.speed / 0.36) * dt;
-        v.rig.wheels.forEach((w) => (w.rotation.x = v.wheelSpin));
-        v.rig.frontSteerPivots.forEach((p) => (p.rotation.y = v.steerAngle * 0.8));
+        if (distSq <= 19600) {
+          v.wheelSpin += (v.speed / 0.36) * dt;
+          v.rig.wheels.forEach((w) => (w.rotation.x = v.wheelSpin));
+          v.rig.frontSteerPivots.forEach((p) => (p.rotation.y = v.steerAngle * 0.8));
+        }
+      } else {
+        // Distant parked ground/boat/air visibility cull (aircraft visible up to 680m, ground cars/boats up to 340m)
+        const maxCullSq = isAirVeh ? 462400 : 115600;
+        v.rig.root.visible = distSq <= maxCullSq;
+        if (!v.rig.root.visible) continue;
       }
 
       // Vehicle-to-Player-Car elastic bump + real-time deformation
@@ -4665,7 +4976,18 @@ export class ViceEngine {
 
       const dx = px - npc.x;
       const dz = pz - npc.z;
-      const dist = Math.hypot(dx, dz);
+      const distSq = dx * dx + dz * dz;
+      if (npc.kind === 'civilian') {
+        if (distSq > 30625) {
+          npc.rig.root.visible = false;
+          continue;
+        }
+        npc.rig.root.visible = true;
+      } else {
+        npc.rig.root.visible = distSq <= 48400;
+      }
+      const dist = Math.sqrt(distSq);
+      const animateLimbs = distSq <= 16900;
 
       // Run over by player vehicle!
       if (this.currentVehicle && Math.abs(this.currentVehicle.speed) > 7 && dist < 2.2) {
@@ -4722,10 +5044,12 @@ export class ViceEngine {
               const col = this.resolveBuildingCollision(nx, nz, 0.42, 0, false);
               npc.x = col.x;
               npc.z = col.z;
-              const swing = Math.sin(this.elapsedSec * 9) * 0.55;
-              npc.rig.leftLegPivot.rotation.x = swing;
-              npc.rig.rightLegPivot.rotation.x = -swing;
-            } else {
+              if (animateLimbs) {
+                const swing = Math.sin(this.elapsedSec * 9) * 0.55;
+                npc.rig.leftLegPivot.rotation.x = swing;
+                npc.rig.rightLegPivot.rotation.x = -swing;
+              }
+            } else if (animateLimbs) {
               npc.rig.leftLegPivot.rotation.x = 0;
               npc.rig.rightLegPivot.rotation.x = 0;
             }
@@ -4751,10 +5075,12 @@ export class ViceEngine {
                 this.audio.playImpact(0.35);
               }
             }
-            const swing = Math.sin(this.elapsedSec * 11) * 0.6;
-            npc.rig.leftLegPivot.rotation.x = swing;
-            npc.rig.rightLegPivot.rotation.x = -swing;
-            npc.rig.rightArmPivot.rotation.x = -Math.PI / 2.6 + swing;
+            if (animateLimbs) {
+              const swing = Math.sin(this.elapsedSec * 11) * 0.6;
+              npc.rig.leftLegPivot.rotation.x = swing;
+              npc.rig.rightLegPivot.rotation.x = -swing;
+              npc.rig.rightArmPivot.rotation.x = -Math.PI / 2.6 + swing;
+            }
           }
         } else if (npc.behavior === 'flee') {
           // Sprint away from player along open ground (7.4 m/s vs player 10.2 m/s sprint so player can chase & catch!)
@@ -4771,15 +5097,23 @@ export class ViceEngine {
           npc.x = col.x;
           npc.z = col.z;
           npc.heading = awayAngle;
-          const swing = Math.sin(this.elapsedSec * 14) * 0.7;
-          npc.rig.leftLegPivot.rotation.x = swing;
-          npc.rig.rightLegPivot.rotation.x = -swing;
-          npc.rig.leftArmPivot.rotation.x = -swing * 0.85;
-          npc.rig.rightArmPivot.rotation.x = swing * 0.85;
+          if (animateLimbs) {
+            const swing = Math.sin(this.elapsedSec * 14) * 0.7;
+            npc.rig.leftLegPivot.rotation.x = swing;
+            npc.rig.rightLegPivot.rotation.x = -swing;
+            npc.rig.leftArmPivot.rotation.x = -swing * 0.85;
+            npc.rig.rightArmPivot.rotation.x = swing * 0.85;
+          }
         } else if (npc.behavior === 'seek_shelter') {
-          const shop = SHOPS.reduce((best, s) =>
-            Math.hypot(s.doorX - npc.x, s.doorZ - npc.z) < Math.hypot(best.doorX - npc.x, best.doorZ - npc.z) ? s : best
-          );
+          let shop = SHOPS[0];
+          let bestShopD = Infinity;
+          for (const s of SHOPS) {
+            const sd = (s.doorX - npc.x) * (s.doorX - npc.x) + (s.doorZ - npc.z) * (s.doorZ - npc.z);
+            if (sd < bestShopD) {
+              bestShopD = sd;
+              shop = s;
+            }
+          }
           const toShopAngle = Math.atan2(shop.doorX - npc.x, shop.doorZ - npc.z);
           const spd = 4.6;
           const col = this.resolveBuildingCollision(
@@ -4792,33 +5126,41 @@ export class ViceEngine {
           npc.x = col.x;
           npc.z = col.z;
           npc.heading = toShopAngle;
-          const swing = Math.sin(this.elapsedSec * 10) * 0.55;
-          npc.rig.leftLegPivot.rotation.x = swing;
-          npc.rig.rightLegPivot.rotation.x = -swing;
-          npc.rig.leftArmPivot.rotation.x = -1.9;
-          npc.rig.rightArmPivot.rotation.x = -1.9;
+          if (animateLimbs) {
+            const swing = Math.sin(this.elapsedSec * 10) * 0.55;
+            npc.rig.leftLegPivot.rotation.x = swing;
+            npc.rig.rightLegPivot.rotation.x = -swing;
+            npc.rig.leftArmPivot.rotation.x = -1.9;
+            npc.rig.rightArmPivot.rotation.x = -1.9;
+          }
         } else if (npc.behavior === 'cheer') {
           npc.heading = Math.atan2(dx, dz);
-          npc.rig.leftLegPivot.rotation.x = 0;
-          npc.rig.rightLegPivot.rotation.x = 0;
-          const w = Math.sin(this.elapsedSec * 8 + npc.x) * 0.45;
-          npc.rig.leftArmPivot.rotation.x = -2.4 + w;
-          npc.rig.rightArmPivot.rotation.x = -2.4 - w;
+          if (animateLimbs) {
+            npc.rig.leftLegPivot.rotation.x = 0;
+            npc.rig.rightLegPivot.rotation.x = 0;
+            const w = Math.sin(this.elapsedSec * 8 + npc.x) * 0.45;
+            npc.rig.leftArmPivot.rotation.x = -2.4 + w;
+            npc.rig.rightArmPivot.rotation.x = -2.4 - w;
+          }
         } else if (npc.activity === 'chat' && npc.chatTargetX !== undefined && npc.chatTargetZ !== undefined) {
           // Conversing pedestrians stand facing partner with subtle lifelike gestures
           npc.heading = Math.atan2(npc.chatTargetX - npc.x, npc.chatTargetZ - npc.z);
-          npc.rig.leftLegPivot.rotation.x = 0;
-          npc.rig.rightLegPivot.rotation.x = 0;
-          const phase = (npc.id.charCodeAt(4) || 1) * 0.7;
-          const gesture = Math.sin(this.elapsedSec * 2.6 + phase) * 0.22;
-          npc.rig.leftArmPivot.rotation.x = -0.25 + gesture;
-          npc.rig.rightArmPivot.rotation.x = -0.35 - gesture;
+          if (animateLimbs) {
+            npc.rig.leftLegPivot.rotation.x = 0;
+            npc.rig.rightLegPivot.rotation.x = 0;
+            const phase = (npc.id.charCodeAt(4) || 1) * 0.7;
+            const gesture = Math.sin(this.elapsedSec * 2.6 + phase) * 0.22;
+            npc.rig.leftArmPivot.rotation.x = -0.25 + gesture;
+            npc.rig.rightArmPivot.rotation.x = -0.35 - gesture;
+          }
         } else if (npc.activity === 'chill') {
           // Relaxed coastal/plaza idle stance
-          npc.rig.leftLegPivot.rotation.x = 0;
-          npc.rig.rightLegPivot.rotation.x = 0;
-          npc.rig.leftArmPivot.rotation.x = Math.sin(this.elapsedSec * 1.3 + npc.x) * 0.06;
-          npc.rig.rightArmPivot.rotation.x = -Math.sin(this.elapsedSec * 1.3 + npc.z) * 0.06;
+          if (animateLimbs) {
+            npc.rig.leftLegPivot.rotation.x = 0;
+            npc.rig.rightLegPivot.rotation.x = 0;
+            npc.rig.leftArmPivot.rotation.x = Math.sin(this.elapsedSec * 1.3 + npc.x) * 0.06;
+            npc.rig.rightArmPivot.rotation.x = -Math.sin(this.elapsedSec * 1.3 + npc.z) * 0.06;
+          }
         } else {
           npc.wanderTimer -= dt;
           if (npc.wanderTimer <= 0) {
@@ -4837,11 +5179,84 @@ export class ViceEngine {
             if (col.collided) npc.wanderAngle += Math.PI * 0.65;
           }
           npc.heading = npc.wanderAngle;
-          const swing = Math.sin(this.elapsedSec * 4.5) * 0.42;
-          npc.rig.leftLegPivot.rotation.x = swing;
-          npc.rig.rightLegPivot.rotation.x = -swing;
-          npc.rig.leftArmPivot.rotation.x = -swing * 0.5;
-          npc.rig.rightArmPivot.rotation.x = swing * 0.5;
+          if (animateLimbs) {
+            const swing = Math.sin(this.elapsedSec * 4.5) * 0.42;
+            npc.rig.leftLegPivot.rotation.x = swing;
+            npc.rig.rightLegPivot.rotation.x = -swing;
+            npc.rig.leftArmPivot.rotation.x = -swing * 0.5;
+            npc.rig.rightArmPivot.rotation.x = swing * 0.5;
+          }
+        }
+      } else if (npc.kind === 'bouncer') {
+        // Malibu Neon Lounge Club Security AI
+        if (npc.behavior === 'fight') {
+          if (npc.weaponMesh) npc.weaponMesh.visible = true;
+          npc.rig.rightArmPivot.rotation.x = -Math.PI / 2.2;
+          if (dist < 68) {
+            // Route out through the West doorway (701, -340) if bouncer is inside and player stepped outside
+            const insideClub = npc.x > 702.5 && Math.abs(npc.z - MALIBU_CLUB.z) < 14.5;
+            const playerOutside = px < 701.5;
+            const tx = insideClub && playerOutside ? MALIBU_CLUB.doorX - 0.8 : px;
+            const tz = insideClub && playerOutside ? MALIBU_CLUB.doorZ : pz;
+            const toX = tx - npc.x;
+            const toZ = tz - npc.z;
+            const moveDist = Math.hypot(toX, toZ) || 0.001;
+            npc.heading = Math.atan2(dx, dz);
+
+            if (dist > 10.5 || (insideClub && playerOutside)) {
+              const spd = 5.4;
+              const nx = npc.x + (toX / moveDist) * spd * dt;
+              const nz = npc.z + (toZ / moveDist) * spd * dt;
+              const col = this.resolveBuildingCollision(nx, nz, 0.4, 0, false);
+              npc.x = col.x;
+              npc.z = col.z;
+              const swing = Math.sin(this.elapsedSec * 10) * 0.6;
+              npc.rig.leftLegPivot.rotation.x = swing;
+              npc.rig.rightLegPivot.rotation.x = -swing;
+            } else {
+              npc.rig.leftLegPivot.rotation.x = 0;
+              npc.rig.rightLegPivot.rotation.x = 0;
+            }
+
+            npc.shootCooldown -= dt;
+            if (npc.shootCooldown <= 0 && dist < 44) {
+              npc.shootCooldown = npc.weaponId === 'smg' ? 0.65 : 0.95;
+              this.enemyFireAtPlayer(npc, dist);
+            }
+          } else if (this.wantedStars === 0) {
+            npc.behavior = 'wander';
+            if (npc.weaponMesh) npc.weaponMesh.visible = false;
+            npc.rig.rightArmPivot.rotation.x = 0;
+          }
+        } else {
+          // Peaceful club guard duty: stay or walk back to guard post
+          if (npc.weaponMesh) npc.weaponMesh.visible = false;
+          npc.rig.rightArmPivot.rotation.x = 0;
+          const hx = npc.guardHomeX ?? MALIBU_CLUB.doorX - 1.5;
+          const hz = npc.guardHomeZ ?? MALIBU_CLUB.doorZ;
+          const hdx = hx - npc.x;
+          const hdz = hz - npc.z;
+          const hDist = Math.hypot(hdx, hdz);
+          if (hDist > 0.8) {
+            const spd = 2.6;
+            const col = this.resolveBuildingCollision(
+              npc.x + (hdx / hDist) * spd * dt,
+              npc.z + (hdz / hDist) * spd * dt,
+              0.4,
+              0,
+              false
+            );
+            npc.x = col.x;
+            npc.z = col.z;
+            npc.heading = Math.atan2(hdx, hdz);
+            const swing = Math.sin(this.elapsedSec * 5) * 0.42;
+            npc.rig.leftLegPivot.rotation.x = swing;
+            npc.rig.rightLegPivot.rotation.x = -swing;
+          } else {
+            npc.heading = npc.guardHeading ?? -Math.PI / 2;
+            npc.rig.leftLegPivot.rotation.x = 0;
+            npc.rig.rightLegPivot.rotation.x = 0;
+          }
         }
       } else {
         // Police or Syndicate Enemy AI
@@ -4855,10 +5270,12 @@ export class ViceEngine {
             const col = this.resolveBuildingCollision(nx, nz, 0.42, 0, false);
             npc.x = col.x;
             npc.z = col.z;
-            const swing = Math.sin(this.elapsedSec * 9) * 0.55;
-            npc.rig.leftLegPivot.rotation.x = swing;
-            npc.rig.rightLegPivot.rotation.x = -swing;
-          } else {
+            if (animateLimbs) {
+              const swing = Math.sin(this.elapsedSec * 9) * 0.55;
+              npc.rig.leftLegPivot.rotation.x = swing;
+              npc.rig.rightLegPivot.rotation.x = -swing;
+            }
+          } else if (animateLimbs) {
             npc.rig.leftLegPivot.rotation.x = 0;
             npc.rig.rightLegPivot.rotation.x = 0;
           }
@@ -4987,7 +5404,7 @@ export class ViceEngine {
     this.spawnTracer(origin, target, 0xef4444);
     const hitChance = Math.max(0.15, 0.55 - dist * 0.012);
     if (Math.random() < hitChance) {
-      this.damagePlayer(npc.kind === 'police' ? 8 : npc.kind === 'civilian' ? 7 : 10);
+      this.damagePlayer(npc.kind === 'police' ? 8 : npc.kind === 'bouncer' ? 9 : npc.kind === 'civilian' ? 7 : 10);
     }
   }
 
@@ -5056,7 +5473,14 @@ export class ViceEngine {
       if (dist < 1.5 || dist > def.range) continue;
       const dot = (dx * forward.x + dy * forward.y + dz * forward.z) / dist;
       if (dot > 0.89) {
-        const priority = (npc.kind === 'enemy' ? 0.08 : npc.kind === 'police' ? 0.04 : 0) + dot - dist * 0.0008;
+        const priority =
+          (npc.kind === 'enemy' || (npc.kind === 'bouncer' && npc.behavior === 'fight')
+            ? 0.08
+            : npc.kind === 'police'
+              ? 0.04
+              : 0) +
+          dot -
+          dist * 0.0008;
         if (priority > bestScore) {
           bestScore = priority;
           bestPos = { x: npc.x, y: ty, z: npc.z };
@@ -5108,7 +5532,13 @@ export class ViceEngine {
     this.camPitch = THREE.MathUtils.clamp(this.camPitch - (def.id === 'shotgun' ? 0.032 : 0.011), -0.55, 0.85);
 
     // Firing into the air scatters nearby crowd, without spawning random police!
-    this.alertNearbyCrowd(this.playerRig.root.position.x, this.playerRig.root.position.z, 26, true);
+    const fpx = this.playerRig.root.position.x;
+    const fpy = this.playerRig.root.position.y;
+    const fpz = this.playerRig.root.position.z;
+    this.alertNearbyCrowd(fpx, fpz, 26, true);
+    if (Math.abs(fpx - MALIBU_CLUB.x) <= 19.5 && Math.abs(fpz - MALIBU_CLUB.z) <= 15.5 && fpy < 7.5) {
+      this.alertClubBouncers(true);
+    }
 
     // Muzzle origin
     const muzzleWorld = _v1;
@@ -5309,18 +5739,21 @@ export class ViceEngine {
         npc.behavior = 'flee';
         npc.panicTimer = 12;
       }
+    } else if (npc.kind === 'bouncer' && npc.health > 0) {
+      this.alertClubBouncers(true);
     }
     if (npc.health <= 0 && npc.alive) {
       npc.alive = false;
       this.scene.remove(npc.rig.root);
       this.stats.totalEliminations += 1;
-      const bounty = npc.kind === 'enemy' ? 220 : npc.kind === 'police' ? 150 : fromTackle ? 85 : 40;
+      const bounty =
+        npc.kind === 'enemy' ? 220 : npc.kind === 'bouncer' ? 160 : npc.kind === 'police' ? 150 : fromTackle ? 85 : 40;
       this.cash += bounty;
       this.callbacks.onCashChange(this.cash);
       this.callbacks.onStatsChange({ ...this.stats });
 
-      // Dropped ammo when eliminating armed NPC or police officer
-      if (npc.kind === 'police' || npc.hasWeapon) {
+      // Dropped ammo when eliminating armed NPC, club security or police officer
+      if (npc.kind === 'police' || npc.kind === 'bouncer' || npc.hasWeapon) {
         const owned = this.inventory.weapons.find((w) => w.id === this.inventory.equippedWeapon);
         if (owned) {
           owned.reserveAmmo += 8;
@@ -5333,10 +5766,14 @@ export class ViceEngine {
         this.stuntTimer = 2.0;
       }
 
-      // Delayed Police Dispatch upon eliminating civilian or police — gives player time to escape!
-      if (!this.settings.gameplayMods.noPolice && (npc.kind === 'civilian' || npc.kind === 'police')) {
+      // Delayed Police Dispatch upon eliminating civilian, bouncer or police — gives player time to escape!
+      if (!this.settings.gameplayMods.noPolice && (npc.kind === 'civilian' || npc.kind === 'police' || npc.kind === 'bouncer')) {
         this.schedulePoliceDispatch(
-          npc.kind === 'police' ? 'Útok na príslušníka VCPD' : 'Nahlásený trestný čin v okrese',
+          npc.kind === 'police'
+            ? 'Útok na príslušníka VCPD'
+            : npc.kind === 'bouncer'
+              ? 'Napadnutie ochranky klubu Malibu'
+              : 'Nahlásený trestný čin v okrese',
           npc.kind === 'police' ? 2 : 1,
           7.5
         );
@@ -5550,21 +5987,25 @@ export class ViceEngine {
       }
     }
 
-    // Tracers (reuse pooled module-level _tracerGeo)
-    for (let i = this.tracers.length - 1; i >= 0; i--) {
-      const tr = this.tracers[i];
+    // Pooled Tracers (zero runtime material/mesh allocation)
+    for (const tr of this.tracerPool) {
+      if (!tr.active) continue;
       tr.life -= dt;
       if (tr.life <= 0) {
-        this.scene.remove(tr.mesh);
-        (tr.mesh.material as THREE.Material).dispose();
-        this.tracers.splice(i, 1);
+        tr.active = false;
+        tr.mesh.visible = false;
       }
     }
 
-    // Particles (reuse pooled module-level _particleGeo)
-    for (let i = this.particles.length - 1; i >= 0; i--) {
-      const pt = this.particles[i];
+    // Pooled Particles (zero runtime material/mesh allocation)
+    for (const pt of this.particlePool) {
+      if (!pt.active) continue;
       pt.life -= dt;
+      if (pt.life <= 0) {
+        pt.active = false;
+        pt.mesh.visible = false;
+        continue;
+      }
       pt.mesh.position.x += pt.vx * dt;
       pt.mesh.position.y += pt.vy * dt;
       pt.mesh.position.z += pt.vz * dt;
@@ -5572,12 +6013,7 @@ export class ViceEngine {
       if (pt.growSpeed > 0) {
         pt.mesh.scale.addScalar(pt.growSpeed * dt);
       }
-      (pt.mesh.material as THREE.MeshBasicMaterial).opacity = Math.max(0, pt.life / pt.maxLife);
-      if (pt.life <= 0) {
-        this.scene.remove(pt.mesh);
-        (pt.mesh.material as THREE.Material).dispose();
-        this.particles.splice(i, 1);
-      }
+      pt.mat.opacity = Math.max(0, pt.life / pt.maxLife);
     }
   }
 
@@ -5630,35 +6066,42 @@ export class ViceEngine {
 
   private spawnTracer(start: THREE.Vector3, end: THREE.Vector3, colorHex: number) {
     const dist = start.distanceTo(end);
-    if (dist < 0.2) return;
-    const mat = new THREE.MeshBasicMaterial({ color: colorHex, transparent: true, opacity: 0.85 });
-    const mesh = new THREE.Mesh(_tracerGeo, mat);
-    mesh.scale.set(1, 1, dist);
-    mesh.position.copy(start).lerp(end, 0.5);
-    mesh.lookAt(end);
-    this.scene.add(mesh);
-    this.tracers.push({ mesh, life: 0.065, maxLife: 0.065 });
+    if (dist < 0.2 || this.tracerPool.length === 0) return;
+    const tr = this.tracerPool[this.tracerCursor % this.tracerPool.length];
+    this.tracerCursor = (this.tracerCursor + 1) % this.tracerPool.length;
+    tr.mat.color.setHex(colorHex);
+    tr.mat.opacity = 0.85;
+    tr.mesh.scale.set(1, 1, dist);
+    tr.mesh.position.copy(start).lerp(end, 0.5);
+    tr.mesh.lookAt(end);
+    tr.mesh.visible = true;
+    tr.active = true;
+    tr.life = 0.065;
+    tr.maxLife = 0.065;
   }
 
   private spawnParticleBurst(origin: THREE.Vector3, colorHex: number, count: number, isExplosion = false) {
+    if (this.particlePool.length === 0) return;
     const baseScale = isExplosion ? 3.5 : 0.7;
+    const lifeSec = isExplosion ? 0.55 : 0.28;
+    const grow = isExplosion ? 6.5 : 0;
     for (let i = 0; i < count; i++) {
-      const mat = new THREE.MeshBasicMaterial({ color: colorHex, transparent: true, opacity: 0.95 });
-      const mesh = new THREE.Mesh(_particleGeo, mat);
-      mesh.scale.setScalar(baseScale);
-      mesh.position.copy(origin);
-      this.scene.add(mesh);
+      const pt = this.particlePool[this.particleCursor % this.particlePool.length];
+      this.particleCursor = (this.particleCursor + 1) % this.particlePool.length;
+      pt.mat.color.setHex(colorHex);
+      pt.mat.opacity = 0.95;
+      pt.mesh.scale.setScalar(baseScale);
+      pt.mesh.position.copy(origin);
+      pt.mesh.visible = true;
+      pt.active = true;
       const spd = isExplosion ? 6 + Math.random() * 10 : 2 + Math.random() * 4;
       const ang = Math.random() * Math.PI * 2;
-      this.particles.push({
-        mesh,
-        vx: Math.cos(ang) * spd,
-        vy: (isExplosion ? 4 : 2) + Math.random() * 5,
-        vz: Math.sin(ang) * spd,
-        life: isExplosion ? 0.55 : 0.28,
-        maxLife: isExplosion ? 0.55 : 0.28,
-        growSpeed: isExplosion ? 6.5 : 0,
-      });
+      pt.vx = Math.cos(ang) * spd;
+      pt.vy = (isExplosion ? 4 : 2) + Math.random() * 5;
+      pt.vz = Math.sin(ang) * spd;
+      pt.life = lifeSec;
+      pt.maxLife = lifeSec;
+      pt.growSpeed = grow;
     }
   }
 
@@ -6005,20 +6448,22 @@ export class ViceEngine {
   }
 
   private isUnderRoofAt(x: number, y: number, z: number): boolean {
-    for (const fs of this.floorSurfaces) {
-      if (
-        x >= fs.minX - 0.8 &&
-        x <= fs.maxX + 0.8 &&
-        z >= fs.minZ - 0.8 &&
-        z <= fs.maxZ + 0.8 &&
-        y < fs.height - 0.1
-      ) {
-        return true;
+    const gKey = gridKey(Math.floor(x / GRID_CELL_SIZE), Math.floor(z / GRID_CELL_SIZE));
+    const cellFloors = this.floorGrid.get(gKey);
+    if (cellFloors) {
+      for (const fs of cellFloors) {
+        if (
+          x >= fs.minX - 0.8 &&
+          x <= fs.maxX + 0.8 &&
+          z >= fs.minZ - 0.8 &&
+          z <= fs.maxZ + 0.8 &&
+          y < fs.height - 0.1
+        ) {
+          return true;
+        }
       }
     }
-    const cell = this.colliderGrid.get(
-      `${Math.floor(x / GRID_CELL_SIZE)},${Math.floor(z / GRID_CELL_SIZE)}`
-    );
+    const cell = this.colliderGrid.get(gKey);
     if (cell) {
       for (const c of cell.aabb) {
         if (
@@ -6047,12 +6492,15 @@ export class ViceEngine {
     const underpassH = getUnderpassFloorHeightAt(x, z, curY);
     if (underpassH !== null) maxH = Math.min(maxH, underpassH);
 
-    // Walkable multi-floor interior slabs, balconies & rooftops
-    for (const fs of this.floorSurfaces) {
-      if (x >= fs.minX && x <= fs.maxX && z >= fs.minZ && z <= fs.maxZ) {
-        const minSupportY = fs.minY ?? fs.height - 0.8;
-        if (curY >= minSupportY - 0.7) {
-          maxH = Math.max(maxH, fs.height);
+    // Walkable multi-floor interior slabs, balconies & rooftops (O(1) spatial grid lookup)
+    const cellFloors = this.floorGrid.get(gridKey(Math.floor(x / GRID_CELL_SIZE), Math.floor(z / GRID_CELL_SIZE)));
+    if (cellFloors) {
+      for (const fs of cellFloors) {
+        if (x >= fs.minX && x <= fs.maxX && z >= fs.minZ && z <= fs.maxZ) {
+          const minSupportY = fs.minY ?? fs.height - 0.8;
+          if (curY >= minSupportY - 0.7) {
+            maxH = Math.max(maxH, fs.height);
+          }
         }
       }
     }
@@ -6094,25 +6542,7 @@ export class ViceEngine {
     const py = this.playerRig.root.position.y;
     const pz = this.playerRig.root.position.z;
 
-    const blips: MinimapBlip[] = [];
-    for (const shop of SHOPS) {
-      blips.push({
-        x: shop.x,
-        z: shop.z,
-        type: shop.category === 'shooting_range' ? 'shooting_range' : 'shop',
-        label: shop.name,
-        shopCategory: shop.category,
-        color: shop.color,
-      });
-    }
-    for (const lot of PARKING_LOTS) {
-      blips.push({
-        x: lot.x,
-        z: lot.z,
-        type: 'parking',
-        label: lot.name,
-      });
-    }
+    const blips: MinimapBlip[] = STATIC_MINIMAP_BLIPS.slice();
     for (const mb of this.missionStartBeacons) {
       if (mb.group.visible) {
         blips.push({ x: mb.mission.startX, z: mb.mission.startZ, type: 'mission', label: mb.mission.title });
@@ -6134,7 +6564,9 @@ export class ViceEngine {
     for (const npc of this.npcs) {
       if (!npc.alive) continue;
       if (npc.kind === 'police') blips.push({ x: npc.x, z: npc.z, type: 'police' });
-      else if (npc.kind === 'enemy') blips.push({ x: npc.x, z: npc.z, type: 'enemy' });
+      else if (npc.kind === 'enemy' || (npc.kind === 'bouncer' && npc.behavior === 'fight')) {
+        blips.push({ x: npc.x, z: npc.z, type: 'enemy' });
+      }
     }
     for (const v of this.vehicles) {
       if (v.occupiedByPlayer || v.destroyed) continue;
@@ -6164,7 +6596,7 @@ export class ViceEngine {
       blips.push({ x: stage.targetX, z: stage.targetZ, type: 'mission', label: stage.label });
     }
 
-    // GPS Navigation Route along Curved Highways & City Roads
+    // GPS Navigation Route along Curved Highways & City Roads (cached between moves)
     let gpsTarget: GpsWaypoint | null = null;
     if (this.activeMission && stage && stage.type !== 'escape_police') {
       gpsTarget = { x: stage.targetX, z: stage.targetZ, label: stage.label };
@@ -6172,7 +6604,21 @@ export class ViceEngine {
       gpsTarget = this.gpsWaypoint;
     }
 
-    const gpsRoute = gpsTarget ? computeGpsRoute(px, pz, gpsTarget.x, gpsTarget.z) : [];
+    if (!gpsTarget) {
+      this.cachedGpsTargetKey = '';
+      if (this.cachedGpsRoute.length > 0) this.cachedGpsRoute = [];
+    } else {
+      const targetKey = `${gpsTarget.x.toFixed(1)},${gpsTarget.z.toFixed(1)}`;
+      const movedSq = (px - this.cachedGpsX) * (px - this.cachedGpsX) + (pz - this.cachedGpsZ) * (pz - this.cachedGpsZ);
+      if (targetKey !== this.cachedGpsTargetKey || movedSq > 49 || this.gpsRefreshTimer <= 0) {
+        this.cachedGpsTargetKey = targetKey;
+        this.cachedGpsX = px;
+        this.cachedGpsZ = pz;
+        this.gpsRefreshTimer = 0.4;
+        this.cachedGpsRoute = computeGpsRoute(px, pz, gpsTarget.x, gpsTarget.z);
+      }
+    }
+    const gpsRoute = this.cachedGpsRoute;
     const gpsDistanceM = gpsTarget ? Math.round(Math.hypot(gpsTarget.x - px, gpsTarget.z - pz)) : 0;
 
     const vehicleHealthPct = this.currentVehicle
