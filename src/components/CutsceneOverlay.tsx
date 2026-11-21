@@ -1,10 +1,12 @@
 import React, { useEffect } from 'react';
 import { ChevronRight, FastForward } from 'lucide-react';
-import { ActiveCutsceneState } from '../types/game';
+import { ActiveCutsceneState, LanguageCode } from '../types/game';
+import { t } from '../i18n/translations';
 
 interface CutsceneOverlayProps {
   cutscene: ActiveCutsceneState;
   accentColor: string;
+  lang: LanguageCode;
   onNext: () => void;
   onSkip: () => void;
 }
@@ -12,6 +14,7 @@ interface CutsceneOverlayProps {
 export const CutsceneOverlay: React.FC<CutsceneOverlayProps> = ({
   cutscene,
   accentColor,
+  lang,
   onNext,
   onSkip,
 }) => {
@@ -40,7 +43,7 @@ export const CutsceneOverlay: React.FC<CutsceneOverlayProps> = ({
             className="text-[11px] font-bold uppercase tracking-[0.22em]"
             style={{ color: accentColor }}
           >
-            Príbehová scéna
+            {t(lang, 'cutscene.storyScene')}
           </div>
           <h2 className="font-display text-lg md:text-xl font-bold text-white">
             {cutscene.title}
@@ -52,7 +55,7 @@ export const CutsceneOverlay: React.FC<CutsceneOverlayProps> = ({
           className="px-3.5 py-2 rounded-lg text-xs font-medium bg-white/10 text-slate-200 hover:bg-white/20 flex items-center gap-1.5 transition-colors"
         >
           <FastForward className="w-3.5 h-3.5" />
-          Preskočiť [Esc]
+          {t(lang, 'cutscene.skip')}
         </button>
       </div>
 
@@ -80,7 +83,7 @@ export const CutsceneOverlay: React.FC<CutsceneOverlayProps> = ({
           className="px-5 py-2.5 rounded-xl text-xs font-bold text-slate-950 flex items-center gap-1.5 shrink-0 transition-transform active:scale-95"
           style={{ backgroundColor: accentColor }}
         >
-          <span>{isLast ? 'Do akcie [Medzerník]' : 'Ďalej [Medzerník]'}</span>
+          <span>{isLast ? t(lang, 'cutscene.action') : t(lang, 'cutscene.next')}</span>
           <ChevronRight className="w-4 h-4" />
         </button>
       </div>

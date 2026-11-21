@@ -1,11 +1,13 @@
 import React from 'react';
 import { X } from 'lucide-react';
-import { CharacterId, CharacterState } from '../types/game';
+import { CharacterId, CharacterState, LanguageCode } from '../types/game';
+import { t } from '../i18n/translations';
 
 interface CharacterWheelProps {
   characters: Record<CharacterId, CharacterState>;
   activeCharacterId: CharacterId;
   accentColor: string;
+  lang: LanguageCode;
   onSelect: (id: CharacterId) => void;
   onClose: () => void;
 }
@@ -14,6 +16,7 @@ export const CharacterWheel: React.FC<CharacterWheelProps> = ({
   characters,
   activeCharacterId,
   accentColor,
+  lang,
   onSelect,
   onClose,
 }) => {
@@ -24,15 +27,15 @@ export const CharacterWheel: React.FC<CharacterWheelProps> = ({
       <div className="w-full max-w-4xl bg-[#0b101b] border border-white/12 rounded-2xl p-6 space-y-6 shadow-2xl">
         <div className="flex items-center justify-between">
           <div>
-            <h2 className="font-display text-2xl font-bold text-white">Prepnutie postavy</h2>
+            <h2 className="font-display text-2xl font-bold text-white">{t(lang, 'char.title')}</h2>
             <p className="text-sm text-slate-400">
-              Každý protagonista má vlastnú polohu v meste, výbavu, kostýmy a pasívnu špecializáciu.
+              {t(lang, 'char.subtitle')}
             </p>
           </div>
           <button
             onClick={onClose}
             className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
-            aria-label="Zavrieť"
+            aria-label={t(lang, 'settings.close')}
           >
             <X className="w-5 h-5" />
           </button>
@@ -75,7 +78,7 @@ export const CharacterWheel: React.FC<CharacterWheelProps> = ({
                   <div className="space-y-2">
                     <div className="space-y-1">
                       <div className="flex justify-between text-[11px] font-mono-tabular text-slate-400">
-                        <span>Zdravie</span>
+                        <span>{t(lang, 'hud.health')}</span>
                         <span>
                           {Math.round(ch.health)} / {ch.maxHealth}
                         </span>
@@ -90,7 +93,7 @@ export const CharacterWheel: React.FC<CharacterWheelProps> = ({
 
                     <div className="space-y-1">
                       <div className="flex justify-between text-[11px] font-mono-tabular text-slate-400">
-                        <span>Balistická vesta</span>
+                        <span>{t(lang, 'hud.armor')}</span>
                         <span>
                           {Math.round(ch.armor)} / {ch.maxArmor}
                         </span>
@@ -111,7 +114,7 @@ export const CharacterWheel: React.FC<CharacterWheelProps> = ({
                       color: isActive ? '#090d16' : '#f1f5f9',
                     }}
                   >
-                    {isActive ? 'Aktívna postava' : 'Prepnúť na postavu'}
+                    {isActive ? t(lang, 'char.active') : t(lang, 'char.switch')}
                   </div>
                 </div>
               </button>

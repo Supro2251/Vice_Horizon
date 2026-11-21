@@ -173,6 +173,75 @@ export function isBridgeAt(x: number, z: number): boolean {
   return false;
 }
 
+function pointToSegmentDistSq(
+  px: number,
+  pz: number,
+  ax: number,
+  az: number,
+  bx: number,
+  bz: number
+): number {
+  const vx = bx - ax;
+  const vz = bz - az;
+  const lenSq = vx * vx + vz * vz;
+  if (lenSq < 1e-6) {
+    const dx = px - ax;
+    const dz = pz - az;
+    return dx * dx + dz * dz;
+  }
+  let t = ((px - ax) * vx + (pz - az) * vz) / lenSq;
+  if (t < 0) t = 0;
+  else if (t > 1) t = 1;
+  const projX = ax + t * vx;
+  const projZ = az + t * vz;
+  const dx = px - projX;
+  const dz = pz - projZ;
+  return dx * dx + dz * dz;
+}
+
+export function isPavedRoadAt(x: number, z: number): boolean {
+  if (isBridgeAt(x, z)) return true;
+
+  for (const ov of OVERPASS_SPANS) {
+    const along = ov.axis === 'x' ? Math.abs(x - ov.centerX) : Math.abs(z - ov.centerZ);
+    const cross = ov.axis === 'x' ? Math.abs(z - ov.centerZ) : Math.abs(x - ov.centerX);
+    if (along <= ov.length * 0.5 + 3 && cross <= ov.width * 0.52 + 2.5) {
+      return true;
+    }
+  }
+
+  for (const un of UNDERPASS_SPANS) {
+    const along = un.axis === 'x' ? Math.abs(x - un.centerX) : Math.abs(z - un.centerZ);
+    const cross = un.axis === 'x' ? Math.abs(z - un.centerZ) : Math.abs(x - un.centerX);
+    if (along <= un.length * 0.5 + 3 && cross <= un.width * 0.52 + 2.5) {
+      return true;
+    }
+  }
+
+  for (const lot of PARKING_LOTS) {
+    if (Math.abs(x - lot.x) <= lot.width * 0.5 + 3 && Math.abs(z - lot.z) <= lot.depth * 0.5 + 3) {
+      return true;
+    }
+  }
+
+  for (const seg of ROAD_SEGMENTS) {
+    if (seg.isDirtTrail) continue;
+    const maxR = seg.width * 0.5 + 3.4;
+    const maxRSq = maxR * maxR;
+    const pts = seg.points;
+    const count = seg.closed ? pts.length : pts.length - 1;
+    for (let i = 0; i < count; i++) {
+      const a = pts[i];
+      const b = pts[(i + 1) % pts.length];
+      if (pointToSegmentDistSq(x, z, a.x, a.z, b.x, b.z) <= maxRSq) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
 export function getBridgeElevationAt(x: number, z: number): number {
   let maxEl = 0;
   for (const b of BRIDGE_SPANS) {

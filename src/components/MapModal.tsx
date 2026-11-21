@@ -4,6 +4,7 @@ import {
   GpsPoint,
   GpsWaypoint,
   HudTelemetry,
+  LanguageCode,
   MissionDef,
   MissionProgressRecord,
   ShopDef,
@@ -17,6 +18,7 @@ import {
   RoadSegmentDef,
 } from '../engine/navigation';
 import { drawShopMapIcon } from '../engine/mapIcons';
+import { t } from '../i18n/translations';
 
 interface MapModalProps {
   telemetry: HudTelemetry;
@@ -24,6 +26,7 @@ interface MapModalProps {
   roadSegments: RoadSegmentDef[];
   buildingFootprints: { x: number; z: number; w: number; d: number; color: string }[];
   accentColor: string;
+  lang: LanguageCode;
   onSetGps: (x: number, z: number, label: string) => void;
   onClearGps: () => void;
   onStartMission: (missionId: string) => void;
@@ -44,6 +47,7 @@ export const MapModal: React.FC<MapModalProps> = ({
   roadSegments,
   buildingFootprints,
   accentColor,
+  lang,
   onSetGps,
   onClearGps,
   onStartMission,
@@ -409,7 +413,7 @@ export const MapModal: React.FC<MapModalProps> = ({
       }
     }
 
-    onSetGps(world.x, world.z, `Vlastný bod (${world.x}, ${world.z})`);
+    onSetGps(world.x, world.z, t(lang, 'map.customPin', { x: world.x, z: world.z }));
   };
 
   const handleCanvasMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -453,10 +457,10 @@ export const MapModal: React.FC<MapModalProps> = ({
           <div>
             <h2 className="font-display text-2xl font-bold text-white flex items-center gap-2.5">
               <Navigation className="w-6 h-6" style={{ color: accentColor }} />
-              Interaktívna mapa ostrova Leonida & GPS navigácia
+              {t(lang, 'map.title')}
             </h2>
             <p className="text-xs text-slate-400">
-              Klikni na ľubovoľnú ikonu budovy alebo kamkoľvek na mapu — interaktívna GPS čiara ťa navedie po cestách a diaľniciach.
+              {t(lang, 'map.subtitle')}
             </p>
           </div>
 
@@ -467,13 +471,13 @@ export const MapModal: React.FC<MapModalProps> = ({
                 className="px-3 py-2 rounded-lg text-xs font-medium bg-rose-500/15 text-rose-300 border border-rose-500/30 hover:bg-rose-500/25 flex items-center gap-1.5"
               >
                 <Trash2 className="w-3.5 h-3.5" />
-                Zrušiť GPS trasu
+                {t(lang, 'map.clearWaypoint')}
               </button>
             )}
             <button
               onClick={onClose}
               className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
-              aria-label="Zavrieť"
+              aria-label={t(lang, 'settings.close')}
             >
               <X className="w-5 h-5" />
             </button>
@@ -521,18 +525,22 @@ export const MapModal: React.FC<MapModalProps> = ({
                         {hoveredPoi.shop.subtitle}
                       </div>
                       <div className="text-[10px] font-semibold text-sky-400 mt-1">
-                        Kliknutím nastavíš GPS trasu
+                        {t(lang, 'map.clickGps')}
                       </div>
                     </>
                   ) : (
                     <>
                       <div className="text-xs font-bold text-amber-300">
-                        {hoveredPoi.mission.title}
+                        {hoveredPoi.mission.requiresGslCourier
+                          ? t(lang, 'mission.gsl.title')
+                          : hoveredPoi.mission.title}
                       </div>
                       <div className="text-[11px] text-slate-400 mt-0.5">
                         {hoveredPoi.unlocked
-                          ? `Odmena $${hoveredPoi.mission.rewardCash.toLocaleString('sk-SK')} · Kliknutím spustíš GPS`
-                          : 'Zamknuté · Dokonči predchádzajúcu kapitolu'}
+                          ? t(lang, 'map.rewardStartGps', {
+                              cash: hoveredPoi.mission.rewardCash.toLocaleString('en-US'),
+                            })
+                          : t(lang, 'map.lockedHint')}
                       </div>
                     </>
                   )}
@@ -544,22 +552,22 @@ export const MapModal: React.FC<MapModalProps> = ({
             <div className="mt-3 w-full flex flex-wrap items-center justify-between gap-3 text-[11px] text-slate-400 px-1">
               <div className="flex flex-wrap items-center gap-4">
                 <span className="inline-flex items-center gap-1.5">
-                  <span className="w-2.5 h-2.5 rounded-full bg-amber-400 inline-block" /> Misia
+                  <span className="w-2.5 h-2.5 rounded-full bg-amber-400 inline-block" /> {t(lang, 'map.legendMission')}
                 </span>
                 <span className="inline-flex items-center gap-1.5">
-                  <span className="w-2.5 h-2.5 rounded-full bg-purple-500 border border-white inline-block" /> Holičstvo
+                  <span className="w-2.5 h-2.5 rounded-full bg-purple-500 border border-white inline-block" /> {t(lang, 'map.legendBarber')}
                 </span>
                 <span className="inline-flex items-center gap-1.5">
-                  <span className="w-2.5 h-2.5 rounded-full bg-teal-500 border border-white inline-block" /> Tatérstvo
+                  <span className="w-2.5 h-2.5 rounded-full bg-teal-500 border border-white inline-block" /> {t(lang, 'map.legendTattoo')}
                 </span>
                 <span className="inline-flex items-center gap-1.5">
-                  <span className="w-2.5 h-2.5 rounded-full bg-sky-400 border border-white inline-block" /> Úkryt
+                  <span className="w-2.5 h-2.5 rounded-full bg-sky-400 border border-white inline-block" /> {t(lang, 'map.legendSafehouse')}
                 </span>
                 <span className="inline-flex items-center gap-1.5">
-                  <Anchor className="w-3 h-3 text-sky-400" /> Loď
+                  <Anchor className="w-3 h-3 text-sky-400" /> {t(lang, 'map.legendBoat')}
                 </span>
                 <span className="inline-flex items-center gap-1.5">
-                  <Plane className="w-3 h-3 text-slate-100" /> Lietadlo
+                  <Plane className="w-3 h-3 text-slate-100" /> {t(lang, 'map.legendPlane')}
                 </span>
               </div>
               {hoverCoords && (
@@ -575,11 +583,11 @@ export const MapModal: React.FC<MapModalProps> = ({
             {telemetry.gpsWaypoint && (
               <div className="p-3.5 rounded-xl bg-sky-500/10 border border-sky-400/30 space-y-1">
                 <div className="text-[11px] font-semibold uppercase tracking-wider text-sky-400">
-                  Aktívny GPS cieľ
+                  {t(lang, 'map.activeGps')}
                 </div>
                 <div className="text-sm font-bold text-white">{telemetry.gpsWaypoint.label}</div>
                 <div className="text-xs font-mono-tabular text-slate-300">
-                  Vzdialenosť: {telemetry.gpsDistanceM} m
+                  {t(lang, 'map.distM', { m: telemetry.gpsDistanceM })}
                 </div>
               </div>
             )}
@@ -588,7 +596,7 @@ export const MapModal: React.FC<MapModalProps> = ({
             <div className="space-y-2">
               <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
                 <MapPin className="w-3.5 h-3.5" style={{ color: accentColor }} />
-                Prístupné budovy a štúdiá (klikni pre GPS)
+                {t(lang, 'map.shopsHeading')}
               </h3>
               <div className="space-y-2">
                 {SHOPS.map((shop) => (
@@ -619,12 +627,13 @@ export const MapModal: React.FC<MapModalProps> = ({
             <div className="space-y-2">
               <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
                 <MapPin className="w-3.5 h-3.5" style={{ color: accentColor }} />
-                Príbehové misie (postupné odomykanie)
+                {t(lang, 'map.missionsHeading')}
               </h3>
               <div className="space-y-2">
                 {orderedMissions.map((m) => {
                   const unlocked = isMissionUnlocked(m.id, missionsProgress);
                   const done = (missionsProgress[m.id]?.completedCount ?? 0) > 0;
+                  const missionLabel = m.requiresGslCourier ? t(lang, 'mission.gsl.title') : m.title;
                   return (
                     <div
                       key={m.id}
@@ -634,22 +643,22 @@ export const MapModal: React.FC<MapModalProps> = ({
                         <div>
                           <div className="text-xs font-semibold text-white flex items-center gap-1.5">
                             {!unlocked && <Lock className="w-3 h-3 text-slate-500" />}
-                            <span className={!unlocked ? 'text-slate-500' : ''}>{m.title}</span>
+                            <span className={!unlocked ? 'text-slate-500' : ''}>{missionLabel}</span>
                           </div>
                           <div className="text-[11px] text-slate-400">
-                            Odmena ${m.rewardCash.toLocaleString('sk-SK')}
-                            {done ? ' · Dokončené' : !unlocked ? ' · Zamknuté' : ''}
+                            {t(lang, 'missions.reward')}: ${m.rewardCash.toLocaleString('en-US')}
+                            {done ? ' · OK' : !unlocked ? ` · ${t(lang, 'missions.locked')}` : ''}
                           </div>
                         </div>
                       </div>
                       {unlocked && (
                         <div className="flex items-center gap-2">
                           <button
-                            onClick={() => onSetGps(m.startX, m.startZ, m.title)}
+                            onClick={() => onSetGps(m.startX, m.startZ, missionLabel)}
                             className="flex-1 py-1.5 px-2.5 rounded-lg text-[11px] font-medium bg-slate-800 text-sky-300 hover:bg-slate-700 flex items-center justify-center gap-1"
                           >
                             <Navigation className="w-3 h-3" />
-                            GPS k začiatku
+                            {t(lang, 'map.gpsToStart')}
                           </button>
                           <button
                             onClick={() => {
@@ -659,7 +668,7 @@ export const MapModal: React.FC<MapModalProps> = ({
                             className="py-1.5 px-2.5 rounded-lg text-[11px] font-semibold text-slate-950"
                             style={{ backgroundColor: accentColor }}
                           >
-                            Spustiť
+                            {t(lang, 'map.launch')}
                           </button>
                         </div>
                       )}

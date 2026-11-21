@@ -18,6 +18,7 @@ export type VehicleKind =
   | 'coupe'
   | 'supercar'
   | 'taxi'
+  | 'van'
   | 'police'
   | 'ambulance'
   | 'firetruck'
@@ -26,6 +27,8 @@ export type VehicleKind =
   | 'plane'
   | 'helicopter'
   | 'fighter_jet';
+
+export type EmergencyRole = 'police_heli' | 'rescue_heli' | 'fire_heli';
 
 export type VehicleControlCategory =
   | 'foot'
@@ -228,9 +231,19 @@ export interface GraphicsSettings {
   showFps: boolean;
 }
 
+export type RadioStationId =
+  | 'off'
+  | 'vice_synth'
+  | 'leonida_hiphop'
+  | 'coral_rock'
+  | 'havana_latin'
+  | 'horizon_techno'
+  | 'midnight_jazz';
+
 export interface AudioSettings {
   muted: boolean;
   master: number;
+  music: number;
   sfx: number;
   engine: number;
   siren: number;
@@ -323,7 +336,20 @@ export interface GameplayModSettings {
   weatherOverride?: 'auto' | WeatherType;
 }
 
+export type LanguageCode =
+  | 'en'
+  | 'sk'
+  | 'cs'
+  | 'nb'
+  | 'en-AU'
+  | 'zh'
+  | 'ja'
+  | 'ko'
+  | 'ar'
+  | 'ru';
+
 export interface GameSettings {
+  language: LanguageCode;
   graphics: GraphicsSettings;
   audio: AudioSettings;
   controls: ControlSettings;
@@ -362,6 +388,8 @@ export interface MissionDef {
   difficulty?: 'Ľahká' | 'Stredná' | 'Ťažká' | 'Extrémna';
   estimatedMinutes?: string;
   isSideDiscovery?: boolean;
+  alwaysUnlocked?: boolean;
+  requiresGslCourier?: boolean;
   cutsceneIntro?: MissionCutsceneLine[];
   cutsceneOutro?: MissionCutsceneLine[];
   stages: MissionStage[];
@@ -479,6 +507,8 @@ export interface HudTelemetry {
   autoAimLocked: boolean;
   inVehicle: boolean;
   vehicleKind: VehicleKind | null;
+  emergencyRole?: EmergencyRole;
+  waterTankPct?: number;
   vehicleBrand: string;
   vehicleName: string;
   vehicleHealthPct: number;
@@ -490,9 +520,18 @@ export interface HudTelemetry {
   inWater: boolean;
   handbrake: boolean;
   isDrifting: boolean;
-  taxiMode: 'none' | 'passenger' | 'driver_waiting' | 'driver_active';
+  taxiMode: 'none' | 'passenger' | 'driver_offer' | 'driver_waiting' | 'driver_active';
   taxiFareCash: number;
   taxiDestinationLabel: string | null;
+  taxiTripDistM?: number;
+  taxiPickupLabel?: string | null;
+  courierStatus?: {
+    active: boolean;
+    boarded: boolean;
+    onRoad: boolean;
+    packageDamagePct: number;
+    vehicleDamagePct: number;
+  } | null;
   hangarCount: number;
   garageCount: number;
   parkedFacilityNotice: string | null;
@@ -507,6 +546,10 @@ export interface HudTelemetry {
   weatherLabel: string;
   rainIntensity: number;
   ambientTempC: number;
+  radioStation: RadioStationId;
+  radioStationName: string;
+  radioGenre: string;
+  radioTrack: string;
   nearestNpcDialogue: { speaker: string; text: string; behavior: string } | null;
   controlCategory: VehicleControlCategory;
   equippedWeapon: WeaponId;

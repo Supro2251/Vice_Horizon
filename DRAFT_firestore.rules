@@ -121,9 +121,10 @@ service cloud.firestore {
 
     function isValidSettingsSave(data, userId) {
       return data.keys().hasAll(['ownerId', 'graphics', 'audio', 'controls', 'hudMod', 'gameplayMods', 'updatedAt'])
-        && data.keys().hasOnly(['ownerId', 'graphics', 'audio', 'controls', 'hudMod', 'gameplayMods', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'language', 'graphics', 'audio', 'controls', 'hudMod', 'gameplayMods', 'updatedAt'])
         && data.ownerId is string
         && data.ownerId == userId
+        && (!('language' in data) || (data.language is string && data.language in ['en', 'sk', 'cs', 'nb', 'en-AU', 'zh', 'ja', 'ko', 'ar', 'ru']))
         && data.graphics is map
         && data.graphics.keys().size() <= 16
         && data.audio is map
@@ -301,7 +302,7 @@ service cloud.firestore {
           && isValidSettingsSave(incoming(), userId)
           && incoming().ownerId == existing().ownerId
           && incoming().updatedAt == request.time
-          && incoming().diff(existing()).affectedKeys().hasOnly(['graphics', 'audio', 'controls', 'hudMod', 'gameplayMods', 'updatedAt']);
+          && incoming().diff(existing()).affectedKeys().hasOnly(['language', 'graphics', 'audio', 'controls', 'hudMod', 'gameplayMods', 'updatedAt']);
         allow delete: if isValidId(userId) && isValidId(profileId) && profileId == 'preferences' && isOwner(userId);
       }
 

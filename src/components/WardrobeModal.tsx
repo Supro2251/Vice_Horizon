@@ -8,13 +8,16 @@ import {
   GlassesType,
   HairStyle,
   JacketStyle,
+  LanguageCode,
   TattooType,
 } from '../types/game';
 import { DEFAULT_CHARACTERS, OUTFIT_PRESETS } from '../data/defaults';
+import { t } from '../i18n/translations';
 
 interface WardrobeModalProps {
   character: CharacterState;
   accentColor: string;
+  lang: LanguageCode;
   mode?: 'wardrobe' | 'barber' | 'tattoo' | 'safehouse';
   onUpdateAppearance: (appearance: CharacterAppearance) => void;
   onSaveOutfit: (name: string, appearance: CharacterAppearance) => void;
@@ -75,6 +78,7 @@ const TATTOO_OPTIONS: { id: TattooType; label: string; desc: string }[] = [
 export const WardrobeModal: React.FC<WardrobeModalProps> = ({
   character,
   accentColor,
+  lang,
   mode = 'wardrobe',
   onUpdateAppearance,
   onSaveOutfit,
@@ -101,24 +105,24 @@ export const WardrobeModal: React.FC<WardrobeModalProps> = ({
 
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
-    const trimmed = outfitName.trim() || `Kostým ${character.customOutfits.length + 1}`;
+    const trimmed = outfitName.trim() || `Outfit ${character.customOutfits.length + 1}`;
     onSaveOutfit(trimmed, app);
     setOutfitName('');
   };
 
   const titleByMode =
     mode === 'barber'
-      ? `Herrera Barber Studio · ${character.name}`
+      ? t(lang, 'wardrobe.barberTitle', { name: character.name })
       : mode === 'tattoo'
-        ? `Vice Ink Tatérstvo · ${character.name}`
+        ? t(lang, 'wardrobe.tattooTitle', { name: character.name })
         : mode === 'safehouse'
-          ? `Coral Villa Úkryt · ${character.name}`
-          : `Šatník & Vzhľad · ${character.name}`;
+          ? t(lang, 'wardrobe.safehouseTitle', { name: character.name })
+          : t(lang, 'wardrobe.title', { name: character.name });
 
   const subtitleByMode =
     mode === 'safehouse'
-      ? 'Plné zdravie obnovené · Živý 3D náhľad vľavo'
-      : 'Zmeny sa prejavia okamžite na 3D postave vľavo';
+      ? t(lang, 'wardrobe.subSafe')
+      : t(lang, 'wardrobe.subDefault');
 
   return (
     <div className="fixed inset-y-0 right-0 z-30 w-full max-w-[445px] bg-[#0b101b] border-l border-white/12 flex flex-col shadow-2xl">
@@ -130,7 +134,7 @@ export const WardrobeModal: React.FC<WardrobeModalProps> = ({
         <button
           onClick={onClose}
           className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
-          aria-label="Zavrieť"
+          aria-label={t(lang, 'settings.close')}
         >
           <X className="w-5 h-5" />
         </button>
@@ -148,7 +152,7 @@ export const WardrobeModal: React.FC<WardrobeModalProps> = ({
           style={activeTab === 'outfits' ? { backgroundColor: accentColor } : undefined}
         >
           <Shirt className="w-3.5 h-3.5" />
-          Šatník & Okuliare
+          {t(lang, 'wardrobe.tab.outfits')}
         </button>
         <button
           onClick={() => setActiveTab('barber')}
@@ -160,7 +164,7 @@ export const WardrobeModal: React.FC<WardrobeModalProps> = ({
           style={activeTab === 'barber' ? { backgroundColor: accentColor } : undefined}
         >
           <Scissors className="w-3.5 h-3.5" />
-          Holičstvo
+          {t(lang, 'wardrobe.tab.barber')}
         </button>
         <button
           onClick={() => setActiveTab('tattoo')}
@@ -172,7 +176,7 @@ export const WardrobeModal: React.FC<WardrobeModalProps> = ({
           style={activeTab === 'tattoo' ? { backgroundColor: accentColor } : undefined}
         >
           <Sparkles className="w-3.5 h-3.5" />
-          Tatérstvo
+          {t(lang, 'wardrobe.tab.tattoo')}
         </button>
       </div>
 
@@ -181,7 +185,7 @@ export const WardrobeModal: React.FC<WardrobeModalProps> = ({
           <>
             {/* Saved Custom Outfits */}
             <section className="space-y-2.5">
-              <h3 className="text-xs font-semibold text-slate-300">Uložené vlastné kostýmy</h3>
+              <h3 className="text-xs font-semibold text-slate-300">{t(lang, 'wardrobe.savedOutfits')}</h3>
               <div className="flex flex-wrap gap-2">
                 {character.customOutfits.map((outfit) => (
                   <div
@@ -218,7 +222,7 @@ export const WardrobeModal: React.FC<WardrobeModalProps> = ({
                   value={outfitName}
                   onChange={(e) => setOutfitName(e.target.value)}
                   maxLength={28}
-                  placeholder="Názov nového kostýmu..."
+                  placeholder={t(lang, 'wardrobe.newOutfitPlaceholder')}
                   className="flex-1 px-3 py-2 rounded-lg bg-slate-900 border border-white/10 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-white/30"
                 />
                 <button
@@ -227,14 +231,14 @@ export const WardrobeModal: React.FC<WardrobeModalProps> = ({
                   style={{ backgroundColor: accentColor }}
                 >
                   <Plus className="w-3.5 h-3.5" />
-                  Uložiť
+                  {t(lang, 'wardrobe.save')}
                 </button>
               </form>
             </section>
 
             {/* Preset Outfits */}
             <section className="space-y-2.5">
-              <h3 className="text-xs font-semibold text-slate-300">Štýlové predvoľby</h3>
+              <h3 className="text-xs font-semibold text-slate-300">{t(lang, 'wardrobe.presets')}</h3>
               <div className="grid grid-cols-2 gap-2">
                 {OUTFIT_PRESETS.map((preset) => (
                   <button
@@ -259,7 +263,7 @@ export const WardrobeModal: React.FC<WardrobeModalProps> = ({
             <section className="space-y-2.5">
               <h3 className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
                 <Eye className="w-3.5 h-3.5" style={{ color: accentColor }} />
-                Okuliare a priezor
+                {t(lang, 'wardrobe.glasses')}
               </h3>
               <div className="grid grid-cols-2 gap-2">
                 {GLASSES_OPTIONS.map((g) => (
@@ -280,7 +284,7 @@ export const WardrobeModal: React.FC<WardrobeModalProps> = ({
 
             {/* Jacket Style */}
             <section className="space-y-2.5">
-              <h3 className="text-xs font-semibold text-slate-300">Strih vrchného oblečenia</h3>
+              <h3 className="text-xs font-semibold text-slate-300">{t(lang, 'wardrobe.jacketStyle')}</h3>
               <div className="grid grid-cols-2 gap-2">
                 {JACKET_STYLES.map((js) => (
                   <button
@@ -300,13 +304,13 @@ export const WardrobeModal: React.FC<WardrobeModalProps> = ({
 
             {/* Clothing Colors */}
             <section className="space-y-3">
-              <h3 className="text-xs font-semibold text-slate-300">Farby oblečenia</h3>
+              <h3 className="text-xs font-semibold text-slate-300">{t(lang, 'wardrobe.colors')}</h3>
               <div className="grid grid-cols-2 gap-3">
                 {[
-                  { key: 'jacketColor' as const, label: 'Bunda / Vrch' },
-                  { key: 'shirtColor' as const, label: 'Tričko' },
-                  { key: 'pantsColor' as const, label: 'Nohavice' },
-                  { key: 'shoesColor' as const, label: 'Topánky' },
+                  { key: 'jacketColor' as const, label: 'Jacket / Top' },
+                  { key: 'shirtColor' as const, label: 'Shirt' },
+                  { key: 'pantsColor' as const, label: 'Pants' },
+                  { key: 'shoesColor' as const, label: 'Shoes' },
                 ].map((item) => (
                   <label
                     key={item.key}
@@ -326,7 +330,7 @@ export const WardrobeModal: React.FC<WardrobeModalProps> = ({
 
             {/* Accessories */}
             <section className="space-y-2.5">
-              <h3 className="text-xs font-semibold text-slate-300">Doplnky a výbava</h3>
+              <h3 className="text-xs font-semibold text-slate-300">{t(lang, 'wardrobe.accessories')}</h3>
               <div className="grid grid-cols-2 gap-2">
                 {ACCESSORIES.map((acc) => (
                   <button
@@ -346,7 +350,7 @@ export const WardrobeModal: React.FC<WardrobeModalProps> = ({
 
             {/* Skin Tone */}
             <section className="space-y-2">
-              <h3 className="text-xs font-semibold text-slate-300">Odtieň pokožky</h3>
+              <h3 className="text-xs font-semibold text-slate-300">{t(lang, 'wardrobe.skinTone')}</h3>
               <div className="flex gap-2">
                 {SKIN_TONES.map((tone) => (
                   <button
@@ -367,21 +371,21 @@ export const WardrobeModal: React.FC<WardrobeModalProps> = ({
         {activeTab === 'barber' && (
           <>
             <div className="p-3.5 rounded-xl bg-purple-500/10 border border-purple-400/25 text-xs text-purple-200">
-              Herrera Barber Studio — vyber si moderný strih vlasov, farbu aj úpravu brady s okamžitým 3D náhľadom.
+              {t(lang, 'wardrobe.barberTitle', { name: character.name })}
             </div>
 
             {/* Hairstyle */}
             <section className="space-y-2.5">
               <div className="flex items-center justify-between">
-                <h3 className="text-xs font-semibold text-slate-300">Účes a farba vlasov</h3>
+                <h3 className="text-xs font-semibold text-slate-300">{t(lang, 'wardrobe.hair')}</h3>
                 <label className="inline-flex items-center gap-2 text-xs text-slate-400 cursor-pointer">
-                  <span>Farba</span>
+                  <span>{t(lang, 'wardrobe.colorLabel')}</span>
                   <input
                     type="color"
                     value={app.hairColor}
                     onChange={(e) => setField('hairColor', e.target.value)}
                     className="w-7 h-7 rounded cursor-pointer bg-transparent border-0"
-                    aria-label="Farba vlasov"
+                    aria-label={t(lang, 'wardrobe.colorLabel')}
                   />
                 </label>
               </div>
@@ -404,7 +408,7 @@ export const WardrobeModal: React.FC<WardrobeModalProps> = ({
 
             {/* Facial Hair */}
             <section className="space-y-2.5">
-              <h3 className="text-xs font-semibold text-slate-300">Brada a fúzy</h3>
+              <h3 className="text-xs font-semibold text-slate-300">{t(lang, 'wardrobe.facialHair')}</h3>
               <div className="grid grid-cols-2 gap-2">
                 {FACIAL_HAIR_OPTIONS.map((fh) => (
                   <button
@@ -427,11 +431,11 @@ export const WardrobeModal: React.FC<WardrobeModalProps> = ({
         {activeTab === 'tattoo' && (
           <>
             <div className="p-3.5 rounded-xl bg-teal-500/10 border border-teal-400/25 text-xs text-teal-200">
-              Vice Ink Tatérstvo — aplikuj umelecké tetovanie na ramená, predlaktia, hruď a krk. Najlepšie vynikne s letným tielkom alebo kubánskou košeľou.
+              {t(lang, 'wardrobe.tattooDesc')}
             </div>
 
             <section className="space-y-2.5">
-              <h3 className="text-xs font-semibold text-slate-300">Vzory tetovania</h3>
+              <h3 className="text-xs font-semibold text-slate-300">{t(lang, 'wardrobe.tattooDesigns')}</h3>
               <div className="space-y-2">
                 {TATTOO_OPTIONS.map((tat) => {
                   const selected = app.tattoo === tat.id;

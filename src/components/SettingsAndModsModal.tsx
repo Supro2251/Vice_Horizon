@@ -1,9 +1,11 @@
 import React, { useEffect, useState } from 'react';
 import { User } from 'firebase/auth';
 import {
+  CheckCircle2,
   Cloud,
   Download,
   Gamepad2,
+  Globe,
   LogIn,
   LogOut,
   Monitor,
@@ -17,6 +19,7 @@ import {
   Volume2,
   X,
 } from 'lucide-react';
+import { LANGUAGE_OPTIONS, t } from '../i18n/translations';
 import {
   FriendRecord,
   GameSettings,
@@ -49,7 +52,7 @@ interface SettingsAndModsModalProps {
   gameClockStr: string;
   gameTimeNormalized: number;
   cheatSessionActive?: boolean;
-  initialTab?: 'graphics' | 'audio' | 'controls' | 'mods' | 'cloud';
+  initialTab?: 'language' | 'graphics' | 'audio' | 'controls' | 'mods' | 'cloud';
   onUpdateSettings: (next: GameSettings) => void;
   onSetTimeOfDay: (normalized: number) => void;
   onRestartCleanSession?: () => void;
@@ -142,7 +145,7 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
   onRemoveFriend,
   onClose,
 }) => {
-  const [tab, setTab] = useState<'graphics' | 'audio' | 'controls' | 'mods' | 'cloud'>(initialTab);
+  const [tab, setTab] = useState<'language' | 'graphics' | 'audio' | 'controls' | 'mods' | 'cloud'>(initialTab);
   const [selectedControlCat, setSelectedControlCat] = useState<'all' | VehicleControlCategory>('all');
   const [rebindingKey, setRebindingKey] = useState<KeyAction | null>(null);
   const [rebindingPad, setRebindingPad] = useState<GamepadButtonAction | null>(null);
@@ -152,6 +155,8 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
   const [friendSearch, setFriendSearch] = useState('');
   const [mpFeedback, setMpFeedback] = useState<string | null>(null);
   const [mpBusy, setMpBusy] = useState(false);
+
+  const lang = settings.language;
 
   useEffect(() => {
     setNickDraft(myNickname);
@@ -371,10 +376,10 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
         <div className="px-6 py-4 border-b border-white/10 flex flex-wrap items-center justify-between gap-4">
           <div>
             <h2 className="font-display text-2xl font-bold text-white">
-              Nastavenia, ovládanie a modifikácie
+              {t(lang, 'settings.title')}
             </h2>
             <p className="text-xs text-slate-400">
-              Všetky zmeny sa prejavia okamžite počas hrania.
+              {t(lang, 'settings.subtitle')}
             </p>
           </div>
 
@@ -384,18 +389,19 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
             style={{ backgroundColor: accent }}
           >
             <X className="w-4 h-4" />
-            Späť do hry
+            {t(lang, 'settings.backToGame')}
           </button>
         </div>
 
         {/* Navigation Tabs */}
         <div className="px-6 pt-3 pb-2 border-b border-white/10 flex items-center gap-1.5 overflow-x-auto">
           {[
-            { id: 'graphics' as const, label: 'Grafika a HW', icon: Monitor },
-            { id: 'audio' as const, label: 'Zvuk', icon: Volume2 },
-            { id: 'controls' as const, label: 'Klávesnica a PS4/PS5 Controller', icon: Gamepad2 },
-            { id: 'mods' as const, label: 'UI a Modifikácie', icon: Sparkles },
-            { id: 'cloud' as const, label: 'Účet & Multiplayer', icon: Cloud },
+            { id: 'language' as const, label: t(lang, 'settings.tab.language'), icon: Globe },
+            { id: 'graphics' as const, label: t(lang, 'settings.tab.graphics'), icon: Monitor },
+            { id: 'audio' as const, label: t(lang, 'settings.tab.audio'), icon: Volume2 },
+            { id: 'controls' as const, label: t(lang, 'settings.tab.controls'), icon: Gamepad2 },
+            { id: 'mods' as const, label: t(lang, 'settings.tab.mods'), icon: Sparkles },
+            { id: 'cloud' as const, label: t(lang, 'settings.tab.cloud'), icon: Cloud },
           ].map((item) => {
             const Icon = item.icon;
             const active = tab === item.id;
@@ -416,17 +422,87 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
 
         {/* Content */}
         <div className="p-6 overflow-y-auto flex-1 space-y-6">
+          {/* LANGUAGE TAB */}
+          {tab === 'language' && (
+            <div className="space-y-5 max-w-3xl">
+              <div className="p-4 rounded-xl bg-slate-900/70 border border-white/10 space-y-2">
+                <h3 className="font-display text-lg font-bold text-white flex items-center gap-2">
+                  <Globe className="w-5 h-5" style={{ color: accent }} />
+                  {t(lang, 'settings.lang.heading')}
+                </h3>
+                <p className="text-xs text-slate-300 leading-relaxed">{t(lang, 'settings.lang.desc')}</p>
+                <div className="p-3 rounded-lg bg-sky-500/10 border border-sky-400/25 text-xs text-sky-200 flex flex-wrap items-center justify-between gap-3">
+                  <span>{t(lang, 'settings.lang.cloudNote')}</span>
+                  {user ? (
+                    <button
+                      type="button"
+                      disabled={cloudBusy}
+                      onClick={onSaveCloud}
+                      className="px-3.5 py-1.5 rounded-lg text-xs font-bold text-slate-950 shrink-0 disabled:opacity-50"
+                      style={{ backgroundColor: accent }}
+                    >
+                      {cloudBusy ? t(lang, 'app.saving') : t(lang, 'settings.saveCloudNow')}
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={onSignIn}
+                      className="px-3.5 py-1.5 rounded-lg text-xs font-bold text-slate-950 shrink-0 flex items-center gap-1.5"
+                      style={{ backgroundColor: accent }}
+                    >
+                      <LogIn className="w-3.5 h-3.5" />
+                      {t(lang, 'settings.cloud.signIn')}
+                    </button>
+                  )}
+                </div>
+                {cloudStatus && <div className="text-xs text-emerald-400 font-medium">{cloudStatus}</div>}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+                {LANGUAGE_OPTIONS.map((opt) => {
+                  const active = settings.language === opt.code;
+                  return (
+                    <button
+                      key={opt.code}
+                      type="button"
+                      onClick={() =>
+                        onUpdateSettings({
+                          ...settings,
+                          language: opt.code,
+                        })
+                      }
+                      className="p-3.5 rounded-xl border text-left transition-all flex items-center justify-between gap-2"
+                      style={{
+                        borderColor: active ? accent : 'rgba(255,255,255,0.1)',
+                        backgroundColor: active ? 'rgba(255,255,255,0.08)' : '#0f172a',
+                      }}
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <span className="text-xl leading-none">{opt.flag}</span>
+                        <div className="min-w-0">
+                          <div className="text-xs font-bold text-white truncate">{opt.nativeLabel}</div>
+                          <div className="text-[11px] text-slate-400 truncate">{opt.englishName}</div>
+                        </div>
+                      </div>
+                      {active && <CheckCircle2 className="w-4 h-4 shrink-0" style={{ color: accent }} />}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {/* GRAPHICS TAB */}
           {tab === 'graphics' && (
             <div className="space-y-6">
               <div className="space-y-2.5">
-                <h3 className="text-sm font-semibold text-white">Predvoľba výkonu</h3>
+                <h3 className="text-sm font-semibold text-white">{t(lang, 'settings.preset')}</h3>
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                   {[
-                    { id: 'low' as const, name: 'Úsporná (Nízke HW)', desc: 'Max FPS na slabšom PC' },
-                    { id: 'balanced' as const, name: 'Vyvážená', desc: 'Optimálny pomer kvality' },
-                    { id: 'high' as const, name: 'Vysoká', desc: 'Ostré tiene a hustá premávka' },
-                    { id: 'ultra' as const, name: 'Ultra', desc: 'Maximálne rozlíšenie' },
+                    { id: 'low' as const, name: t(lang, 'settings.preset.low'), desc: t(lang, 'settings.preset.lowDesc') },
+                    { id: 'balanced' as const, name: t(lang, 'settings.preset.balanced'), desc: t(lang, 'settings.preset.balancedDesc') },
+                    { id: 'high' as const, name: t(lang, 'settings.preset.high'), desc: t(lang, 'settings.preset.highDesc') },
+                    { id: 'ultra' as const, name: t(lang, 'settings.preset.ultra'), desc: t(lang, 'settings.preset.ultraDesc') },
                   ].map((p) => (
                     <button
                       key={p.id}
@@ -450,7 +526,7 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
                 <div className="p-4 rounded-xl bg-slate-900/60 border border-white/10 space-y-4">
                   <label className="block space-y-1.5">
                     <div className="flex justify-between text-xs">
-                      <span className="text-slate-300">Rozlíšenie vykresľovania</span>
+                      <span className="text-slate-300">{t(lang, 'settings.renderScale')}</span>
                       <span className="font-mono-tabular text-white">
                         {Math.round(settings.graphics.renderScale * 100)}%
                       </span>
@@ -473,7 +549,7 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
 
                   <label className="block space-y-1.5">
                     <div className="flex justify-between text-xs">
-                      <span className="text-slate-300">Zorné pole (FOV)</span>
+                      <span className="text-slate-300">{t(lang, 'settings.fov')}</span>
                       <span className="font-mono-tabular text-white">{settings.graphics.fov}°</span>
                     </div>
                     <input
@@ -494,7 +570,7 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
 
                   <label className="block space-y-1.5">
                     <div className="flex justify-between text-xs">
-                      <span className="text-slate-300">Dohľadnosť / Hmla</span>
+                      <span className="text-slate-300">{t(lang, 'settings.viewDist')}</span>
                       <span className="font-mono-tabular text-white">
                         {settings.graphics.viewDistance}m
                       </span>
@@ -518,7 +594,7 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
 
                 <div className="p-4 rounded-xl bg-slate-900/60 border border-white/10 space-y-4">
                   <div className="space-y-1.5">
-                    <span className="text-xs text-slate-300">Kvalita tieňov</span>
+                    <span className="text-xs text-slate-300">{t(lang, 'settings.shadows')}</span>
                     <div className="grid grid-cols-4 gap-1.5">
                       {(['off', 'low', 'medium', 'high'] as const).map((sq) => (
                         <button
@@ -535,14 +611,14 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
                               : 'bg-slate-950 text-slate-300 border-white/10'
                           }`}
                         >
-                          {sq === 'off' ? 'Vyp' : sq === 'low' ? 'Nízka' : sq === 'medium' ? 'Stred' : 'Vysoká'}
+                          {t(lang, `settings.shadow.${sq}`)}
                         </button>
                       ))}
                     </div>
                   </div>
 
                   <div className="space-y-1.5">
-                    <span className="text-xs text-slate-300">Hustota premávky v meste</span>
+                    <span className="text-xs text-slate-300">{t(lang, 'settings.traffic')}</span>
                     <div className="grid grid-cols-3 gap-1.5">
                       {(['low', 'medium', 'high'] as const).map((td) => (
                         <button
@@ -559,14 +635,14 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
                               : 'bg-slate-950 text-slate-300 border-white/10'
                           }`}
                         >
-                          {td === 'low' ? 'Nízka' : td === 'medium' ? 'Stredná' : 'Vysoká'}
+                          {t(lang, `settings.shadow.${td}`)}
                         </button>
                       ))}
                     </div>
                   </div>
 
                   <label className="flex items-center justify-between pt-2 cursor-pointer">
-                    <span className="text-xs text-slate-200">Zobraziť počítadlo FPS</span>
+                    <span className="text-xs text-slate-200">{t(lang, 'settings.showFps')}</span>
                     <input
                       type="checkbox"
                       checked={settings.graphics.showFps}
@@ -589,8 +665,8 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
             <div className="p-5 rounded-xl bg-slate-900/60 border border-white/10 space-y-5 max-w-2xl">
               <label className="flex items-center justify-between cursor-pointer pb-3 border-b border-white/10">
                 <div>
-                  <div className="text-sm font-semibold text-white">Stlmiť všetok zvuk</div>
-                  <div className="text-xs text-slate-400">Okamžité vypnutie procedurálneho audia</div>
+                  <div className="text-sm font-semibold text-white">{t(lang, 'settings.muted')}</div>
+                  <div className="text-xs text-slate-400">{t(lang, 'settings.mutedDesc')}</div>
                 </div>
                 <input
                   type="checkbox"
@@ -606,11 +682,12 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
               </label>
 
               {[
-                { key: 'master' as const, label: 'Hlavná hlasitosť' },
-                { key: 'sfx' as const, label: 'Streľba, explózie a nárazy' },
-                { key: 'engine' as const, label: 'Motory vozidiel' },
-                { key: 'siren' as const, label: 'Policajné sirény' },
-                { key: 'ui' as const, label: 'Zvuky rozhrania a misií' },
+                { key: 'master' as const, label: t(lang, 'settings.masterVol') },
+                { key: 'music' as const, label: t(lang, 'settings.musicVol') },
+                { key: 'sfx' as const, label: t(lang, 'settings.sfxVol') },
+                { key: 'engine' as const, label: t(lang, 'settings.engineVol') },
+                { key: 'siren' as const, label: t(lang, 'settings.sirenVol') },
+                { key: 'ui' as const, label: t(lang, 'settings.uiVol') },
               ].map((row) => (
                 <label key={row.key} className="block space-y-1.5">
                   <div className="flex justify-between text-xs">
@@ -649,9 +726,9 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
                     <div className="text-sm font-semibold text-white">
                       {controllerConnected
                         ? controllerType === 'playstation'
-                          ? 'Pripojený PlayStation Controller (PS4 DualShock / PS5 DualSense)'
-                          : 'Pripojený herný ovládač'
-                        : 'Žiadny ovládač nie je aktívny (stlač ľubovoľné tlačidlo na ovládači)'}
+                          ? t(lang, 'settings.controls.connectedPs')
+                          : t(lang, 'settings.controls.connectedPad')
+                        : t(lang, 'settings.controls.noPad')}
                     </div>
                     {controllerConnected && (
                       <div className="text-xs text-slate-400 truncate max-w-md">{controllerName}</div>
@@ -669,7 +746,7 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
                   className="px-3 py-1.5 rounded-lg text-xs font-medium bg-slate-800 text-slate-200 hover:bg-slate-700 flex items-center gap-1.5"
                 >
                   <RotateCcw className="w-3.5 h-3.5" />
-                  Predvolené mapovanie
+                  {t(lang, 'settings.resetDefaults')}
                 </button>
               </div>
 
@@ -678,7 +755,7 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
                 <div className="p-4 rounded-xl bg-slate-900/60 border border-white/10 space-y-3">
                   <label className="block space-y-1">
                     <div className="flex justify-between text-xs text-slate-300">
-                      <span>Citlivosť myši</span>
+                      <span>{t(lang, 'settings.controls.mouseSens')}</span>
                       <span className="font-mono-tabular">{settings.controls.mouseSensitivity.toFixed(2)}×</span>
                     </div>
                     <input
@@ -699,7 +776,7 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
 
                   <label className="block space-y-1">
                     <div className="flex justify-between text-xs text-slate-300">
-                      <span>Citlivosť páčky ovládača</span>
+                      <span>{t(lang, 'settings.controls.padSens')}</span>
                       <span className="font-mono-tabular">{settings.controls.gamepadSensitivity.toFixed(2)}×</span>
                     </div>
                     <input
@@ -720,7 +797,7 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
 
                   <label className="block space-y-1">
                     <div className="flex justify-between text-xs text-slate-300">
-                      <span>Mŕtva zóna páčok (Deadzone)</span>
+                      <span>{t(lang, 'settings.controls.deadzone')}</span>
                       <span className="font-mono-tabular">{Math.round(settings.controls.deadzone * 100)}%</span>
                     </div>
                     <input
@@ -742,7 +819,7 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
 
                 <div className="p-4 rounded-xl bg-slate-900/60 border border-white/10 space-y-3">
                   <div className="space-y-1.5">
-                    <span className="text-xs text-slate-300">Ikony tlačidiel v HUD</span>
+                    <span className="text-xs text-slate-300">{t(lang, 'settings.controls.glyphs')}</span>
                     <div className="grid grid-cols-4 gap-1.5">
                       {(
                         [
@@ -773,7 +850,7 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
                   </div>
 
                   <label className="flex items-center justify-between pt-2 cursor-pointer">
-                    <span className="text-xs text-slate-200">Invertovať os Y kamery</span>
+                    <span className="text-xs text-slate-200">{t(lang, 'settings.controls.invertY')}</span>
                     <input
                       type="checkbox"
                       checked={settings.controls.invertY}
@@ -788,7 +865,7 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
                   </label>
 
                   <label className="flex items-center justify-between cursor-pointer">
-                    <span className="text-xs text-slate-200">Haptické vibrácie (DualShock / DualSense)</span>
+                    <span className="text-xs text-slate-200">{t(lang, 'settings.controls.vibration')}</span>
                     <input
                       type="checkbox"
                       checked={settings.controls.vibration}
@@ -808,9 +885,9 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
               <div className="p-4 rounded-xl bg-slate-900/60 border border-white/10 space-y-2.5">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
-                    <div className="text-xs font-semibold text-white">Profil ovládania podľa vozidla</div>
+                    <div className="text-xs font-semibold text-white">{t(lang, 'settings.controls.perVehicle')}</div>
                     <div className="text-[11px] text-slate-400">
-                      Nastav si špeciálne klávesy alebo tlačidlá ovládača samostatne pre auto, loď, lietadlo či vrtuľník.
+                      {t(lang, 'settings.controls.perVehicleDesc')}
                     </div>
                   </div>
                   {selectedControlCat !== 'all' && settings.controls.vehicleOverrides?.[selectedControlCat] && (
@@ -936,7 +1013,7 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                 <div className="space-y-2">
                   <h3 className="text-xs font-semibold text-slate-300">
-                    Mapovanie klávesnice a myši ({CONTROL_CATEGORIES.find((c) => c.id === selectedControlCat)?.label})
+                    {t(lang, 'settings.controls.kbTitle')} ({CONTROL_CATEGORIES.find((c) => c.id === selectedControlCat)?.label})
                   </h3>
                   <div className="rounded-xl border border-white/10 divide-y divide-white/5 bg-slate-900/50">
                     {KEY_ACTION_LABELS.map((item) => {
@@ -953,14 +1030,14 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
                         >
                           <span className="text-slate-300">
                             {item.label}
-                            {overrideCode ? <span className="ml-1.5 text-[10px] text-sky-400">(vlastné)</span> : null}
+                            {overrideCode ? <span className="ml-1.5 text-[10px] text-sky-400">*</span> : null}
                           </span>
                           <button
                             onClick={() => setRebindingKey(item.action)}
                             className="px-2.5 py-1 rounded bg-slate-800 border border-white/10 font-mono-tabular text-white hover:border-white/30 min-w-[84px] text-center"
                             style={waiting ? { borderColor: accent, color: accent } : undefined}
                           >
-                            {waiting ? 'Stlač kláves...' : formatKeyCode(effectiveCode)}
+                            {waiting ? t(lang, 'settings.controls.pressKey') : formatKeyCode(effectiveCode)}
                           </button>
                         </div>
                       );
@@ -970,7 +1047,7 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
 
                 <div className="space-y-2">
                   <h3 className="text-xs font-semibold text-slate-300">
-                    Mapovanie PS4 / PS5 ovládača ({CONTROL_CATEGORIES.find((c) => c.id === selectedControlCat)?.label})
+                    {t(lang, 'settings.controls.padTitle')} ({CONTROL_CATEGORIES.find((c) => c.id === selectedControlCat)?.label})
                   </h3>
                   <div className="rounded-xl border border-white/10 divide-y divide-white/5 bg-slate-900/50">
                     {PAD_ACTION_LABELS.map((item) => {
@@ -987,14 +1064,14 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
                         >
                           <span className="text-slate-300">
                             {item.label}
-                            {overrideBtn !== undefined ? <span className="ml-1.5 text-[10px] text-sky-400">(vlastné)</span> : null}
+                            {overrideBtn !== undefined ? <span className="ml-1.5 text-[10px] text-sky-400">*</span> : null}
                           </span>
                           <button
                             onClick={() => setRebindingPad(item.action)}
                             className="px-2.5 py-1 rounded bg-slate-800 border border-white/10 font-mono-tabular text-white hover:border-white/30 min-w-[92px] text-center"
                             style={waiting ? { borderColor: accent, color: accent } : undefined}
                           >
-                            {waiting ? 'Stlač na pade...' : glyphMap[btnIdx] || `Btn ${btnIdx}`}
+                            {waiting ? t(lang, 'settings.controls.pressPad') : glyphMap[btnIdx] || `Btn ${btnIdx}`}
                           </button>
                         </div>
                       );
@@ -1010,7 +1087,7 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
             <div className="space-y-6">
               {/* HUD Theme Modder */}
               <div className="space-y-2.5">
-                <h3 className="text-sm font-semibold text-white">Vizuálna téma používateľského rozhrania</h3>
+                <h3 className="text-sm font-semibold text-white">{t(lang, 'settings.hudTheme')}</h3>
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                   {(Object.keys(HUD_THEME_PRESETS) as HudThemeId[]).map((tid) => {
                     const p = HUD_THEME_PRESETS[tid];
@@ -1044,7 +1121,7 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
                 <div className="p-4 rounded-xl bg-slate-900/60 border border-white/10 space-y-3">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-semibold text-white flex items-center gap-1.5">
-                      <Sliders className="w-4 h-4" /> Moduly rozhrania
+                      <Sliders className="w-4 h-4" /> {t(lang, 'settings.hudModules')}
                     </span>
                     <input
                       type="color"
@@ -1056,15 +1133,14 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
                         })
                       }
                       className="w-6 h-6 rounded bg-transparent border-0 cursor-pointer"
-                      title="Vlastná farba akcentu"
                     />
                   </div>
 
                   {[
-                    { key: 'showMinimap' as const, label: 'Taktická minimapa' },
-                    { key: 'showSpeedometer' as const, label: 'Digitálny tachometer' },
-                    { key: 'showMissionTracker' as const, label: 'Sledovač aktívnej misie' },
-                    { key: 'showControlsHint' as const, label: 'Skratky tlačidiel v lište' },
+                    { key: 'showMinimap' as const, label: 'Minimap' },
+                    { key: 'showSpeedometer' as const, label: 'Speedometer' },
+                    { key: 'showMissionTracker' as const, label: 'Mission Tracker' },
+                    { key: 'showControlsHint' as const, label: 'Controls Bar' },
                   ].map((m) => (
                     <label key={m.key} className="flex items-center justify-between text-xs text-slate-200 cursor-pointer">
                       <span>{m.label}</span>
@@ -1083,7 +1159,7 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
                   ))}
 
                   <div className="pt-2 space-y-1.5">
-                    <span className="text-xs text-slate-300">Štýl zameriavača</span>
+                    <span className="text-xs text-slate-300">{t(lang, 'settings.crosshair')}</span>
                     <div className="grid grid-cols-3 gap-1.5">
                       {(['tactical', 'dot', 'circle'] as const).map((cs) => (
                         <button
@@ -1100,7 +1176,7 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
                               : 'bg-slate-950 text-slate-300 border-white/10'
                           }`}
                         >
-                          {cs === 'tactical' ? 'Taktický' : cs === 'dot' ? 'Bodka' : 'Kruh'}
+                          {cs}
                         </button>
                       ))}
                     </div>
@@ -1109,13 +1185,13 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
 
                 {/* Gameplay Mod Mutators */}
                 <div className="p-4 rounded-xl bg-slate-900/60 border border-white/10 space-y-3">
-                  <div className="text-xs font-semibold text-white">Herné modifikácie (Sandbox)</div>
+                  <div className="text-xs font-semibold text-white">{t(lang, 'settings.gameplayMods')}</div>
                   {[
-                    { key: 'infiniteAmmo' as const, label: 'Nekonečná munícia' },
-                    { key: 'rapidFire' as const, label: 'Rýchlopalba (2.4× kadencia)' },
-                    { key: 'turboVehicles' as const, label: 'Turbo motory (+55% výkon)' },
-                    { key: 'lowGravity' as const, label: 'Nízka gravitácia (Mesiac)' },
-                    { key: 'noPolice' as const, label: 'Bez zásahu polície (Free Roam)' },
+                    { key: 'infiniteAmmo' as const, label: 'Infinite Ammo' },
+                    { key: 'rapidFire' as const, label: 'Rapid Fire (2.4×)' },
+                    { key: 'turboVehicles' as const, label: 'Turbo Vehicles (+55%)' },
+                    { key: 'lowGravity' as const, label: 'Low Gravity' },
+                    { key: 'noPolice' as const, label: 'No Police (Free Roam)' },
                   ].map((mod) => (
                     <label key={mod.key} className="flex items-center justify-between text-xs text-slate-200 cursor-pointer">
                       <span>{mod.label}</span>
@@ -1135,18 +1211,18 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
 
                   <div className="pt-2 space-y-2">
                     <div className="flex items-center justify-between text-xs">
-                      <span className="text-slate-300">Denná doba a atmosféra</span>
+                      <span className="text-slate-300">{t(lang, 'settings.timeOfDay')}</span>
                       <span className="font-mono-tabular text-amber-300 font-semibold">
-                        Čas v hre: {gameClockStr}
+                        {t(lang, 'settings.gameClock')}: {gameClockStr}
                       </span>
                     </div>
                     <div className="grid grid-cols-4 gap-1.5">
                       {(
                         [
-                          { id: 'auto', label: 'Auto (3×)' },
-                          { id: 'sunset', label: 'Západ' },
-                          { id: 'noon', label: 'Deň' },
-                          { id: 'night', label: 'Noc' },
+                          { id: 'auto', label: 'Auto' },
+                          { id: 'sunset', label: 'Sunset' },
+                          { id: 'noon', label: 'Noon' },
+                          { id: 'night', label: 'Night' },
                         ] as const
                       ).map((tod) => (
                         <button
@@ -1175,22 +1251,21 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
                       value={gameTimeNormalized}
                       onChange={(e) => onSetTimeOfDay(Number(e.target.value))}
                       className="w-full accent-amber-500"
-                      title="Manuálny posuv času v hre"
                     />
                   </div>
 
                   <div className="pt-2 space-y-2 border-t border-white/10">
-                    <div className="text-xs text-slate-300">Počasie v meste (plynulé prechody)</div>
+                    <div className="text-xs text-slate-300">{t(lang, 'settings.weatherOverride')}</div>
                     <div className="grid grid-cols-4 gap-1.5">
                       {(
                         [
                           { id: 'auto', label: 'Auto' },
-                          { id: 'clear', label: 'Jasno' },
-                          { id: 'partly_cloudy', label: 'Oblačno' },
-                          { id: 'overcast', label: 'Zamračené' },
-                          { id: 'rain', label: 'Dážď' },
-                          { id: 'storm', label: 'Búrka' },
-                          { id: 'foggy', label: 'Hmla' },
+                          { id: 'clear', label: 'Clear' },
+                          { id: 'partly_cloudy', label: 'Cloudy' },
+                          { id: 'overcast', label: 'Overcast' },
+                          { id: 'rain', label: 'Rain' },
+                          { id: 'storm', label: 'Storm' },
+                          { id: 'foggy', label: 'Fog' },
                         ] as const
                       ).map((w) => {
                         const active = (settings.gameplayMods.weatherOverride || 'auto') === w.id;
@@ -1219,14 +1294,14 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
                   {cheatSessionActive && (
                     <div className="p-3 rounded-lg bg-rose-500/15 border border-rose-400/35 space-y-2">
                       <div className="text-[11px] text-rose-200 font-semibold">
-                        Aktívne cheaty/modifikácie zamkli misie a ukladanie postupu.
+                        {t(lang, 'settings.cheatLockWarn')}
                       </div>
                       {onRestartCleanSession && (
                         <button
                           onClick={onRestartCleanSession}
                           className="w-full py-1.5 rounded-lg text-xs font-bold bg-rose-500 hover:bg-rose-400 text-white"
                         >
-                          Reštartovať reláciu bez cheatov
+                          {t(lang, 'settings.restartClean')}
                         </button>
                       )}
                     </div>
@@ -1238,9 +1313,9 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
               <div className="p-4 rounded-xl bg-slate-900/60 border border-white/10 space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
-                    <div className="text-xs font-semibold text-white">Import / Export JSON Mod balíka</div>
+                    <div className="text-xs font-semibold text-white">{t(lang, 'settings.jsonModTitle')}</div>
                     <div className="text-[11px] text-slate-400">
-                      Zdieľaj alebo načítaj vlastné nastavenia rozhrania a herných modifikácií.
+                      {t(lang, 'settings.jsonModDesc')}
                     </div>
                   </div>
                   <div className="flex gap-2">
@@ -1249,7 +1324,7 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
                       className="px-3 py-1.5 rounded-lg text-xs font-medium bg-slate-800 text-slate-200 hover:bg-slate-700 flex items-center gap-1.5"
                     >
                       <Download className="w-3.5 h-3.5" />
-                      Exportovať JSON
+                      {t(lang, 'settings.exportJson')}
                     </button>
                     <button
                       onClick={handleImportMod}
@@ -1257,7 +1332,7 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
                       style={{ backgroundColor: accent }}
                     >
                       <Upload className="w-3.5 h-3.5" />
-                      Načítať JSON Mod
+                      {t(lang, 'settings.importJson')}
                     </button>
                   </div>
                 </div>
@@ -1281,17 +1356,17 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
                   <div>
                     <div className="inline-flex items-center gap-2 mb-1">
                       <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px] font-semibold uppercase tracking-wider">
-                        100% Zadarmo
+                        {t(lang, 'settings.cloud.freeBadge')}
                       </span>
-                      <span className="text-[11px] text-slate-400">Automatická lokálna záloha + Cloud Sync</span>
+                      <span className="text-[11px] text-slate-400">{t(lang, 'settings.cloud.sub')}</span>
                     </div>
                     <h3 className="font-display text-lg font-bold text-white">
-                      {user ? user.displayName || user.email : 'Cloudové uloženie zadarmo'}
+                      {user ? user.displayName || user.email : t(lang, 'settings.cloud.title')}
                     </h3>
                     <p className="text-xs text-slate-400">
                       {user
-                        ? `Prepojený účet: ${user.email} · Postup sa automaticky synchronizuje zadarmo.`
-                        : 'Prihlás sa cez Google pre bezplatné ukladanie postupu, peňazí, misií, kostýmov a nastavení do cloudu na akomkoľvek zariadení.'}
+                        ? t(lang, 'settings.cloud.signedDesc', { email: user.email || '' })
+                        : t(lang, 'settings.cloud.guestDesc')}
                     </p>
                   </div>
                   {user ? (
@@ -1300,7 +1375,7 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
                       className="px-3.5 py-2 rounded-lg text-xs font-medium bg-slate-800 text-slate-200 hover:bg-slate-700 flex items-center gap-1.5 whitespace-nowrap"
                     >
                       <LogOut className="w-4 h-4" />
-                      Odhlásiť sa
+                      {t(lang, 'settings.cloud.signOut')}
                     </button>
                   ) : (
                     <button
@@ -1309,7 +1384,7 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
                       style={{ backgroundColor: accent }}
                     >
                       <LogIn className="w-4 h-4" />
-                      Prihlásiť cez Google (Zadarmo)
+                      {t(lang, 'settings.cloud.signIn')}
                     </button>
                   )}
                 </div>
@@ -1322,14 +1397,14 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
                       className="px-4 py-2 rounded-lg text-xs font-semibold text-slate-950 disabled:opacity-50"
                       style={{ backgroundColor: accent }}
                     >
-                      {cloudBusy ? 'Ukladám...' : 'Uložiť postup do cloudu zadarmo'}
+                      {cloudBusy ? t(lang, 'app.saving') : t(lang, 'settings.cloud.saveBtn')}
                     </button>
                     <button
                       onClick={onLoadCloud}
                       disabled={cloudBusy}
                       className="px-4 py-2 rounded-lg text-xs font-medium bg-slate-800 text-slate-200 hover:bg-slate-700 disabled:opacity-50"
                     >
-                      Načítať z cloudu
+                      {t(lang, 'settings.cloud.loadBtn')}
                     </button>
                   </div>
                 )}
@@ -1346,11 +1421,11 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
                     <div className="flex items-center gap-2">
                       <Users className="w-4 h-4 text-sky-400" />
                       <h4 className="font-display text-base font-bold text-white">
-                        Multiplayer & Priatelia (Nickname)
+                        {t(lang, 'settings.mp.title')}
                       </h4>
                     </div>
                     <p className="text-xs text-slate-400 mt-0.5">
-                      Pridaj si prihlásených kamarátov podľa nickname. Keď sa pripoja do hry, automaticky ich stretneš priamo v meste bez pozvánky!
+                      {t(lang, 'settings.mp.desc')}
                     </p>
                   </div>
                   {user && (
@@ -1362,7 +1437,7 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
 
                 {!user ? (
                   <div className="p-3.5 rounded-lg bg-slate-950/60 border border-white/10 text-xs text-slate-300">
-                    Najprv sa prihlás cez Google vyššie, aby si si nastavil svoj Nickname a mohol pridávať prihlásených kamarátov.
+                    {t(lang, 'settings.mp.signInHint')}
                   </div>
                 ) : (
                   <div className="space-y-3">
@@ -1374,9 +1449,9 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
                           setMpFeedback(null);
                           try {
                             await onUpdateNickname(nickDraft);
-                            setMpFeedback('Tvoj nickname bol aktualizovaný.');
+                            setMpFeedback(t(lang, 'app.nickSaved', { nick: nickDraft }));
                           } catch (err) {
-                            setMpFeedback(err instanceof Error ? err.message : 'Chyba ukladania nickname.');
+                            setMpFeedback(err instanceof Error ? err.message : 'Error');
                           } finally {
                             setMpBusy(false);
                           }
@@ -1387,7 +1462,7 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
                           type="text"
                           value={nickDraft}
                           onChange={(e) => setNickDraft(e.target.value)}
-                          placeholder="Tvoj verejný Nickname (2–24 znakov)"
+                          placeholder={t(lang, 'phone.nickPlaceholder')}
                           maxLength={24}
                           className="flex-1 px-3 py-2 rounded-lg bg-slate-950 border border-white/15 text-xs text-white focus:outline-none focus:border-sky-400"
                         />
@@ -1396,7 +1471,7 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
                           disabled={mpBusy}
                           className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-white disabled:opacity-50"
                         >
-                          Uložiť nickname
+                          {t(lang, 'settings.mp.saveNick')}
                         </button>
                       </form>
                     )}
@@ -1411,9 +1486,9 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
                           try {
                             await onAddFriend(friendSearch.trim());
                             setFriendSearch('');
-                            setMpFeedback('Kamarát pridaný! Ak je online, hneď ho uvidíš na mape aj v meste.');
+                            setMpFeedback('+ OK');
                           } catch (err) {
-                            setMpFeedback(err instanceof Error ? err.message : 'Hráč s týmto nickname sa nenašiel.');
+                            setMpFeedback(err instanceof Error ? err.message : 'Not found');
                           } finally {
                             setMpBusy(false);
                           }
@@ -1424,7 +1499,7 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
                           type="text"
                           value={friendSearch}
                           onChange={(e) => setFriendSearch(e.target.value)}
-                          placeholder="Zadaj nickname prihláseného kamaráta..."
+                          placeholder={t(lang, 'phone.friendPlaceholder')}
                           className="flex-1 px-3 py-2 rounded-lg bg-slate-950 border border-white/15 text-xs text-white focus:outline-none focus:border-sky-400"
                         />
                         <button
@@ -1434,7 +1509,7 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
                           style={{ backgroundColor: accent }}
                         >
                           <UserPlus className="w-3.5 h-3.5" />
-                          Pridať kamaráta
+                          {t(lang, 'settings.mp.addFriend')}
                         </button>
                       </form>
                     )}
@@ -1446,7 +1521,7 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
                     {onlinePlayers.filter((p) => p.uid !== user.uid && !friends.some((f) => f.uid === p.uid)).length > 0 && (
                       <div className="p-3 rounded-lg bg-emerald-950/25 border border-emerald-500/25 space-y-2">
                         <div className="text-[11px] font-semibold text-emerald-300">
-                          Aktuálne prihlásení hráči online:
+                          {t(lang, 'settings.mp.onlineNow')}
                         </div>
                         <div className="flex flex-wrap gap-2">
                           {onlinePlayers
@@ -1461,9 +1536,9 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
                                   setMpBusy(true);
                                   try {
                                     await onAddFriend(p.displayName);
-                                    setMpFeedback(`Pridaný hráč ${p.displayName}.`);
+                                    setMpFeedback(`+ ${p.displayName}`);
                                   } catch (err) {
-                                    setMpFeedback(err instanceof Error ? err.message : 'Chyba pridania.');
+                                    setMpFeedback(err instanceof Error ? err.message : 'Error');
                                   } finally {
                                     setMpBusy(false);
                                   }
@@ -1480,11 +1555,11 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
 
                     <div className="space-y-1.5">
                       <div className="text-xs font-semibold text-slate-400">
-                        Tvoji priatelia ({friends.length})
+                        {t(lang, 'settings.mp.yourFriends', { count: friends.length })}
                       </div>
                       {friends.length === 0 ? (
                         <div className="text-xs text-slate-500">
-                          Zatiaľ nemáš pridaných žiadnych priateľov.
+                          {t(lang, 'settings.mp.noFriends')}
                         </div>
                       ) : (
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
@@ -1506,7 +1581,7 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
                                       {f.nickname || f.displayName}
                                     </div>
                                     <div className="text-[10px] text-slate-400">
-                                      {isOnline ? 'Online v hre' : 'Offline'} · {f.friendCode}
+                                      {isOnline ? t(lang, 'settings.mp.onlineInGame') : t(lang, 'settings.mp.offline')} · {f.friendCode}
                                     </div>
                                   </div>
                                 </div>
@@ -1515,7 +1590,6 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
                                     type="button"
                                     onClick={() => onRemoveFriend(f.uid)}
                                     className="p-1 text-slate-500 hover:text-rose-400"
-                                    title="Odstrániť priateľa"
                                   >
                                     <Trash2 className="w-3.5 h-3.5" />
                                   </button>
@@ -1533,19 +1607,19 @@ export const SettingsAndModsModal: React.FC<SettingsAndModsModalProps> = ({
               {/* Career Statistics */}
               <div className="grid grid-cols-3 gap-4">
                 <div className="p-4 rounded-xl bg-slate-900/60 border border-white/10">
-                  <div className="text-xs text-slate-400">Eliminácie</div>
+                  <div className="text-xs text-slate-400">{t(lang, 'settings.stats.elims')}</div>
                   <div className="font-mono-tabular text-2xl font-bold text-white mt-1">
                     {stats.totalEliminations}
                   </div>
                 </div>
                 <div className="p-4 rounded-xl bg-slate-900/60 border border-white/10">
-                  <div className="text-xs text-slate-400">Úniky polícii</div>
+                  <div className="text-xs text-slate-400">{t(lang, 'settings.stats.escapes')}</div>
                   <div className="font-mono-tabular text-2xl font-bold text-white mt-1">
                     {stats.policeEscapes}
                   </div>
                 </div>
                 <div className="p-4 rounded-xl bg-slate-900/60 border border-white/10">
-                  <div className="text-xs text-slate-400">Kaskadérske skoky</div>
+                  <div className="text-xs text-slate-400">{t(lang, 'settings.stats.stunts')}</div>
                   <div className="font-mono-tabular text-2xl font-bold text-white mt-1">
                     {stats.stuntJumps}
                   </div>

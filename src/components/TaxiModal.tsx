@@ -1,7 +1,10 @@
 import React from 'react';
 import { Car, MapPin, Navigation, Shuffle, X } from 'lucide-react';
+import { LanguageCode } from '../types/game';
+import { t } from '../i18n/translations';
 
 interface TaxiModalProps {
+  lang: LanguageCode;
   playerX: number;
   playerZ: number;
   cash: number;
@@ -12,18 +15,19 @@ interface TaxiModalProps {
 }
 
 const TAXI_DESTINATIONS = [
-  { label: 'Bayshore Medzinárodné letisko', district: 'Hangáre a dráhy', x: -960, z: 750 },
-  { label: 'Coral Villa Úkryt & Garáž', district: 'Súkromná vila', x: 420, z: -484 },
-  { label: 'Vice General Nemocnica', district: 'Severné centrum', x: -90, z: -592 },
-  { label: 'Downtown Plaza', district: 'Centrum mesta', x: 0, z: -90 },
-  { label: 'Marina Prístav & Jachty', district: 'Juhovýchodný prístav', x: 520, z: 685 },
-  { label: 'Bayshore Customs Tuning', district: 'Autoservis a lakovňa', x: -540, z: 156 },
-  { label: 'Ammu-Nation & Strelnica', district: 'Zbrojnica', x: 185, z: -224 },
-  { label: 'Coral Pláž & Promenáda', district: 'Východné pobrežie', x: 820, z: -90 },
-  { label: 'Severné hory & Lesná chata', district: 'North Heights', x: 0, z: -1060 },
+  { label: 'Bayshore International Airport', district: 'Hangars & Runways', x: -960, z: 750 },
+  { label: 'Coral Villa Safehouse & Garage', district: 'Private Villa', x: 420, z: -484 },
+  { label: 'Vice General Hospital', district: 'North Midtown', x: -90, z: -592 },
+  { label: 'Downtown Plaza', district: 'City Center', x: 0, z: -90 },
+  { label: 'Marina Harbor & Yachts', district: 'South Docks', x: 520, z: 685 },
+  { label: 'Bayshore Customs Tuning', district: 'Garage & Paint', x: -540, z: 156 },
+  { label: 'Ammu-Nation & Shooting Range', district: 'Armory', x: 185, z: -224 },
+  { label: 'Coral Beach & Boardwalk', district: 'East Coast', x: 820, z: -90 },
+  { label: 'North Heights & Mountain Lodge', district: 'North Heights', x: 0, z: -1060 },
 ];
 
 export const TaxiModal: React.FC<TaxiModalProps> = ({
+  lang,
   playerX,
   playerZ,
   cash,
@@ -39,9 +43,9 @@ export const TaxiModal: React.FC<TaxiModalProps> = ({
           <div className="flex items-center gap-3">
             <Car className="w-5 h-5" style={{ color: accentColor }} />
             <div>
-              <h2 className="font-display text-xl font-bold text-white">Horizon Cab — Destinácia</h2>
+              <h2 className="font-display text-xl font-bold text-white">{t(lang, 'taxiModal.title')}</h2>
               <p className="text-xs text-slate-400">
-                Vyber cieľ jazdy autopilota alebo vyhoď vodiča a prevezmi taxík.
+                {t(lang, 'taxiModal.subtitle')}
               </p>
             </div>
           </div>
@@ -49,7 +53,7 @@ export const TaxiModal: React.FC<TaxiModalProps> = ({
           <button
             onClick={onClose}
             className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-white/10"
-            aria-label="Zavrieť"
+            aria-label={t(lang, 'settings.close')}
           >
             <X className="w-5 h-5" />
           </button>
@@ -58,7 +62,7 @@ export const TaxiModal: React.FC<TaxiModalProps> = ({
         <div className="p-5 overflow-y-auto space-y-2.5">
           {TAXI_DESTINATIONS.map((dest) => {
             const dist = Math.round(Math.hypot(dest.x - playerX, dest.z - playerZ));
-            const fare = Math.max(45, Math.round(dist * 0.14));
+            const fare = Math.max(85, Math.round(dist * 0.25));
             const affordable = cash >= fare;
             return (
               <button
@@ -92,7 +96,8 @@ export const TaxiModal: React.FC<TaxiModalProps> = ({
 
         <div className="px-5 py-3.5 border-t border-white/10 bg-[#090d16] flex items-center justify-between gap-3">
           <span className="text-xs text-slate-400">
-            Hotovosť: <strong className="font-mono-tabular text-emerald-400">${cash.toLocaleString('sk-SK')}</strong>
+            {t(lang, 'taxiModal.cashLabel')}{' '}
+            <strong className="font-mono-tabular text-emerald-400">${cash.toLocaleString()}</strong>
           </span>
           <button
             onClick={() => {
@@ -102,7 +107,7 @@ export const TaxiModal: React.FC<TaxiModalProps> = ({
             className="px-3.5 py-2 rounded-lg text-xs font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/30 hover:bg-amber-500/30 flex items-center gap-1.5"
           >
             <Shuffle className="w-3.5 h-3.5" />
-            Vyhodiť vodiča a šoférovať
+            {t(lang, 'taxiModal.takeWheel')}
           </button>
         </div>
       </div>

@@ -30,10 +30,12 @@ import {
   GameSettings,
   GameStats,
   InventoryState,
+  LanguageCode,
   MissionProgressRecord,
   SavedGarageState,
   StoredVehicleRecord,
 } from '../types/game';
+import { LANGUAGE_OPTIONS } from '../i18n/translations';
 import {
   DEFAULT_CHARACTERS,
   DEFAULT_INVENTORY,
@@ -398,9 +400,11 @@ export async function saveGameToCloud(user: User, payload: CloudSavePayload): Pr
       updatedAt: serverTimestamp(),
     });
 
+    const validLangCodes = new Set<LanguageCode>(LANGUAGE_OPTIONS.map((o) => o.code));
     const settingsRef = doc(db, 'users', uid, 'settings', 'preferences');
     batch.set(settingsRef, {
       ownerId: uid,
+      language: validLangCodes.has(payload.settings.language) ? payload.settings.language : 'en',
       graphics: { ...payload.settings.graphics },
       audio: { ...payload.settings.audio },
       controls: { ...payload.settings.controls },
@@ -512,7 +516,10 @@ export async function loadGameFromCloud(user: User): Promise<CloudSavePayload | 
     const settingsSnap = await getDoc(doc(db, 'users', uid, 'settings', 'preferences'));
     if (settingsSnap.exists()) {
       const sdata = settingsSnap.data();
+      const rawLang = typeof sdata.language === 'string' ? (sdata.language as LanguageCode) : 'en';
+      const resolvedLang: LanguageCode = LANGUAGE_OPTIONS.some((o) => o.code === rawLang) ? rawLang : 'en';
       settings = {
+        language: resolvedLang,
         graphics: { ...DEFAULT_SETTINGS.graphics, ...(sdata.graphics || {}) },
         audio: { ...DEFAULT_SETTINGS.audio, ...(sdata.audio || {}) },
         controls: {

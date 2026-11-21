@@ -58,40 +58,55 @@ async function startServer() {
   app.get('/api/health', healthHandler);
   app.get('/healthz', healthHandler);
 
+const AI_LANGUAGE_NAMES: Record<string, string> = {
+  en: 'English',
+  'en-AU': 'Australian English',
+  sk: 'Slovak (slovenčina)',
+  cs: 'Czech (čeština)',
+  nb: 'Norwegian Bokmål (norsk)',
+  zh: 'Simplified Chinese (中文)',
+  ja: 'Japanese (日本語)',
+  ko: 'Korean (한국어)',
+  ar: 'Arabic (العربية)',
+  ru: 'Russian (русский)',
+};
+
   // Server-side AI integration: Adaptive NPC reactions & Vice AI Dispatcher Assistant
   app.post('/api/ai/npc-react', async (req, res) => {
     const ai = getGenAIClient();
     if (!ai) {
       res.status(503).json({
-        error: 'GEMINI_API_KEY nie je nakonfigurovaný na serveri.',
+        error: 'GEMINI_API_KEY is not configured on the server.',
       });
       return;
     }
 
     const body = (req.body || {}) as Record<string, unknown>;
     const district = String(body.district || 'Vice Horizon');
-    const weather = String(body.weather || 'jasno');
+    const weather = String(body.weather || 'clear');
     const timeOfDay = String(body.timeOfDay || '17:00');
     const playerWanted = Number(body.wantedStars || 0);
     const inVehicle = Boolean(body.inVehicle);
     const nearClub = Boolean(body.nearClub);
-    const eventHint = String(body.eventHint || 'bežný ruch v meste');
-    const npcName = String(body.npcName || 'Obyvateľ Leonidy');
+    const eventHint = String(body.eventHint || 'normal city traffic');
+    const npcName = String(body.npcName || 'Leonida Citizen');
+    const langCode = String(body.language || 'en');
+    const langName = AI_LANGUAGE_NAMES[langCode] || 'English';
 
     try {
       const response = await ai.models.generateContent({
         model: GEMINI_MODEL,
-        contents: `Si NPC obyvateľ menom "${npcName}" v slnečnom prímorskom meste Vice Horizon (štýl Miami / Leonida).
-Kontext okolia práve teraz:
-- Okres: ${district}
-- Čas v hre: ${timeOfDay}
-- Počasie: ${weather}
-- Hráčov stupeň pátrania políciou: ${playerWanted} hviezdičiek
-- Hráč je vo vozidle: ${inVehicle ? 'áno' : 'pešo'}
-- Pri klube Malibu Neon Lounge: ${nearClub ? 'áno' : 'nie'}
-- Aktuálna udalosť v okolí: ${eventHint}
+        contents: `You are an NPC resident named "${npcName}" in the coastal 3D open-world city Vice Horizon (Leonida island).
+Current context right now:
+- District: ${district}
+- In-game time: ${timeOfDay}
+- Weather: ${weather}
+- Player wanted level: ${playerWanted} stars
+- Player is in vehicle: ${inVehicle ? 'yes' : 'on foot'}
+- Near Malibu Neon Lounge: ${nearClub ? 'yes' : 'no'}
+- Local event: ${eventHint}
 
-Vyber pre NPC realistickú reakciu a napíš krátku prirodzenú vetu v slovenčine (max 14 slov), ktorá presne reaguje na situáciu.`,
+Pick a realistic reaction behavior and write one short natural spoken line strictly in ${langName} (max 14 words) reacting to the situation.`,
         config: {
           thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
           responseMimeType: 'application/json',
@@ -115,10 +130,10 @@ Vyber pre NPC realistickú reakciu a napíš krátku prirodzenú vetu v slovenč
       const parsed = JSON.parse(rawText) as { behavior?: string; dialogue?: string };
       res.json({
         behavior: parsed.behavior || 'stroll',
-        dialogue: parsed.dialogue || 'Pekný deň v Leonide!',
+        dialogue: parsed.dialogue || 'Nice day in Leonida!',
       });
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Chyba pri komunikácii s AI službou.';
+      const message = err instanceof Error ? err.message : 'AI service communication error.';
       res.status(502).json({ error: message });
     }
   });
@@ -127,7 +142,7 @@ Vyber pre NPC realistickú reakciu a napíš krátku prirodzenú vetu v slovenč
     const ai = getGenAIClient();
     if (!ai) {
       res.status(503).json({
-        error: 'GEMINI_API_KEY nie je nakonfigurovaný na serveri.',
+        error: 'GEMINI_API_KEY is not configured on the server.',
       });
       return;
     }
@@ -135,39 +150,41 @@ Vyber pre NPC realistickú reakciu a napíš krátku prirodzenú vetu v slovenč
     const body = (req.body || {}) as Record<string, unknown>;
     const message = String(body.message || '').trim();
     if (!message) {
-      res.status(400).json({ error: 'Správa nesmie byť prázdna.' });
+      res.status(400).json({ error: 'Message cannot be empty.' });
       return;
     }
     const ctx = (body.context || {}) as Record<string, unknown>;
+    const langCode = String(body.language || ctx.language || 'en');
+    const langName = AI_LANGUAGE_NAMES[langCode] || 'English';
 
     try {
       const response = await ai.models.generateContent({
         model: GEMINI_MODEL,
-        contents: `Si "Vice AI Asistent" v telefóne iVice v otvorenej 3D hre Vice Horizon (ostrov Leonida).
-Aktuálny stav hráča:
-- Postava: ${String(ctx.characterName || 'Lucia')}
-- Okres: ${String(ctx.district || 'Coral Strip')}
-- Čas v hre: ${String(ctx.gameClock || '17:15')}
-- Počasie: ${String(ctx.weatherLabel || 'Jasno')}
-- Peniaze: $${Number(ctx.cash || 0)}
-- Stupeň pátrania: ${Number(ctx.wantedStars || 0)} hviezdičiek
-- Aktívna misia: ${String(ctx.activeMission || 'Žiadna (Voľná jazda)')}
+        contents: `You are "Vice AI Assistant" inside the iVice smartphone in the open-world 3D game Vice Horizon (Leonida island).
+Current player status:
+- Character: ${String(ctx.characterName || 'Lucia')}
+- District: ${String(ctx.district || 'Coral Strip')}
+- In-game time: ${String(ctx.gameClock || '17:15')}
+- Weather: ${String(ctx.weatherLabel || 'Clear')}
+- Cash: $${Number(ctx.cash || 0)}
+- Wanted stars: ${Number(ctx.wantedStars || 0)}
+- Active mission: ${String(ctx.activeMission || 'Free Roam')}
 
-Poznáš obchody a lokácie v meste: Ammu-Nation (zbrane a strelnica), Bayshore Boutique (oblečenie), 24/7 Ocean Market, Coral Villa (úkryt s garážou), Bayshore Customs / Servis (opravy a tuning autom priamo dnu), Nemocnica Vice Central, Policajná stanica VCPD, Hasičská stanica VCFD, Letisko Bayshore (hangár, vrtuľníky, stíhačka F-22), Prístav Marina a nočný klub Malibu Neon Lounge s pódiovou show.
-Poznáš aj telefónne kódy: 3324 (nesmrteľnosť), 5342 (vrtuľník), 7645 (taxík), 7726 (superšport), 8654 (lietadlo), 9975 (stíhačka), ale upozorni hráča, že použitie cheatov zablokuje misie až do reštartu relácie.
+City locations you know: Ammu-Nation (weapons & shooting range), Bayshore Boutique (outfits), 24/7 Ocean Market, Coral Villa (safehouse + garage), Bayshore Customs / Garage (drive-in tuning & repair), Vice Central Hospital, VCPD Police Station, VCFD Fire Station, Bayshore Airport (hangar, helicopters, F-22 fighter jet), Marina Harbor, Malibu Neon Lounge, and the GSL Express courier contract.
+Phone codes: 3324 (God Mode), 5342 (Heli), 7645 (Taxi), 7726 (Supercar), 8654 (Plane), 9975 (Fighter Jet) — remind the player cheats lock missions until session restart.
 
-Odpovedaj hráčovi po slovensky, vecne, štýlovo a užitočne (max 3–4 vety).
-Otázka hráča: ${message}`,
+Reply to the player strictly in ${langName}, concisely and helpfully (max 3–4 sentences).
+Player message: ${message}`,
         config: {
           thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
         },
       });
 
       res.json({
-        reply: response.text?.trim() || 'Systém iVice Dispatch momentálne neodpovedá.',
+        reply: response.text?.trim() || 'iVice Dispatch is currently unavailable.',
       });
     } catch (err) {
-      const errMsg = err instanceof Error ? err.message : 'Chyba AI dispečingu.';
+      const errMsg = err instanceof Error ? err.message : 'AI dispatch error.';
       res.status(502).json({ error: errMsg });
     }
   });

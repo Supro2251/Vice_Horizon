@@ -1,12 +1,14 @@
 import React, { useEffect, useState } from 'react';
 import { Crosshair, Package, Shield, ShoppingBag, Umbrella, X } from 'lucide-react';
-import { InventoryState, WeaponId } from '../types/game';
+import { InventoryState, LanguageCode, WeaponId } from '../types/game';
 import { PARACHUTE_PRICE, WEAPON_CATALOG } from '../data/defaults';
+import { t } from '../i18n/translations';
 
 interface InventoryModalProps {
   inventory: InventoryState;
   cash: number;
   accentColor: string;
+  lang: LanguageCode;
   initialTab?: 'weapons' | 'gear' | 'loot';
   onEquipWeapon: (id: WeaponId) => void;
   onBuyWeapon: (id: WeaponId) => void;
@@ -31,6 +33,7 @@ export const InventoryModal: React.FC<InventoryModalProps> = ({
   inventory,
   cash,
   accentColor,
+  lang,
   initialTab = 'weapons',
   onEquipWeapon,
   onBuyWeapon,
@@ -54,9 +57,9 @@ export const InventoryModal: React.FC<InventoryModalProps> = ({
         {/* Header */}
         <div className="px-6 py-4 border-b border-white/10 flex items-center justify-between gap-4">
           <div className="flex items-center gap-4">
-            <h2 className="font-display text-2xl font-bold text-white">Inventár a výzbroj</h2>
+            <h2 className="font-display text-2xl font-bold text-white">{t(lang, 'inv.title')}</h2>
             <span className="font-mono-tabular text-base font-bold text-emerald-400">
-              ${cash.toLocaleString('sk-SK')}
+              ${cash.toLocaleString('en-US')}
             </span>
           </div>
 
@@ -69,7 +72,7 @@ export const InventoryModal: React.FC<InventoryModalProps> = ({
                 }`}
               >
                 <Crosshair className="w-3.5 h-3.5" />
-                Zbrane
+                {t(lang, 'inv.tab.weapons')}
               </button>
               <button
                 onClick={() => setTab('gear')}
@@ -78,7 +81,7 @@ export const InventoryModal: React.FC<InventoryModalProps> = ({
                 }`}
               >
                 <Shield className="w-3.5 h-3.5" />
-                Výbava a liečenie
+                {t(lang, 'inv.tab.gear')}
               </button>
               <button
                 onClick={() => setTab('loot')}
@@ -87,14 +90,14 @@ export const InventoryModal: React.FC<InventoryModalProps> = ({
                 }`}
               >
                 <Package className="w-3.5 h-3.5" />
-                Kontraband
+                {t(lang, 'inv.tab.loot')}
               </button>
             </div>
 
             <button
               onClick={onClose}
               className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
-              aria-label="Zavrieť"
+              aria-label={t(lang, 'settings.close')}
             >
               <X className="w-5 h-5" />
             </button>
@@ -123,13 +126,13 @@ export const InventoryModal: React.FC<InventoryModalProps> = ({
                       <div className="flex items-start justify-between gap-2">
                         <div>
                           <div className="text-xs text-slate-400">
-                            {def.category} · Dosah {def.range}m
+                            {def.category} · {t(lang, 'inv.range', { m: def.range })}
                           </div>
                           <h3 className="font-display text-lg font-bold text-white">{def.name}</h3>
                         </div>
                         {owned.unlocked && (
                           <div className="text-right font-mono-tabular text-xs text-slate-300">
-                            {owned.ammoInClip} / {owned.reserveAmmo} nábojov
+                            {t(lang, 'inv.ammo', { clip: owned.ammoInClip, res: owned.reserveAmmo })}
                           </div>
                         )}
                       </div>
@@ -138,13 +141,13 @@ export const InventoryModal: React.FC<InventoryModalProps> = ({
                       {/* Stat bars */}
                       <div className="grid grid-cols-2 gap-3 pt-1">
                         <div className="space-y-1">
-                          <div className="text-[11px] text-slate-400">Poškodenie</div>
+                          <div className="text-[11px] text-slate-400">{t(lang, 'inv.damage')}</div>
                           <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden">
                             <div className="h-full bg-amber-400" style={{ width: `${dmgPct}%` }} />
                           </div>
                         </div>
                         <div className="space-y-1">
-                          <div className="text-[11px] text-slate-400">Kadencia</div>
+                          <div className="text-[11px] text-slate-400">{t(lang, 'inv.rof')}</div>
                           <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden">
                             <div className="h-full bg-sky-400" style={{ width: `${rofPct}%` }} />
                           </div>
@@ -153,7 +156,7 @@ export const InventoryModal: React.FC<InventoryModalProps> = ({
 
                       {owned.unlocked && (
                         <div className="pt-2 flex items-center gap-2">
-                          <span className="text-[11px] text-slate-400">Povrch:</span>
+                          <span className="text-[11px] text-slate-400">{t(lang, 'inv.finish')}</span>
                           {WEAPON_SKINS.map((sk) => (
                             <button
                               key={sk.color}
@@ -183,14 +186,14 @@ export const InventoryModal: React.FC<InventoryModalProps> = ({
                               color: isEquipped ? '#e2e8f0' : '#090d16',
                             }}
                           >
-                            {isEquipped ? 'Vybavená zbraň' : 'Vybaviť zbraň'}
+                            {isEquipped ? t(lang, 'inv.equipped') : t(lang, 'inv.equip')}
                           </button>
                           <button
                             onClick={() => onBuyAmmo(owned.id)}
-                            disabled={cash < 150}
+                            disabled={cash < 420}
                             className="py-2 px-3 rounded-lg text-xs font-medium bg-slate-800 text-slate-200 hover:bg-slate-700 disabled:opacity-40 whitespace-nowrap"
                           >
-                            +Munícia ($150)
+                            {t(lang, 'inv.buyAmmo')}
                           </button>
                         </>
                       ) : (
@@ -199,7 +202,7 @@ export const InventoryModal: React.FC<InventoryModalProps> = ({
                           disabled={cash < def.price}
                           className="w-full py-2 px-3 rounded-lg text-xs font-semibold bg-emerald-500 text-slate-950 hover:bg-emerald-400 disabled:opacity-40 transition-colors"
                         >
-                          Kúpiť za ${def.price.toLocaleString('sk-SK')}
+                          {t(lang, 'inv.buyWeapon', { price: def.price.toLocaleString('en-US') })}
                         </button>
                       )}
                     </div>
@@ -218,7 +221,7 @@ export const InventoryModal: React.FC<InventoryModalProps> = ({
                 >
                   <div className="space-y-1.5">
                     <div className="flex items-center justify-between">
-                      <span className="text-xs text-slate-400">Spotrebný predmet</span>
+                      <span className="text-xs text-slate-400">{t(lang, 'inv.consumable')}</span>
                       <span className="font-mono-tabular text-sm font-bold text-white">
                         {item.quantity}×
                       </span>
@@ -234,14 +237,14 @@ export const InventoryModal: React.FC<InventoryModalProps> = ({
                       className="w-full py-2 px-3 rounded-lg text-xs font-semibold transition-colors disabled:opacity-40"
                       style={{ backgroundColor: accentColor, color: '#090d16' }}
                     >
-                      Použiť teraz
+                      {t(lang, 'inv.useNow')}
                     </button>
                     <button
                       onClick={() => onBuyConsumable(item.id)}
                       disabled={cash < item.price}
                       className="w-full py-2 px-3 rounded-lg text-xs font-medium bg-slate-800 text-slate-200 hover:bg-slate-700 disabled:opacity-40"
                     >
-                      Dokúpiť (+1) · ${item.price}
+                      {t(lang, 'inv.buyMore', { price: item.price })}
                     </button>
                   </div>
                 </div>
@@ -252,15 +255,15 @@ export const InventoryModal: React.FC<InventoryModalProps> = ({
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
                     <span className="text-xs text-sky-400 flex items-center gap-1">
-                      <Umbrella className="w-3.5 h-3.5" /> Letecká výbava
+                      <Umbrella className="w-3.5 h-3.5" /> {t(lang, 'inv.airGear')}
                     </span>
                     <span className="font-mono-tabular text-xs font-bold text-white">
-                      {inventory.hasParachute ? 'Vlastníš' : 'Chýba'}
+                      {inventory.hasParachute ? t(lang, 'inv.owned') : t(lang, 'inv.missing')}
                     </span>
                   </div>
-                  <h3 className="font-display text-lg font-bold text-white">Taktický padák</h3>
+                  <h3 className="font-display text-lg font-bold text-white">{t(lang, 'inv.parachute')}</h3>
                   <p className="text-xs text-slate-400 leading-relaxed">
-                    Umožňuje bezpečný zoskok z lietadiel, vrtuľníkov a mrakodrapov. Aktivuj vo vzduchu klávesom Medzerník.
+                    {t(lang, 'inv.parachuteDesc')}
                   </p>
                 </div>
 
@@ -273,7 +276,9 @@ export const InventoryModal: React.FC<InventoryModalProps> = ({
                     color: inventory.hasParachute ? '#34d399' : '#090d16',
                   }}
                 >
-                  {inventory.hasParachute ? 'Padák vybavený' : `Kúpiť padák ($${PARACHUTE_PRICE})`}
+                  {inventory.hasParachute
+                    ? t(lang, 'inv.parachuteEquipped')
+                    : t(lang, 'inv.buyParachute', { price: PARACHUTE_PRICE })}
                 </button>
               </div>
             </div>
@@ -283,7 +288,7 @@ export const InventoryModal: React.FC<InventoryModalProps> = ({
             <div className="space-y-3">
               {inventory.contraband.length === 0 ? (
                 <div className="py-12 text-center text-sm text-slate-400">
-                  Zatiaľ nemáš žiadny kontraband. Dokonči misie v dokoch alebo v centre.
+                  {t(lang, 'inv.noLoot')}
                 </div>
               ) : (
                 inventory.contraband.map((loot) => (
@@ -293,8 +298,10 @@ export const InventoryModal: React.FC<InventoryModalProps> = ({
                   >
                     <div>
                       <div className="text-xs text-slate-400">
-                        Počet: <span className="font-mono-tabular text-white">{loot.quantity}×</span> ·
-                        Hodnota kusu: ${loot.value.toLocaleString('sk-SK')}
+                        {t(lang, 'inv.qtyValue', {
+                          qty: loot.quantity,
+                          val: loot.value.toLocaleString('en-US'),
+                        })}
                       </div>
                       <h3 className="font-display text-base font-bold text-white">{loot.name}</h3>
                     </div>
@@ -303,7 +310,9 @@ export const InventoryModal: React.FC<InventoryModalProps> = ({
                       className="px-4 py-2 rounded-lg text-xs font-semibold bg-emerald-500 text-slate-950 hover:bg-emerald-400 flex items-center gap-1.5 whitespace-nowrap"
                     >
                       <ShoppingBag className="w-3.5 h-3.5" />
-                      Predať (+${(loot.value * loot.quantity).toLocaleString('sk-SK')})
+                      {t(lang, 'inv.sellLoot', {
+                        total: (loot.value * loot.quantity).toLocaleString('en-US'),
+                      })}
                     </button>
                   </div>
                 ))

@@ -41,6 +41,7 @@ import {
   testFirestoreConnection,
   updatePlayerNickname,
 } from './services/firebase';
+import { isRtlLanguage, t } from './i18n/translations';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { GameHUD } from './components/GameHUD';
 import { CharacterWheel } from './components/CharacterWheel';
@@ -72,7 +73,7 @@ const INITIAL_TELEMETRY: HudTelemetry = {
   armor: 50,
   maxArmor: 100,
   stamina: 100,
-  cash: 2500,
+  cash: 450,
   skills: { driving: 55, shooting: 50, flying: 45, stamina: 55 },
   wantedStars: 0,
   wantedEvading: false,
@@ -96,6 +97,9 @@ const INITIAL_TELEMETRY: HudTelemetry = {
   taxiMode: 'none',
   taxiFareCash: 0,
   taxiDestinationLabel: null,
+  taxiTripDistM: 0,
+  taxiPickupLabel: null,
+  courierStatus: null,
   hangarCount: 0,
   garageCount: 0,
   parkedFacilityNotice: null,
@@ -103,13 +107,17 @@ const INITIAL_TELEMETRY: HudTelemetry = {
   parachuteDeployed: false,
   godModeActive: false,
   cheatSessionActive: false,
-  gameClockStr: '17:15',
+  gameClockStr: '17:16',
   gameTimeNormalized: 0.72,
   cloudCoverage: 0.42,
   weatherType: 'clear',
-  weatherLabel: 'Jasno',
+  weatherLabel: 'Clear Sky',
   rainIntensity: 0,
   ambientTempC: 26,
+  radioStation: 'off',
+  radioStationName: 'Radio Off',
+  radioGenre: 'Mute',
+  radioTrack: '---',
   nearestNpcDialogue: null,
   controlCategory: 'foot',
   equippedWeapon: 'pistol',
@@ -187,14 +195,16 @@ function ViceHorizonApp() {
   const [inventory, setInventory] = useState<InventoryState>(() =>
     initialLocal?.inventory ? initialLocal.inventory : structuredClone(DEFAULT_INVENTORY)
   );
-  const [cash, setCash] = useState<number>(typeof initialLocal?.cash === 'number' ? initialLocal.cash : 2500);
+  const [cash, setCash] = useState<number>(typeof initialLocal?.cash === 'number' ? initialLocal.cash : 450);
   const [stats, setStats] = useState<GameStats>(() =>
     initialLocal?.stats ? initialLocal.stats : { ...DEFAULT_STATS }
   );
   const [settings, setSettings] = useState<GameSettings>(() => {
     if (!initialLocal?.settings) return structuredClone(DEFAULT_SETTINGS);
     const saved = initialLocal.settings;
+    // Language ALWAYS boots in English locally; only Cloud Save persists a non-English language.
     return {
+      language: 'en',
       graphics: { ...DEFAULT_SETTINGS.graphics, ...(saved.graphics || {}) },
       audio: { ...DEFAULT_SETTINGS.audio, ...(saved.audio || {}) },
       controls: {
@@ -217,9 +227,10 @@ function ViceHorizonApp() {
       gameplayMods: { ...DEFAULT_SETTINGS.gameplayMods, ...(saved.gameplayMods || {}) },
     };
   });
-  const [missionsProgress, setMissionsProgress] = useState<Record<string, MissionProgressRecord>>(() =>
-    initialLocal?.missions ? initialLocal.missions : structuredClone(DEFAULT_MISSIONS)
-  );
+  const [missionsProgress, setMissionsProgress] = useState<Record<string, MissionProgressRecord>>(() => ({
+    ...structuredClone(DEFAULT_MISSIONS),
+    ...(initialLocal?.missions || {}),
+  }));
   const [savedGarage, setSavedGarage] = useState<SavedGarageState>(() =>
     initialLocal?.savedGarage ? initialLocal.savedGarage : structuredClone(DEFAULT_SAVED_GARAGE)
   );
@@ -233,7 +244,7 @@ function ViceHorizonApp() {
   const [activeModal, setActiveModal] = useState<ActiveModal>('none');
   const [phoneOpen, setPhoneOpen] = useState(false);
   const [wardrobeMode, setWardrobeMode] = useState<'wardrobe' | 'barber' | 'tattoo' | 'safehouse'>('wardrobe');
-  const [settingsInitialTab, setSettingsInitialTab] = useState<'graphics' | 'audio' | 'controls' | 'mods' | 'cloud'>('graphics');
+  const [settingsInitialTab, setSettingsInitialTab] = useState<'language' | 'graphics' | 'audio' | 'controls' | 'mods' | 'cloud'>('graphics');
   const [inventoryTab, setInventoryTab] = useState<'weapons' | 'gear' | 'loot'>('weapons');
   const [dockOpen, setDockOpen] = useState(false);
   const [shopNotice, setShopNotice] = useState<string | null>(null);
@@ -320,12 +331,12 @@ function ViceHorizonApp() {
               engineRef.current.applySettings(loaded.settings);
               if (loaded.garage) engineRef.current.setSavedGarage(loaded.garage);
             }
-            setCloudStatus('Herný postup načítaný z cloudu.');
+            setCloudStatus(t(loaded.settings.language, 'app.cloudRestored'));
           } else {
-            setCloudStatus('Prihlásený · pripravené na uloženie postupu.');
+            setCloudStatus(t(stateRef.current.settings.language, 'app.signedInReady'));
           }
         } catch (err) {
-          setCloudStatus(err instanceof Error ? err.message : 'Chyba načítania z cloudu.');
+          setCloudStatus(err instanceof Error ? err.message : t(stateRef.current.settings.language, 'app.cloudLoadError'));
         } finally {
           setCloudBusy(false);
         }
@@ -425,7 +436,7 @@ function ViceHorizonApp() {
           } else if (data.type === 'mission_invite' && data.missionId) {
             setIncomingInvite(data as MissionInvite);
           } else if (data.type === 'mission_accept') {
-            showNotice(`${data.byName || 'Kamarát'} prijal pozvánku do misie!`);
+            showNotice(t(stateRef.current.settings.language, 'app.friendAccepted', { name: data.byName || 'Friend' }));
           }
         } catch {
           // ignore malformed messages
@@ -515,6 +526,9 @@ function ViceHorizonApp() {
             };
           });
         },
+        onMissionFailed: () => {
+          setActiveMissionId(null);
+        },
         onShopInteract: (shop) => {
           setPhoneOpen(false);
           if (shop.category === 'weapons') {
@@ -545,9 +559,9 @@ function ViceHorizonApp() {
           } else if (shop.category === 'garage') {
             setActiveModal('garage');
           } else if (shop.category === 'shooting_range') {
-            showNotice('Ammu-Nation Strelnica: Zasiahni červené terče pre tréning presnosti a odmenu!');
+            showNotice(t(stateRef.current.settings.language, 'app.shootingRangeNotice'));
           } else if (shop.category === 'lounge') {
-            showNotice('Malibu Neon Lounge: Vitaj vo VIP klube! Použi výťah na strešnú terasu.');
+            showNotice(t(stateRef.current.settings.language, 'app.loungeNotice'));
           }
         },
       }
@@ -591,6 +605,8 @@ function ViceHorizonApp() {
         engine.useConsumable('armor_plate');
       } else if (action === 'talkNpc') {
         engine.talkToNearestNpc();
+      } else if (action === 'radioNext') {
+        engine.cycleRadioStation(1);
       }
     };
 
@@ -664,8 +680,9 @@ function ViceHorizonApp() {
 
   const handleSaveCloud = useCallback(async () => {
     if (!user) return;
+    const lang = stateRef.current.settings.language;
     if (stateRef.current.telemetry.cheatSessionActive) {
-      setCloudStatus('Ukladanie zablokované počas aktívnych cheatov. Reštartuj reláciu bez cheatov.');
+      setCloudStatus(t(lang, 'app.cloudSaveBlockedCheats'));
       return;
     }
     setCloudBusy(true);
@@ -683,9 +700,9 @@ function ViceHorizonApp() {
         missions: s.missionsProgress,
         garage: syncedGarage,
       });
-      setCloudStatus(`Uložené do cloudu (${new Date().toLocaleTimeString('sk-SK')}).`);
+      setCloudStatus(`${t(s.settings.language, 'app.cloudSaveSuccess')} (${new Date().toLocaleTimeString()})`);
     } catch (err) {
-      setCloudStatus(err instanceof Error ? err.message : 'Chyba ukladania.');
+      setCloudStatus(err instanceof Error ? err.message : t(lang, 'app.cloudLoadError'));
     } finally {
       setCloudBusy(false);
     }
@@ -693,6 +710,7 @@ function ViceHorizonApp() {
 
   const handleLoadCloud = useCallback(async () => {
     if (!user) return;
+    const lang = stateRef.current.settings.language;
     setCloudBusy(true);
     try {
       const loaded = await loadGameFromCloud(user);
@@ -710,24 +728,25 @@ function ViceHorizonApp() {
         engineRef.current?.updateInventoryExternal(loaded.inventory, loaded.cash);
         engineRef.current?.applySettings(loaded.settings);
         if (loaded.garage) engineRef.current?.setSavedGarage(loaded.garage);
-        setCloudStatus(`Načítané z cloudu (${new Date().toLocaleTimeString('sk-SK')}).`);
+        setCloudStatus(`${t(loaded.settings.language, 'app.cloudLoadSuccess')} (${new Date().toLocaleTimeString()})`);
       } else {
-        setCloudStatus('V cloude zatiaľ nie je uložený žiadny postup.');
+        setCloudStatus(t(lang, 'app.cloudNoSave'));
       }
     } catch (err) {
-      setCloudStatus(err instanceof Error ? err.message : 'Chyba načítania.');
+      setCloudStatus(err instanceof Error ? err.message : t(lang, 'app.cloudLoadError'));
     } finally {
       setCloudBusy(false);
     }
   }, [user]);
 
-  // Auto-save locally every 15s & to Cloud every 45s if signed in (strictly skipped while cheats are active!)
+  // Auto-save locally every 15s & to Cloud every 45s if signed in (language is NEVER saved locally)
   useEffect(() => {
     const localTimer = window.setInterval(() => {
       try {
         const s = stateRef.current;
         if (s.telemetry.cheatSessionActive) return;
         const syncedGarage = engineRef.current?.syncGarageBeforeSave() || s.savedGarage;
+        const { language: _omitLanguageLocally, ...settingsWithoutLang } = s.settings;
         localStorage.setItem(
           LOCAL_SAVE_KEY,
           JSON.stringify({
@@ -736,7 +755,7 @@ function ViceHorizonApp() {
             stats: s.stats,
             characters: s.characters,
             inventory: s.inventory,
-            settings: s.settings,
+            settings: settingsWithoutLang,
             missions: s.missionsProgress,
             savedGarage: syncedGarage,
             discoveredSideIds: s.discoveredSideIds,
@@ -780,9 +799,9 @@ function ViceHorizonApp() {
   };
 
   const handleBuyAmmo = (id: WeaponId) => {
-    if (cash < 150) return;
+    if (cash < 420) return;
     const def = WEAPON_CATALOG[id];
-    const nextCash = cash - 150;
+    const nextCash = cash - 420;
     const nextInv: InventoryState = {
       ...inventory,
       weapons: inventory.weapons.map((w) =>
@@ -887,353 +906,374 @@ function ViceHorizonApp() {
 
   return (
     <div className="relative w-screen h-screen overflow-hidden bg-slate-950">
-      {/* Dedicated WebGL Mount Container */}
+      {/* Dedicated WebGL Mount Container (always LTR spatial viewport) */}
       <div ref={canvasMountRef} className="absolute inset-0 w-full h-full" />
 
-      {/* Game HUD */}
-      {activeModal === 'none' && !telemetry.activeCutscene && (
-        <GameHUD
-          telemetry={telemetry}
-          activeCharacter={activeCharacter}
-          characters={characters}
-          hudMod={settings.hudMod}
-          graphics={settings.graphics}
-          controls={settings.controls}
-          gameplayMods={settings.gameplayMods}
-          dockOpen={dockOpen}
-          roadSegments={engineRef.current?.roadSegments || ROAD_SEGMENTS}
-          buildingFootprints={engineRef.current?.buildingFootprints || []}
-          onToggleDock={() => setDockOpen((prev) => !prev)}
-          onCycleCamera={() => engineRef.current?.cycleCameraMode()}
-          onOpenModal={(m) => {
-            if (m === 'settings') setSettingsInitialTab('graphics');
-            if (m === 'wardrobe') setWardrobeMode('wardrobe');
-            setActiveModal(m);
-          }}
-          onTogglePhone={() =>
-            setPhoneOpen((prev) => {
-              const next = !prev;
-              if (next) engineRef.current?.input.exitPointerLock();
-              return next;
-            })
-          }
-          onOpenCloud={() => {
-            setSettingsInitialTab('cloud');
-            setActiveModal('settings');
-          }}
-          onRequestLock={() => engineRef.current?.input.requestPointerLock()}
-          onRestartCleanSession={handleRestartCleanSession}
-        />
-      )}
-
-      {/* Shop / Facility Notice Toast */}
-      {shopNotice && !telemetry.activeCutscene && (
-        <div className="fixed top-20 left-1/2 -translate-x-1/2 z-30 px-5 py-2.5 rounded-xl bg-slate-950/90 border border-white/15 text-xs font-semibold text-white shadow-xl">
-          {shopNotice}
-        </div>
-      )}
-
-      {/* Live Co-op Mission Invite Toast */}
-      {incomingInvite && (
-        <div className="fixed bottom-24 right-6 z-40 w-80 p-4 rounded-2xl bg-[#0b101b]/95 border border-emerald-500/40 shadow-2xl space-y-2.5">
-          <div className="text-[11px] font-bold uppercase tracking-wider text-emerald-400">
-            Pozvánka do Co-op misie
-          </div>
-          <div className="text-xs text-slate-200">
-            <span className="font-semibold text-white">{incomingInvite.fromName}</span> ťa pozýva na misiu{' '}
-            <span className="font-semibold text-amber-300">{incomingInvite.missionTitle}</span>.
-          </div>
-          <div className="flex gap-2">
-            <button
-              onClick={() => {
-                if (wsRef.current?.readyState === WebSocket.OPEN) {
-                  wsRef.current.send(
-                    JSON.stringify({
-                      type: 'mission_accept',
-                      fromUid: incomingInvite.fromUid,
-                      missionId: incomingInvite.missionId,
-                    })
-                  );
-                }
-                setActiveMissionId(incomingInvite.missionId);
-                engineRef.current?.startMission(incomingInvite.missionId);
-                setIncomingInvite(null);
-              }}
-              className="flex-1 py-1.5 rounded-lg text-xs font-bold text-slate-950 bg-emerald-400 hover:bg-emerald-300"
-            >
-              Prijať a spustiť
-            </button>
-            <button
-              onClick={() => setIncomingInvite(null)}
-              className="px-3 py-1.5 rounded-lg text-xs font-medium bg-slate-800 text-slate-300 hover:bg-slate-700"
-            >
-              Odmietnuť
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Character Switcher */}
-      {activeModal === 'character' && (
-        <CharacterWheel
-          characters={characters}
-          activeCharacterId={activeCharacterId}
-          accentColor={settings.hudMod.accentColor}
-          onSelect={(id) => engineRef.current?.switchCharacter(id)}
-          onClose={() => setActiveModal('none')}
-        />
-      )}
-
-      {/* Inventory & Shop */}
-      {activeModal === 'inventory' && (
-        <InventoryModal
-          inventory={inventory}
-          cash={cash}
-          accentColor={settings.hudMod.accentColor}
-          initialTab={inventoryTab}
-          onEquipWeapon={handleEquipWeapon}
-          onBuyWeapon={handleBuyWeapon}
-          onBuyAmmo={handleBuyAmmo}
-          onChangeWeaponSkin={handleChangeWeaponSkin}
-          onUseConsumable={handleUseConsumable}
-          onBuyConsumable={handleBuyConsumable}
-          onBuyParachute={() => engineRef.current?.buyParachute()}
-          onSellContraband={handleSellContraband}
-          onClose={() => setActiveModal('none')}
-        />
-      )}
-
-      {/* Wardrobe, Barber Studio, Tattoo Parlor & Safehouse Closet */}
-      {activeModal === 'wardrobe' && (
-        <WardrobeModal
-          character={activeCharacter}
-          accentColor={settings.hudMod.accentColor}
-          mode={wardrobeMode}
-          onUpdateAppearance={handleUpdateAppearance}
-          onSaveOutfit={handleSaveOutfit}
-          onDeleteOutfit={handleDeleteOutfit}
-          onClose={() => setActiveModal('none')}
-        />
-      )}
-
-      {/* Missions Board */}
-      {activeModal === 'missions' && (
-        <MissionsModal
-          missionsProgress={missionsProgress}
-          discoveredSideIds={discoveredSideIds}
-          activeMissionId={activeMissionId}
-          cheatSessionActive={telemetry.cheatSessionActive}
-          accentColor={settings.hudMod.accentColor}
-          onStartMission={(id) => {
-            setActiveMissionId(id);
-            engineRef.current?.startMission(id);
-          }}
-          onNavigateGps={(x, z, label) => engineRef.current?.setGpsWaypoint(x, z, label)}
-          onCancelMission={() => {
-            setActiveMissionId(null);
-            engineRef.current?.cancelMission();
-          }}
-          onRestartCleanSession={handleRestartCleanSession}
-          onClose={() => setActiveModal('none')}
-        />
-      )}
-
-      {/* Interactive City Map & GPS */}
-      {activeModal === 'map' && (
-        <MapModal
-          telemetry={telemetry}
-          missionsProgress={missionsProgress}
-          roadSegments={engineRef.current?.roadSegments || ROAD_SEGMENTS}
-          buildingFootprints={engineRef.current?.buildingFootprints || []}
-          accentColor={settings.hudMod.accentColor}
-          onSetGps={(x, z, label) => engineRef.current?.setGpsWaypoint(x, z, label)}
-          onClearGps={() => engineRef.current?.clearGpsWaypoint()}
-          onStartMission={(id) => {
-            setActiveMissionId(id);
-            engineRef.current?.startMission(id);
-          }}
-          onClose={() => setActiveModal('none')}
-        />
-      )}
-
-      {/* Horizon Cab Destination Modal */}
-      {activeModal === 'taxi' && (
-        <TaxiModal
-          playerX={telemetry.playerX}
-          playerZ={telemetry.playerZ}
-          cash={cash}
-          accentColor={settings.hudMod.accentColor}
-          onSelectDestination={(x, z, label) => {
-            engineRef.current?.startTaxiRideTo(x, z, label);
-            setActiveModal('none');
-          }}
-          onTakeWheel={() => {
-            engineRef.current?.startTaxiDriverShift();
-            setActiveModal('none');
-          }}
-          onClose={() => setActiveModal('none')}
-        />
-      )}
-
-      {/* Bayshore Customs Drive-In Tuning & Repair Garage */}
-      {activeModal === 'garage' && (
-        <TuningGarageModal
-          cash={cash}
-          telemetry={telemetry}
-          accentColor={settings.hudMod.accentColor}
-          onRepairOrRepaint={(colorHex) => {
-            const cost = colorHex ? 350 : Math.max(40, telemetry.nearbyRepairCost || 40);
-            if (cash < cost) return false;
-            const ok = Boolean(engineRef.current?.repairAndRepaintVehicle(colorHex));
-            if (ok) {
-              const nextCash = cash - cost;
-              setCash(nextCash);
-              engineRef.current?.updateInventoryExternal(inventory, nextCash);
-            }
-            return ok;
-          }}
-          onUpgrade={(type) =>
-            engineRef.current?.upgradeCurrentVehicle(type) || {
-              ok: false,
-              message: 'Najprv vstúp do servisu vozidlom.',
-            }
-          }
-          onClose={() => setActiveModal('none')}
-        />
-      )}
-
-      {/* Smartphone Overlay (Emergency Dispatch, Taxi, Friends, Hangar/Garage, Cheats) */}
-      {phoneOpen && activeModal === 'none' && !telemetry.activeCutscene && (
-        <PhoneOverlay
-          user={user}
-          myNickname={playerNickname || user?.displayName || user?.email?.split('@')[0] || ''}
-          myFriendCode={user ? computeFriendCode(user.uid) : 'VH-OFFLINE'}
-          friends={friends}
-          onlineUids={onlineUids}
-          onlinePlayers={onlinePlayers}
-          remotePlayers={remotePlayers}
-          activeMissionId={activeMissionId}
-          savedGarage={savedGarage}
-          gameClockStr={telemetry.gameClockStr}
-          district={telemetry.district}
-          weatherLabel={telemetry.weatherLabel}
-          cheatSessionActive={telemetry.cheatSessionActive}
-          accentColor={settings.hudMod.accentColor}
-          onSignIn={() => signInWithGoogle().catch((e) => setCloudStatus(String(e)))}
-          onUpdateNickname={async (nextNick) => {
-            if (!user) throw new Error('Najprv sa prihlás Google účtom.');
-            const saved = await updatePlayerNickname(user, nextNick);
-            setPlayerNickname(saved);
-            if (wsRef.current?.readyState === WebSocket.OPEN) {
-              wsRef.current.send(JSON.stringify({ type: 'update_profile', displayName: saved }));
-            }
-            showNotice(`Nickname uložený: ${saved}`);
-          }}
-          onAddFriend={async (q) => {
-            if (!user) throw new Error('Najprv sa prihlás Google účtom.');
-            const rec = await addFriendByQuery(user, q);
-            setFriends((prev) => (prev.some((f) => f.uid === rec.uid) ? prev : [...prev, rec]));
-          }}
-          onRemoveFriend={async (uid) => {
-            if (!user) return;
-            await removeFriend(user, uid);
-            setFriends((prev) => prev.filter((f) => f.uid !== uid));
-          }}
-          onInviteFriend={(friendUid) => {
-            if (!activeMissionId || wsRef.current?.readyState !== WebSocket.OPEN) return;
-            wsRef.current.send(
-              JSON.stringify({
-                type: 'mission_invite',
-                toUid: friendUid,
-                missionId: activeMissionId,
-                missionTitle: telemetry.activeMissionTitle || activeMissionId,
+      <div dir={isRtlLanguage(settings.language) ? 'rtl' : 'ltr'} className="contents">
+        {/* Game HUD */}
+        {activeModal === 'none' && !telemetry.activeCutscene && (
+          <GameHUD
+            lang={settings.language}
+            telemetry={telemetry}
+            activeCharacter={activeCharacter}
+            characters={characters}
+            hudMod={settings.hudMod}
+            graphics={settings.graphics}
+            controls={settings.controls}
+            gameplayMods={settings.gameplayMods}
+            dockOpen={dockOpen}
+            roadSegments={engineRef.current?.roadSegments || ROAD_SEGMENTS}
+            buildingFootprints={engineRef.current?.buildingFootprints || []}
+            onToggleDock={() => setDockOpen((prev) => !prev)}
+            onCycleCamera={() => engineRef.current?.cycleCameraMode()}
+            onOpenModal={(m) => {
+              if (m === 'settings') setSettingsInitialTab('graphics');
+              if (m === 'wardrobe') setWardrobeMode('wardrobe');
+              setActiveModal(m);
+            }}
+            onTogglePhone={() =>
+              setPhoneOpen((prev) => {
+                const next = !prev;
+                if (next) engineRef.current?.input.exitPointerLock();
+                return next;
               })
-            );
-            showNotice('Pozvánka na misiu odoslaná priateľovi.');
-          }}
-          onSetGps={(x, z, label) => engineRef.current?.setGpsWaypoint(x, z, label)}
-          onTeleportToFriend={(player) => {
-            engineRef.current?.teleportTo(player.x + 4, player.z + 4, player.displayName);
-            setPhoneOpen(false);
-          }}
-          onCallTaxi={() => {
-            engineRef.current?.callTaxiPassenger();
-            setPhoneOpen(false);
-          }}
-          onStartTaxiShift={() => {
-            engineRef.current?.startTaxiDriverShift();
-            setPhoneOpen(false);
-          }}
-          onRetrieveVehicle={(facility, idx) => {
-            engineRef.current?.retrieveSavedVehicle(facility, idx);
-          }}
-          onApplyCheat={(code) =>
-            engineRef.current?.applyCheatCode(code) || { ok: false, message: 'Hra nie je pripravená.' }
-          }
-          onRestartCleanSession={handleRestartCleanSession}
-          onClose={() => setPhoneOpen(false)}
-        />
-      )}
-
-      {/* Story Cutscene Cinematic Letterbox */}
-      {telemetry.activeCutscene && (
-        <CutsceneOverlay
-          cutscene={telemetry.activeCutscene}
-          accentColor={settings.hudMod.accentColor}
-          onNext={() => engineRef.current?.advanceCutscene()}
-          onSkip={() => engineRef.current?.skipCutscene()}
-        />
-      )}
-
-      {/* Settings, Controls, Mods, Cloud Save */}
-      {activeModal === 'settings' && (
-        <SettingsAndModsModal
-          settings={settings}
-          user={user}
-          myNickname={playerNickname || user?.displayName || user?.email?.split('@')[0] || ''}
-          myFriendCode={user ? computeFriendCode(user.uid) : 'VH-OFFLINE'}
-          friends={friends}
-          onlineUids={onlineUids}
-          onlinePlayers={onlinePlayers}
-          cloudStatus={cloudStatus}
-          cloudBusy={cloudBusy}
-          stats={stats}
-          controllerConnected={telemetry.controllerConnected}
-          controllerType={telemetry.controllerType}
-          controllerName={telemetry.controllerName}
-          gameClockStr={telemetry.gameClockStr}
-          gameTimeNormalized={telemetry.gameTimeNormalized}
-          cheatSessionActive={telemetry.cheatSessionActive}
-          initialTab={settingsInitialTab}
-          onUpdateSettings={handleUpdateSettings}
-          onSetTimeOfDay={(n) => engineRef.current?.setTimeOfDay(n)}
-          onRestartCleanSession={handleRestartCleanSession}
-          onSignIn={() => signInWithGoogle().catch((e) => setCloudStatus(String(e)))}
-          onSignOut={() => signOutUser().catch(() => {})}
-          onUpdateNickname={async (nextNick) => {
-            if (!user) throw new Error('Najprv sa prihlás Google účtom.');
-            const saved = await updatePlayerNickname(user, nextNick);
-            setPlayerNickname(saved);
-            if (wsRef.current?.readyState === WebSocket.OPEN) {
-              wsRef.current.send(JSON.stringify({ type: 'update_profile', displayName: saved }));
             }
-            showNotice(`Nickname uložený: ${saved}`);
-          }}
-          onAddFriend={async (q) => {
-            if (!user) throw new Error('Najprv sa prihlás Google účtom.');
-            const rec = await addFriendByQuery(user, q);
-            setFriends((prev) => (prev.some((f) => f.uid === rec.uid) ? prev : [...prev, rec]));
-          }}
-          onRemoveFriend={async (uid) => {
-            if (!user) return;
-            await removeFriend(user, uid);
-            setFriends((prev) => prev.filter((f) => f.uid !== uid));
-          }}
-          onSaveCloud={handleSaveCloud}
-          onLoadCloud={handleLoadCloud}
-          onClose={() => setActiveModal('none')}
-        />
-      )}
+            onOpenCloud={() => {
+              setSettingsInitialTab('cloud');
+              setActiveModal('settings');
+            }}
+            onRequestLock={() => engineRef.current?.input.requestPointerLock()}
+            onRestartCleanSession={handleRestartCleanSession}
+            onAcceptTaxi={() => engineRef.current?.acceptTaxiFare()}
+            onCancelTaxi={() => engineRef.current?.cancelTaxiFare()}
+            onSkipTaxiOffer={() => engineRef.current?.skipTaxiOffer()}
+            onCycleRadio={(dir) => engineRef.current?.cycleRadioStation(dir)}
+          />
+        )}
+
+        {/* Shop / Facility Notice Toast */}
+        {shopNotice && !telemetry.activeCutscene && (
+          <div className="fixed top-20 left-1/2 -translate-x-1/2 z-30 px-5 py-2.5 rounded-xl bg-slate-950/90 border border-white/15 text-xs font-semibold text-white shadow-xl">
+            {shopNotice}
+          </div>
+        )}
+
+        {/* Live Co-op Mission Invite Toast */}
+        {incomingInvite && (
+          <div className="fixed bottom-24 right-6 z-40 w-80 p-4 rounded-2xl bg-[#0b101b]/95 border border-emerald-500/40 shadow-2xl space-y-2.5">
+            <div className="text-[11px] font-bold uppercase tracking-wider text-emerald-400">
+              {t(settings.language, 'app.coopInviteTitle')}
+            </div>
+            <div className="text-xs text-slate-200">
+              {t(settings.language, 'app.coopInviteBody', {
+                name: incomingInvite.fromName,
+                mission: incomingInvite.missionTitle,
+              })}
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => {
+                  if (wsRef.current?.readyState === WebSocket.OPEN) {
+                    wsRef.current.send(
+                      JSON.stringify({
+                        type: 'mission_accept',
+                        fromUid: incomingInvite.fromUid,
+                        missionId: incomingInvite.missionId,
+                      })
+                    );
+                  }
+                  setActiveMissionId(incomingInvite.missionId);
+                  engineRef.current?.startMission(incomingInvite.missionId);
+                  setIncomingInvite(null);
+                }}
+                className="flex-1 py-1.5 rounded-lg text-xs font-bold text-slate-950 bg-emerald-400 hover:bg-emerald-300"
+              >
+                {t(settings.language, 'app.acceptStart')}
+              </button>
+              <button
+                onClick={() => setIncomingInvite(null)}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium bg-slate-800 text-slate-300 hover:bg-slate-700"
+              >
+                {t(settings.language, 'app.decline')}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Character Switcher */}
+        {activeModal === 'character' && (
+          <CharacterWheel
+            lang={settings.language}
+            characters={characters}
+            activeCharacterId={activeCharacterId}
+            accentColor={settings.hudMod.accentColor}
+            onSelect={(id) => engineRef.current?.switchCharacter(id)}
+            onClose={() => setActiveModal('none')}
+          />
+        )}
+
+        {/* Inventory & Shop */}
+        {activeModal === 'inventory' && (
+          <InventoryModal
+            lang={settings.language}
+            inventory={inventory}
+            cash={cash}
+            accentColor={settings.hudMod.accentColor}
+            initialTab={inventoryTab}
+            onEquipWeapon={handleEquipWeapon}
+            onBuyWeapon={handleBuyWeapon}
+            onBuyAmmo={handleBuyAmmo}
+            onChangeWeaponSkin={handleChangeWeaponSkin}
+            onUseConsumable={handleUseConsumable}
+            onBuyConsumable={handleBuyConsumable}
+            onBuyParachute={() => engineRef.current?.buyParachute()}
+            onSellContraband={handleSellContraband}
+            onClose={() => setActiveModal('none')}
+          />
+        )}
+
+        {/* Wardrobe, Barber Studio, Tattoo Parlor & Safehouse Closet */}
+        {activeModal === 'wardrobe' && (
+          <WardrobeModal
+            lang={settings.language}
+            character={activeCharacter}
+            accentColor={settings.hudMod.accentColor}
+            mode={wardrobeMode}
+            onUpdateAppearance={handleUpdateAppearance}
+            onSaveOutfit={handleSaveOutfit}
+            onDeleteOutfit={handleDeleteOutfit}
+            onClose={() => setActiveModal('none')}
+          />
+        )}
+
+        {/* Missions Board */}
+        {activeModal === 'missions' && (
+          <MissionsModal
+            lang={settings.language}
+            missionsProgress={missionsProgress}
+            discoveredSideIds={discoveredSideIds}
+            activeMissionId={activeMissionId}
+            cheatSessionActive={telemetry.cheatSessionActive}
+            accentColor={settings.hudMod.accentColor}
+            onStartMission={(id) => {
+              setActiveMissionId(id);
+              engineRef.current?.startMission(id);
+            }}
+            onNavigateGps={(x, z, label) => engineRef.current?.setGpsWaypoint(x, z, label)}
+            onCancelMission={() => {
+              setActiveMissionId(null);
+              engineRef.current?.cancelMission();
+            }}
+            onRestartCleanSession={handleRestartCleanSession}
+            onClose={() => setActiveModal('none')}
+          />
+        )}
+
+        {/* Interactive City Map & GPS */}
+        {activeModal === 'map' && (
+          <MapModal
+            lang={settings.language}
+            telemetry={telemetry}
+            missionsProgress={missionsProgress}
+            roadSegments={engineRef.current?.roadSegments || ROAD_SEGMENTS}
+            buildingFootprints={engineRef.current?.buildingFootprints || []}
+            accentColor={settings.hudMod.accentColor}
+            onSetGps={(x, z, label) => engineRef.current?.setGpsWaypoint(x, z, label)}
+            onClearGps={() => engineRef.current?.clearGpsWaypoint()}
+            onStartMission={(id) => {
+              setActiveMissionId(id);
+              engineRef.current?.startMission(id);
+            }}
+            onClose={() => setActiveModal('none')}
+          />
+        )}
+
+        {/* Horizon Cab Destination Modal */}
+        {activeModal === 'taxi' && (
+          <TaxiModal
+            lang={settings.language}
+            playerX={telemetry.playerX}
+            playerZ={telemetry.playerZ}
+            cash={cash}
+            accentColor={settings.hudMod.accentColor}
+            onSelectDestination={(x, z, label) => {
+              engineRef.current?.startTaxiRideTo(x, z, label);
+              setActiveModal('none');
+            }}
+            onTakeWheel={() => {
+              engineRef.current?.startTaxiDriverShift();
+              setActiveModal('none');
+            }}
+            onClose={() => setActiveModal('none')}
+          />
+        )}
+
+        {/* Bayshore Customs Drive-In Tuning & Repair Garage */}
+        {activeModal === 'garage' && (
+          <TuningGarageModal
+            lang={settings.language}
+            cash={cash}
+            telemetry={telemetry}
+            accentColor={settings.hudMod.accentColor}
+            onRepairOrRepaint={(colorHex) => {
+              const cost = colorHex ? 1200 : Math.max(180, telemetry.nearbyRepairCost || 180);
+              if (cash < cost) return false;
+              const ok = Boolean(engineRef.current?.repairAndRepaintVehicle(colorHex));
+              if (ok) {
+                const nextCash = cash - cost;
+                setCash(nextCash);
+                engineRef.current?.updateInventoryExternal(inventory, nextCash);
+              }
+              return ok;
+            }}
+            onUpgrade={(type) =>
+              engineRef.current?.upgradeCurrentVehicle(type) || {
+                ok: false,
+                message: 'Enter garage in a vehicle first.',
+              }
+            }
+            onClose={() => setActiveModal('none')}
+          />
+        )}
+
+        {/* Smartphone Overlay (Emergency Dispatch, Taxi, Friends, Hangar/Garage, Cheats) */}
+        {phoneOpen && activeModal === 'none' && !telemetry.activeCutscene && (
+          <PhoneOverlay
+            lang={settings.language}
+            user={user}
+            myNickname={playerNickname || user?.displayName || user?.email?.split('@')[0] || ''}
+            myFriendCode={user ? computeFriendCode(user.uid) : 'VH-OFFLINE'}
+            friends={friends}
+            onlineUids={onlineUids}
+            onlinePlayers={onlinePlayers}
+            remotePlayers={remotePlayers}
+            activeMissionId={activeMissionId}
+            savedGarage={savedGarage}
+            gameClockStr={telemetry.gameClockStr}
+            district={telemetry.district}
+            weatherLabel={telemetry.weatherLabel}
+            radioStation={telemetry.radioStation}
+            radioTrack={telemetry.radioTrack}
+            cheatSessionActive={telemetry.cheatSessionActive}
+            accentColor={settings.hudMod.accentColor}
+            onSignIn={() => signInWithGoogle().catch((e) => setCloudStatus(String(e)))}
+            onUpdateNickname={async (nextNick) => {
+              if (!user) throw new Error(t(settings.language, 'app.signInRequired'));
+              const saved = await updatePlayerNickname(user, nextNick);
+              setPlayerNickname(saved);
+              if (wsRef.current?.readyState === WebSocket.OPEN) {
+                wsRef.current.send(JSON.stringify({ type: 'update_profile', displayName: saved }));
+              }
+              showNotice(t(settings.language, 'app.nickSaved', { nick: saved }));
+            }}
+            onAddFriend={async (q) => {
+              if (!user) throw new Error(t(settings.language, 'app.signInRequired'));
+              const rec = await addFriendByQuery(user, q);
+              setFriends((prev) => (prev.some((f) => f.uid === rec.uid) ? prev : [...prev, rec]));
+            }}
+            onRemoveFriend={async (uid) => {
+              if (!user) return;
+              await removeFriend(user, uid);
+              setFriends((prev) => prev.filter((f) => f.uid !== uid));
+            }}
+            onInviteFriend={(friendUid) => {
+              if (!activeMissionId || wsRef.current?.readyState !== WebSocket.OPEN) return;
+              wsRef.current.send(
+                JSON.stringify({
+                  type: 'mission_invite',
+                  toUid: friendUid,
+                  missionId: activeMissionId,
+                  missionTitle: telemetry.activeMissionTitle || activeMissionId,
+                })
+              );
+              showNotice(t(settings.language, 'app.missionInviteSent'));
+            }}
+            onSetGps={(x, z, label) => engineRef.current?.setGpsWaypoint(x, z, label)}
+            onTeleportToFriend={(player) => {
+              engineRef.current?.teleportTo(player.x + 4, player.z + 4, player.displayName);
+              setPhoneOpen(false);
+            }}
+            onCallTaxi={() => {
+              engineRef.current?.callTaxiPassenger();
+              setPhoneOpen(false);
+            }}
+            onStartTaxiShift={() => {
+              engineRef.current?.startTaxiDriverShift();
+              setPhoneOpen(false);
+            }}
+            onRetrieveVehicle={(facility, idx) => {
+              engineRef.current?.retrieveSavedVehicle(facility, idx);
+            }}
+            onSetRadioStation={(stationId) => engineRef.current?.setRadioStation(stationId)}
+            onApplyCheat={(code) =>
+              engineRef.current?.applyCheatCode(code) || { ok: false, message: 'Engine loading...' }
+            }
+            onRestartCleanSession={handleRestartCleanSession}
+            onClose={() => setPhoneOpen(false)}
+          />
+        )}
+
+        {/* Story Cutscene Cinematic Letterbox */}
+        {telemetry.activeCutscene && (
+          <CutsceneOverlay
+            lang={settings.language}
+            cutscene={telemetry.activeCutscene}
+            accentColor={settings.hudMod.accentColor}
+            onNext={() => engineRef.current?.advanceCutscene()}
+            onSkip={() => engineRef.current?.skipCutscene()}
+          />
+        )}
+
+        {/* Settings, Controls, Mods, Cloud Save */}
+        {activeModal === 'settings' && (
+          <SettingsAndModsModal
+            settings={settings}
+            user={user}
+            myNickname={playerNickname || user?.displayName || user?.email?.split('@')[0] || ''}
+            myFriendCode={user ? computeFriendCode(user.uid) : 'VH-OFFLINE'}
+            friends={friends}
+            onlineUids={onlineUids}
+            onlinePlayers={onlinePlayers}
+            cloudStatus={cloudStatus}
+            cloudBusy={cloudBusy}
+            stats={stats}
+            controllerConnected={telemetry.controllerConnected}
+            controllerType={telemetry.controllerType}
+            controllerName={telemetry.controllerName}
+            gameClockStr={telemetry.gameClockStr}
+            gameTimeNormalized={telemetry.gameTimeNormalized}
+            cheatSessionActive={telemetry.cheatSessionActive}
+            initialTab={settingsInitialTab}
+            onUpdateSettings={handleUpdateSettings}
+            onSetTimeOfDay={(n) => engineRef.current?.setTimeOfDay(n)}
+            onRestartCleanSession={handleRestartCleanSession}
+            onSignIn={() => signInWithGoogle().catch((e) => setCloudStatus(String(e)))}
+            onSignOut={() => signOutUser().catch(() => {})}
+            onUpdateNickname={async (nextNick) => {
+              if (!user) throw new Error(t(settings.language, 'app.signInRequired'));
+              const saved = await updatePlayerNickname(user, nextNick);
+              setPlayerNickname(saved);
+              if (wsRef.current?.readyState === WebSocket.OPEN) {
+                wsRef.current.send(JSON.stringify({ type: 'update_profile', displayName: saved }));
+              }
+              showNotice(t(settings.language, 'app.nickSaved', { nick: saved }));
+            }}
+            onAddFriend={async (q) => {
+              if (!user) throw new Error(t(settings.language, 'app.signInRequired'));
+              const rec = await addFriendByQuery(user, q);
+              setFriends((prev) => (prev.some((f) => f.uid === rec.uid) ? prev : [...prev, rec]));
+            }}
+            onRemoveFriend={async (uid) => {
+              if (!user) return;
+              await removeFriend(user, uid);
+              setFriends((prev) => prev.filter((f) => f.uid !== uid));
+            }}
+            onSaveCloud={handleSaveCloud}
+            onLoadCloud={handleLoadCloud}
+            onClose={() => setActiveModal('none')}
+          />
+        )}
+      </div>
     </div>
   );
 }

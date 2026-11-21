@@ -4,10 +4,12 @@ import {
   Bot,
   Car,
   Copy,
+  Delete,
   Navigation,
   Phone,
   PhoneCall,
   Plane,
+  Radio,
   RotateCcw,
   Send,
   ShieldAlert,
@@ -20,11 +22,14 @@ import {
 } from 'lucide-react';
 import {
   FriendRecord,
+  LanguageCode,
   OnlinePlayerInfo,
+  RadioStationId,
   RemotePlayerState,
   SavedGarageState,
 } from '../types/game';
-import { SHOPS } from '../data/defaults';
+import { RADIO_STATIONS, SHOPS } from '../data/defaults';
+import { t } from '../i18n/translations';
 
 interface PhoneOverlayProps {
   user: User | null;
@@ -39,8 +44,11 @@ interface PhoneOverlayProps {
   gameClockStr: string;
   district: string;
   weatherLabel: string;
+  radioStation: RadioStationId;
+  radioTrack: string;
   cheatSessionActive: boolean;
   accentColor: string;
+  lang: LanguageCode;
   onSignIn: () => void;
   onUpdateNickname: (nickname: string) => Promise<void>;
   onAddFriend: (query: string) => Promise<void>;
@@ -51,23 +59,23 @@ interface PhoneOverlayProps {
   onCallTaxi: () => void;
   onStartTaxiShift: () => void;
   onRetrieveVehicle: (facility: 'hangar' | 'safehouse', index: number) => void;
+  onSetRadioStation: (stationId: RadioStationId) => void;
   onApplyCheat: (code: string) => { ok: boolean; message: string };
   onRestartCleanSession: () => void;
   onClose: () => void;
 }
 
-const CHEAT_PRESETS = [
-  { code: '3324', alias: 'GODMODE', label: 'Nesmrteľnosť (God Mode)' },
-  { code: '5342', alias: 'HELI', label: 'Spawn vrtuľníka Pelican' },
-  { code: '7645', alias: 'TAXI', label: 'Spawn Horizon Cab taxíka' },
-  { code: '7726', alias: 'SUPERCAR', label: 'Spawn superšportu Valkyra' },
-  { code: '8654', alias: 'PLANE', label: 'Spawn lietadla Skylark' },
-  { code: '9975', alias: 'JET', label: 'Spawn ozbrojenej stíhačky F-22' },
-  { code: 'CASH50K', alias: '1999-227-468', label: '+$50,000 na účet' },
-  { code: 'TURTLE', alias: '1999-887-853', label: '100% Zdravie a Vesta' },
-  { code: 'LAWYERUP', alias: '1999-529-937', label: 'Zrušiť policajné pátranie' },
-  { code: 'SKYDIVE', alias: '1999-759-348', label: 'Získať taktický padák' },
-  { code: 'TOOLUP', alias: '1999-866-587', label: 'Všetky zbrane + munícia' },
+const CHEAT_DIRECTORY = [
+  { number: '3324', label: 'Nesmrteľnosť (God Mode)' },
+  { number: '5342', label: 'Spawn vrtuľníka Pelican' },
+  { number: '7645', label: 'Spawn Horizon Cab taxíka' },
+  { number: '7726', label: 'Spawn superšportu Valkyra' },
+  { number: '8654', label: 'Spawn lietadla Skylark' },
+  { number: '9975', label: 'Spawn ozbrojenej stíhačky F-22' },
+  { number: '1999-887-853', label: '100% Zdravie a Vesta' },
+  { number: '1999-529-937', label: 'Zrušiť policajné pátranie' },
+  { number: '1999-759-348', label: 'Získať taktický padák' },
+  { number: '1999-866-587', label: 'Všetky zbrane + munícia' },
 ];
 
 export const PhoneOverlay: React.FC<PhoneOverlayProps> = ({
@@ -83,8 +91,11 @@ export const PhoneOverlay: React.FC<PhoneOverlayProps> = ({
   gameClockStr,
   district,
   weatherLabel,
+  radioStation,
+  radioTrack,
   cheatSessionActive,
   accentColor,
+  lang,
   onSignIn,
   onUpdateNickname,
   onAddFriend,
@@ -95,11 +106,12 @@ export const PhoneOverlay: React.FC<PhoneOverlayProps> = ({
   onCallTaxi,
   onStartTaxiShift,
   onRetrieveVehicle,
+  onSetRadioStation,
   onApplyCheat,
   onRestartCleanSession,
   onClose,
 }) => {
-  const [tab, setTab] = useState<'friends' | 'taxi' | 'garage' | 'cheats' | 'ai'>('friends');
+  const [tab, setTab] = useState<'friends' | 'taxi' | 'garage' | 'radio' | 'cheats' | 'ai'>('friends');
   const [nickInput, setNickInput] = useState(myNickname);
   const [nickBusy, setNickBusy] = useState(false);
   const [friendQuery, setFriendQuery] = useState('');
@@ -113,7 +125,7 @@ export const PhoneOverlay: React.FC<PhoneOverlayProps> = ({
   const [aiMessages, setAiMessages] = useState<{ role: 'user' | 'ai'; text: string }[]>([
     {
       role: 'ai',
-      text: 'Ahoj, som Vice AI Dispečer. Spýtaj sa ma na misie v Leonide, tajné miesta, autá, počasie alebo taktiku!',
+      text: t(lang, 'phone.aiWelcome'),
     },
   ]);
 
@@ -161,18 +173,19 @@ export const PhoneOverlay: React.FC<PhoneOverlayProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: q,
+          language: lang,
           context: { district, weather: weatherLabel, clock: gameClockStr, activeMissionId },
         }),
       });
       const data = await res.json();
       setAiMessages((prev) => [
         ...prev,
-        { role: 'ai', text: data?.reply || 'Dispečing je momentálne zaneprázdnený, skús znova.' },
+        { role: 'ai', text: data?.reply || '...' },
       ]);
     } catch {
       setAiMessages((prev) => [
         ...prev,
-        { role: 'ai', text: 'Spojenie s Vice AI zlyhalo. Skús to o chvíľu znova.' },
+        { role: 'ai', text: 'Vice AI offline.' },
       ]);
     } finally {
       setAiBusy(false);
@@ -205,13 +218,14 @@ export const PhoneOverlay: React.FC<PhoneOverlayProps> = ({
       </div>
 
       {/* App Switcher Tabs */}
-      <div className="grid grid-cols-5 border-b border-white/10 bg-[#0b1120]">
+      <div className="grid grid-cols-6 border-b border-white/10 bg-[#0b1120]">
         {[
-          { id: 'friends' as const, label: 'Priatelia', icon: Users },
-          { id: 'taxi' as const, label: 'Taxík', icon: Car },
-          { id: 'garage' as const, label: 'Garáž', icon: Plane },
-          { id: 'cheats' as const, label: 'Cheaty', icon: Terminal },
-          { id: 'ai' as const, label: 'Vice AI', icon: Bot },
+          { id: 'friends' as const, label: t(lang, 'phone.tab.friends'), icon: Users },
+          { id: 'taxi' as const, label: t(lang, 'phone.tab.taxi'), icon: Car },
+          { id: 'garage' as const, label: t(lang, 'phone.tab.garage'), icon: Plane },
+          { id: 'radio' as const, label: t(lang, 'phone.tab.radio'), icon: Radio },
+          { id: 'cheats' as const, label: t(lang, 'phone.tab.cheats'), icon: Terminal },
+          { id: 'ai' as const, label: t(lang, 'phone.tab.ai'), icon: Bot },
         ].map((item) => {
           const Icon = item.icon;
           const active = tab === item.id;
@@ -225,7 +239,7 @@ export const PhoneOverlay: React.FC<PhoneOverlayProps> = ({
               style={active ? { borderBottom: `2px solid ${accentColor}` } : undefined}
             >
               <Icon className="w-3.5 h-3.5" style={active ? { color: accentColor } : undefined} />
-              <span>{item.label}</span>
+              <span className="truncate max-w-full px-0.5">{item.label}</span>
             </button>
           );
         })}
@@ -239,14 +253,14 @@ export const PhoneOverlay: React.FC<PhoneOverlayProps> = ({
             {!user ? (
               <div className="p-4 rounded-xl bg-slate-900/70 border border-white/10 space-y-3 text-center">
                 <p className="text-xs text-slate-300 leading-relaxed">
-                  Prihlás sa cez Google, aby si mohol pridávať priateľov a stretnúť ich naživo v otvorenom svete bez pozvánky!
+                  {t(lang, 'phone.signInHint')}
                 </p>
                 <button
                   onClick={onSignIn}
                   className="w-full py-2 rounded-lg text-xs font-bold text-slate-950"
                   style={{ backgroundColor: accentColor }}
                 >
-                  Prihlásiť cez Google
+                  {t(lang, 'phone.signInBtn')}
                 </button>
               </div>
             ) : (
@@ -255,7 +269,7 @@ export const PhoneOverlay: React.FC<PhoneOverlayProps> = ({
                   <div className="flex items-center justify-between gap-2">
                     <div>
                       <div className="text-[10px] uppercase tracking-wider text-slate-400">
-                        Tvoj Nickname & kód
+                        {t(lang, 'phone.yourNickCode')}
                       </div>
                       <div className="font-mono-tabular text-xs font-bold text-white">
                         {myNickname} · <span className="text-sky-300">{myFriendCode}</span>
@@ -266,7 +280,7 @@ export const PhoneOverlay: React.FC<PhoneOverlayProps> = ({
                       className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] text-slate-200 flex items-center gap-1"
                     >
                       <Copy className="w-3 h-3" />
-                      {copiedCode ? 'Skopírované' : 'Kód'}
+                      {copiedCode ? t(lang, 'phone.copied') : t(lang, 'phone.code')}
                     </button>
                   </div>
                   <form
@@ -276,9 +290,9 @@ export const PhoneOverlay: React.FC<PhoneOverlayProps> = ({
                       setFriendMsg(null);
                       try {
                         await onUpdateNickname(nickInput);
-                        setFriendMsg('Nickname uložený. Kamaráti ťa teraz môžu nájsť podľa prezývky.');
+                        setFriendMsg(t(lang, 'app.nickSaved', { nick: nickInput }));
                       } catch (err) {
-                        setFriendMsg(err instanceof Error ? err.message : 'Chyba ukladania nickname.');
+                        setFriendMsg(err instanceof Error ? err.message : 'Error');
                       } finally {
                         setNickBusy(false);
                       }
@@ -289,7 +303,7 @@ export const PhoneOverlay: React.FC<PhoneOverlayProps> = ({
                       type="text"
                       value={nickInput}
                       onChange={(e) => setNickInput(e.target.value)}
-                      placeholder="Nastaviť tvoj nickname..."
+                      placeholder={t(lang, 'phone.nickPlaceholder')}
                       maxLength={24}
                       className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-slate-950 border border-white/12 text-xs text-white focus:outline-none focus:border-white/30"
                     />
@@ -298,7 +312,7 @@ export const PhoneOverlay: React.FC<PhoneOverlayProps> = ({
                       disabled={nickBusy}
                       className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] font-semibold text-white disabled:opacity-50"
                     >
-                      {nickBusy ? '...' : 'Uložiť'}
+                      {nickBusy ? '...' : t(lang, 'wardrobe.save')}
                     </button>
                   </form>
                 </div>
@@ -308,7 +322,7 @@ export const PhoneOverlay: React.FC<PhoneOverlayProps> = ({
                     type="text"
                     value={friendQuery}
                     onChange={(e) => setFriendQuery(e.target.value)}
-                    placeholder="Nickname kamaráta (alebo VH-kód)"
+                    placeholder={t(lang, 'phone.friendPlaceholder')}
                     className="flex-1 min-w-0 px-2.5 py-2 rounded-lg bg-slate-950 border border-white/12 text-xs text-white focus:outline-none focus:border-white/30"
                   />
                   <button
@@ -318,7 +332,7 @@ export const PhoneOverlay: React.FC<PhoneOverlayProps> = ({
                     style={{ backgroundColor: accentColor }}
                   >
                     <UserPlus className="w-3.5 h-3.5" />
-                    Pridať
+                    {t(lang, 'phone.add')}
                   </button>
                 </form>
 
@@ -329,7 +343,7 @@ export const PhoneOverlay: React.FC<PhoneOverlayProps> = ({
                 {onlinePlayers.filter((op) => op.uid !== user.uid && !friends.some((f) => f.uid === op.uid)).length > 0 && (
                   <div className="p-2.5 rounded-xl bg-emerald-950/25 border border-emerald-500/25 space-y-1.5">
                     <div className="text-[10px] uppercase tracking-wider font-semibold text-emerald-300">
-                      Prihlásení hráči online teraz
+                      {t(lang, 'settings.mp.onlineNow')}
                     </div>
                     <div className="space-y-1">
                       {onlinePlayers
@@ -345,16 +359,16 @@ export const PhoneOverlay: React.FC<PhoneOverlayProps> = ({
                                 setFriendBusy(true);
                                 try {
                                   await onAddFriend(op.displayName);
-                                  setFriendMsg(`Kamarát ${op.displayName} pridaný!`);
+                                  setFriendMsg(`+ ${op.displayName}`);
                                 } catch (err) {
-                                  setFriendMsg(err instanceof Error ? err.message : 'Chyba pridania.');
+                                  setFriendMsg(err instanceof Error ? err.message : 'Error');
                                 } finally {
                                   setFriendBusy(false);
                                 }
                               }}
                               className="px-2 py-1 rounded bg-emerald-500/20 hover:bg-emerald-500/35 text-emerald-200 text-[10px] font-semibold shrink-0"
                             >
-                              + Pridať
+                              + {t(lang, 'phone.add')}
                             </button>
                           </div>
                         ))}
@@ -364,11 +378,11 @@ export const PhoneOverlay: React.FC<PhoneOverlayProps> = ({
 
                 <div className="space-y-2">
                   <div className="text-[11px] font-semibold text-slate-400">
-                    Priatelia ({friends.length}) · Online v meste ({remotePlayers.length})
+                    {t(lang, 'settings.mp.yourFriends', { count: friends.length })} · {remotePlayers.length} Live
                   </div>
                   {friends.length === 0 ? (
                     <div className="p-4 rounded-xl bg-slate-900/50 border border-white/8 text-center text-xs text-slate-400">
-                      Zatiaľ žiadni priatelia. Zadaj nickname prihláseného kamaráta alebo mu pošli svoj nickname "{myNickname}".
+                      {t(lang, 'settings.mp.noFriends')}
                     </div>
                   ) : (
                     friends.map((f) => {
@@ -391,14 +405,14 @@ export const PhoneOverlay: React.FC<PhoneOverlayProps> = ({
                                   {f.displayName}
                                 </div>
                                 <div className="text-[10px] font-mono-tabular text-slate-400">
-                                  {f.friendCode} · {isOnline ? 'V hre (Live)' : 'Offline'}
+                                  {f.friendCode} · {isOnline ? t(lang, 'settings.mp.onlineInGame') : t(lang, 'settings.mp.offline')}
                                 </div>
                               </div>
                             </div>
                             <button
                               onClick={() => onRemoveFriend(f.uid)}
                               className="p-1 text-slate-500 hover:text-rose-400"
-                              title="Odstrániť"
+                              title="Remove"
                             >
                               <Trash2 className="w-3.5 h-3.5" />
                             </button>
@@ -407,7 +421,7 @@ export const PhoneOverlay: React.FC<PhoneOverlayProps> = ({
                           {live && (
                             <div className="flex gap-1.5">
                               <button
-                                onClick={() => onSetGps(live.x, live.z, `Kamarát ${f.displayName}`)}
+                                onClick={() => onSetGps(live.x, live.z, f.displayName)}
                                 className="flex-1 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] text-sky-300 flex items-center justify-center gap-1"
                               >
                                 <Navigation className="w-3 h-3" />
@@ -420,7 +434,7 @@ export const PhoneOverlay: React.FC<PhoneOverlayProps> = ({
                                 }}
                                 className="flex-1 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] text-emerald-300"
                               >
-                                Stretnúť sa
+                                TP
                               </button>
                               {activeMissionId && (
                                 <button
@@ -428,7 +442,7 @@ export const PhoneOverlay: React.FC<PhoneOverlayProps> = ({
                                   className="py-1.5 px-2.5 rounded-lg text-[11px] font-bold text-slate-950"
                                   style={{ backgroundColor: accentColor }}
                                 >
-                                  Pozvať
+                                  +
                                 </button>
                               )}
                             </div>
@@ -447,9 +461,9 @@ export const PhoneOverlay: React.FC<PhoneOverlayProps> = ({
         {tab === 'taxi' && (
           <div className="space-y-3">
             <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-400/25 space-y-2">
-              <div className="text-xs font-bold text-amber-300">Horizon Cab Dispatch</div>
+              <div className="text-xs font-bold text-amber-300">{t(lang, 'phone.taxiHeader')}</div>
               <p className="text-[11px] text-slate-300 leading-relaxed">
-                Zavolaj si taxík priamo pred seba, vyber destináciu na ostrove, alebo vyhoď vodiča klávesom Shift+F / G a zarábaj rozvážaním klientov.
+                {t(lang, 'phone.taxiDesc')}
               </p>
               <button
                 onClick={() => {
@@ -460,14 +474,14 @@ export const PhoneOverlay: React.FC<PhoneOverlayProps> = ({
                 style={{ backgroundColor: accentColor }}
               >
                 <PhoneCall className="w-3.5 h-3.5" />
-                Zavolať Horizon Cab ako pasažier
+                {t(lang, 'phone.callCab')}
               </button>
             </div>
 
             <div className="p-3.5 rounded-xl bg-slate-900/75 border border-white/10 space-y-2">
-              <div className="text-xs font-bold text-white">Práca taxikára (Zarábaj peniaze)</div>
+              <div className="text-xs font-bold text-white">{t(lang, 'phone.driverTitle')}</div>
               <p className="text-[11px] text-slate-400">
-                Sadni do ľubovoľného taxíka Horizon Cab a prijmi objednávku zákazníka z ulice.
+                {t(lang, 'phone.driverDesc')}
               </p>
               <button
                 onClick={() => {
@@ -476,7 +490,7 @@ export const PhoneOverlay: React.FC<PhoneOverlayProps> = ({
                 }}
                 className="w-full py-2 rounded-lg text-xs font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/30"
               >
-                Spustiť zmenu taxikára
+                {t(lang, 'phone.startShift')}
               </button>
             </div>
           </div>
@@ -487,11 +501,11 @@ export const PhoneOverlay: React.FC<PhoneOverlayProps> = ({
           <div className="space-y-3">
             <div className="space-y-1.5">
               <div className="text-[11px] font-semibold uppercase tracking-wider text-sky-400">
-                Letiskový hangár ({savedGarage.hangarVehicles.length}/4)
+                {t(lang, 'phone.hangarTitle', { count: savedGarage.hangarVehicles.length })}
               </div>
               {savedGarage.hangarVehicles.length === 0 ? (
                 <div className="p-3 rounded-xl bg-slate-900/50 border border-white/8 text-[11px] text-slate-400">
-                  Zaparkuj lietadlo, vrtuľník alebo stíhačku do hangáru na letisku Bayshore — automaticky sa uloží.
+                  {t(lang, 'phone.hangarEmpty')}
                 </div>
               ) : (
                 savedGarage.hangarVehicles.map((v, i) => (
@@ -503,7 +517,7 @@ export const PhoneOverlay: React.FC<PhoneOverlayProps> = ({
                       <div className="text-xs font-semibold text-white truncate">
                         {v.brand} {v.name}
                       </div>
-                      <div className="text-[10px] text-slate-400">Hangár Bayshore</div>
+                      <div className="text-[10px] text-slate-400">Bayshore</div>
                     </div>
                     <button
                       onClick={() => {
@@ -513,7 +527,7 @@ export const PhoneOverlay: React.FC<PhoneOverlayProps> = ({
                       className="px-2.5 py-1.5 rounded-lg text-[11px] font-bold text-slate-950 shrink-0"
                       style={{ backgroundColor: accentColor }}
                     >
-                      Pristaviť
+                      {t(lang, 'phone.summon')}
                     </button>
                   </div>
                 ))
@@ -522,11 +536,11 @@ export const PhoneOverlay: React.FC<PhoneOverlayProps> = ({
 
             <div className="space-y-1.5">
               <div className="text-[11px] font-semibold uppercase tracking-wider text-amber-400">
-                Garáž pri úkryte ({savedGarage.safehouseVehicles.length}/4)
+                {t(lang, 'phone.garageTitle', { count: savedGarage.safehouseVehicles.length })}
               </div>
               {savedGarage.safehouseVehicles.length === 0 ? (
                 <div className="p-3 rounded-xl bg-slate-900/50 border border-white/8 text-[11px] text-slate-400">
-                  Zaparkuj auto alebo motorku do garáže pri vile Coral Villa — uloží sa aj pri Cloud Save.
+                  {t(lang, 'phone.garageEmpty')}
                 </div>
               ) : (
                 savedGarage.safehouseVehicles.map((v, i) => (
@@ -538,7 +552,7 @@ export const PhoneOverlay: React.FC<PhoneOverlayProps> = ({
                       <div className="text-xs font-semibold text-white truncate">
                         {v.brand} {v.name}
                       </div>
-                      <div className="text-[10px] text-slate-400">Garáž Coral Villa</div>
+                      <div className="text-[10px] text-slate-400">Coral Villa</div>
                     </div>
                     <button
                       onClick={() => {
@@ -548,7 +562,7 @@ export const PhoneOverlay: React.FC<PhoneOverlayProps> = ({
                       className="px-2.5 py-1.5 rounded-lg text-[11px] font-bold text-slate-950 shrink-0"
                       style={{ backgroundColor: accentColor }}
                     >
-                      Pristaviť
+                      {t(lang, 'phone.summon')}
                     </button>
                   </div>
                 ))
@@ -557,13 +571,55 @@ export const PhoneOverlay: React.FC<PhoneOverlayProps> = ({
           </div>
         )}
 
-        {/* 911 DISPATCH & CHEAT CODES */}
+        {/* FM RADIO STATIONS */}
+        {tab === 'radio' && (
+          <div className="space-y-2">
+            {RADIO_STATIONS.map((st) => {
+              const active = radioStation === st.id;
+              return (
+                <button
+                  key={st.id}
+                  onClick={() => onSetRadioStation(st.id)}
+                  className="w-full p-2.5 rounded-xl border text-left flex items-center justify-between gap-2 transition-colors"
+                  style={{
+                    backgroundColor: active ? 'rgba(255,255,255,0.08)' : 'rgba(15,23,42,0.72)',
+                    borderColor: active ? st.color : 'rgba(255,255,255,0.08)',
+                  }}
+                >
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span
+                        className="font-mono-tabular text-[10px] font-bold px-1.5 py-0.5 rounded"
+                        style={{ backgroundColor: `${st.color}25`, color: st.color }}
+                      >
+                        {st.freq}
+                      </span>
+                      <span className="text-xs font-bold text-white truncate">{st.name}</span>
+                    </div>
+                    <div className="text-[10px] text-slate-400 mt-0.5 truncate">
+                      {st.genre}
+                      {active && st.id !== 'off' ? ` · ♪ ${radioTrack}` : ''}
+                    </div>
+                  </div>
+                  {active && (
+                    <span
+                      className="w-2 h-2 rounded-full shrink-0"
+                      style={{ backgroundColor: st.color }}
+                    />
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        {/* 911 DISPATCH & DIALPAD CHEAT CODES */}
         {tab === 'cheats' && (
           <div className="space-y-3">
             <div className="p-3 rounded-xl bg-slate-900/80 border border-white/10 space-y-2">
               <div className="text-[11px] font-bold text-rose-400 flex items-center gap-1.5">
                 <ShieldAlert className="w-3.5 h-3.5" />
-                Tiesňová linka 911 / 112 (GPS navigácia)
+                {t(lang, 'phone.emergency')}
               </div>
               <div className="grid grid-cols-1 gap-1.5">
                 {emergencyServices.map((s) => (
@@ -585,20 +641,21 @@ export const PhoneOverlay: React.FC<PhoneOverlayProps> = ({
             {cheatSessionActive && (
               <div className="p-3 rounded-xl bg-rose-500/15 border border-rose-400/35 space-y-2">
                 <div className="text-[11px] font-semibold text-rose-200 leading-snug">
-                  Cheaty sú aktívne: Misie a ukladanie postupu sú zamknuté až do reštartu čistej relácie!
+                  {t(lang, 'settings.cheatLockWarn')}
                 </div>
                 <button
                   onClick={onRestartCleanSession}
                   className="w-full py-1.5 rounded-lg text-[11px] font-bold bg-rose-500 hover:bg-rose-400 text-white flex items-center justify-center gap-1.5"
                 >
                   <RotateCcw className="w-3.5 h-3.5" />
-                  Reštartovať reláciu bez cheatov
+                  {t(lang, 'settings.restartClean')}
                 </button>
               </div>
             )}
 
-            <div className="p-3 rounded-xl bg-slate-900/80 border border-white/10 space-y-2">
-              <div className="text-[11px] font-bold text-white">Vytočiť Cheat Kód (napr. 3324, 5342, 7645, 7726, 8654, 9975)</div>
+            {/* Mobile Numeric Keypad Dialer */}
+            <div className="p-3 rounded-xl bg-slate-900/80 border border-white/10 space-y-2.5">
+              <div className="text-[11px] font-bold text-white">{t(lang, 'phone.dialCheat')}</div>
               <div className="flex gap-1.5">
                 <input
                   type="text"
@@ -607,17 +664,46 @@ export const PhoneOverlay: React.FC<PhoneOverlayProps> = ({
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') dialCheat(cheatInput);
                   }}
-                  placeholder="Zadaj číslo (napr. 3324)"
-                  className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-slate-950 border border-white/12 font-mono-tabular text-xs text-white focus:outline-none"
+                  placeholder={t(lang, 'phone.dialPlaceholder')}
+                  className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-slate-950 border border-white/12 font-mono-tabular text-sm tracking-wider text-white focus:outline-none"
                 />
                 <button
-                  onClick={() => dialCheat(cheatInput)}
-                  className="px-3 py-1.5 rounded-lg text-xs font-bold text-slate-950 shrink-0"
-                  style={{ backgroundColor: accentColor }}
+                  type="button"
+                  onClick={() => setCheatInput((v) => v.slice(0, -1))}
+                  className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200"
+                  title="Backspace"
                 >
-                  Vytočiť
+                  <Delete className="w-4 h-4" />
                 </button>
               </div>
+
+              {/* Numeric Phone Keypad */}
+              <div className="grid grid-cols-3 gap-1.5">
+                {['1', '2', '3', '4', '5', '6', '7', '8', '9', '-', '0', 'C'].map((k) => (
+                  <button
+                    key={k}
+                    type="button"
+                    onClick={() => {
+                      if (k === 'C') setCheatInput('');
+                      else setCheatInput((v) => (v.length < 18 ? v + k : v));
+                    }}
+                    className="py-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 border border-white/10 font-mono-tabular text-xs font-bold text-slate-100 active:scale-95 transition-transform"
+                  >
+                    {k}
+                  </button>
+                ))}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => dialCheat(cheatInput)}
+                className="w-full py-2 rounded-lg text-xs font-bold text-slate-950 flex items-center justify-center gap-1.5"
+                style={{ backgroundColor: accentColor }}
+              >
+                <PhoneCall className="w-3.5 h-3.5" />
+                {t(lang, 'phone.dialBtn')}
+              </button>
+
               {cheatMsg && (
                 <div
                   className={`text-[11px] font-medium ${
@@ -628,22 +714,26 @@ export const PhoneOverlay: React.FC<PhoneOverlayProps> = ({
                 </div>
               )}
 
-              <div className="pt-1 space-y-1 max-h-[175px] overflow-y-auto pr-0.5">
-                {CHEAT_PRESETS.map((c) => (
-                  <button
-                    key={c.code}
-                    onClick={() => dialCheat(c.code)}
-                    className="w-full px-2.5 py-1.5 rounded-lg bg-slate-950/90 hover:bg-slate-800 border border-white/8 text-left flex items-center justify-between gap-2"
-                  >
-                    <div className="min-w-0">
-                      <div className="text-[11px] font-medium text-white truncate">{c.label}</div>
-                      <div className="text-[10px] font-mono-tabular text-slate-400">
-                        {c.code} ({c.alias})
-                      </div>
+              {/* Strictly Read-Only Non-Clickable Cheat Directory */}
+              <div className="pt-2 border-t border-white/10 space-y-1">
+                <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                  {t(lang, 'phone.cheatReadOnlyHint')}
+                </div>
+                <div className="space-y-1 max-h-[155px] overflow-y-auto pr-0.5 pointer-events-none select-none">
+                  {CHEAT_DIRECTORY.map((c) => (
+                    <div
+                      key={c.number}
+                      className="w-full px-2.5 py-1.5 rounded-lg bg-slate-950/75 border border-white/8 flex items-center justify-between gap-2"
+                    >
+                      <span className="font-mono-tabular text-[11px] font-bold text-amber-300 shrink-0">
+                        {c.number}
+                      </span>
+                      <span className="text-[10px] text-slate-300 text-right truncate">
+                        {c.label}
+                      </span>
                     </div>
-                    <span className="text-[10px] font-semibold text-sky-400 shrink-0">Vytočiť</span>
-                  </button>
-                ))}
+                  ))}
+                </div>
               </div>
             </div>
           </div>
@@ -667,7 +757,7 @@ export const PhoneOverlay: React.FC<PhoneOverlayProps> = ({
               ))}
               {aiBusy && (
                 <div className="p-2 rounded-xl bg-slate-900/60 text-[11px] text-slate-400 mr-6">
-                  Vice AI premýšľa...
+                  {t(lang, 'phone.aiThinking')}
                 </div>
               )}
             </div>
@@ -676,7 +766,7 @@ export const PhoneOverlay: React.FC<PhoneOverlayProps> = ({
                 type="text"
                 value={aiPrompt}
                 onChange={(e) => setAiPrompt(e.target.value)}
-                placeholder="Opýtaj sa Vice AI..."
+                placeholder={t(lang, 'phone.aiPlaceholder')}
                 className="flex-1 min-w-0 px-2.5 py-2 rounded-lg bg-slate-950 border border-white/12 text-xs text-white focus:outline-none"
               />
               <button

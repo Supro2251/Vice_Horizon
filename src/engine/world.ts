@@ -85,6 +85,8 @@ export interface ElevatorEntity {
   targetFloorIndex: number;
   currentY: number;
   cabGroup: THREE.Group;
+  direction?: 1 | -1;
+  idleTimer?: number;
 }
 
 export interface ClubPerformerRig {
@@ -1899,7 +1901,7 @@ float tFbm(vec2 p) {
           maxX: shop.x + lx + sw * 0.5 + 0.12,
           minZ: shop.z + lz - sd * 0.5 - 0.12,
           maxZ: shop.z + lz + sd * 0.5 + 0.12,
-          height: sh + 0.8,
+          height: sh,
         });
       }
     };
@@ -1914,14 +1916,37 @@ float tFbm(vec2 p) {
     roof.receiveShadow = true;
     g.add(roof);
     floorSurfaces.push({
-      minX: shop.x - w * 0.5,
-      maxX: shop.x + w * 0.5,
-      minZ: shop.z - d * 0.5,
-      maxZ: shop.z + d * 0.5,
-      minY: h - 0.1,
+      minX: shop.x - w * 0.5 - 0.3,
+      maxX: shop.x + w * 0.5 + 0.3,
+      minZ: shop.z - d * 0.5 - 0.3,
+      maxZ: shop.z + d * 0.5 + 0.3,
+      minY: h - 0.25,
       height: h + 0.7,
       isRoofSurface: true,
     });
+
+    if (isPoliceStation || isHospital || isFire) {
+      const padColor = isPoliceStation ? 0x3b82f6 : isHospital ? 0xf43f5e : 0xfacc15;
+      const padMat = new THREE.MeshStandardMaterial({
+        color: padColor,
+        emissive: padColor,
+        emissiveIntensity: 0.75,
+        roughness: 0.45,
+      });
+      const padRing = new THREE.Mesh(new THREE.RingGeometry(4.6, 5.1, 28), padMat);
+      padRing.rotation.x = -Math.PI / 2;
+      padRing.position.set(0, h + 0.715, 0);
+      const hLeft = new THREE.Mesh(new THREE.PlaneGeometry(0.62, 4.2), padMat);
+      hLeft.rotation.x = -Math.PI / 2;
+      hLeft.position.set(-1.35, h + 0.718, 0);
+      const hRight = new THREE.Mesh(new THREE.PlaneGeometry(0.62, 4.2), padMat);
+      hRight.rotation.x = -Math.PI / 2;
+      hRight.position.set(1.35, h + 0.718, 0);
+      const hMid = new THREE.Mesh(new THREE.PlaneGeometry(2.7, 0.62), padMat);
+      hMid.rotation.x = -Math.PI / 2;
+      hMid.position.set(0, h + 0.718, 0);
+      g.add(padRing, hLeft, hRight, hMid);
+    }
 
     // Multi-Floor Interior Mezzanine + Working Elevator inside Large Civic & VIP Buildings!
     if (isMultiFloor) {
@@ -2633,6 +2658,25 @@ float tFbm(vec2 p) {
       upperGeo.translate(x, h, z);
       roofGeos.push(upperGeo.toNonIndexed());
       upperGeo.dispose();
+
+      colliders.push({
+        minX: x - w * 0.34 - 0.3,
+        maxX: x + w * 0.34 + 0.3,
+        minZ: z - d * 0.34 - 0.3,
+        maxZ: z + d * 0.34 + 0.3,
+        minY: h + 0.1,
+        height: h + 4.4,
+        isRoofSurface: true,
+      });
+      floorSurfaces.push({
+        minX: x - w * 0.34 - 0.25,
+        maxX: x + w * 0.34 + 0.25,
+        minZ: z - d * 0.34 - 0.25,
+        maxZ: z + d * 0.34 + 0.25,
+        minY: h + 3.5,
+        height: h + 4.55,
+        isRoofSurface: true,
+      });
     }
 
     if (neonHex !== undefined) {
@@ -2652,7 +2696,16 @@ float tFbm(vec2 p) {
       maxX: x + w * 0.5 + padMargin,
       minZ: z - d * 0.5 - padMargin,
       maxZ: z + d * 0.5 + padMargin,
-      height: h + 0.5,
+      height: h - 0.05,
+      isRoofSurface: true,
+    });
+    floorSurfaces.push({
+      minX: x - w * 0.5 - 0.35,
+      maxX: x + w * 0.5 + 0.35,
+      minZ: z - d * 0.5 - 0.35,
+      maxZ: z + d * 0.5 + 0.35,
+      minY: h - 0.8,
+      height: h + 0.25,
       isRoofSurface: true,
     });
     buildingFootprints.push({

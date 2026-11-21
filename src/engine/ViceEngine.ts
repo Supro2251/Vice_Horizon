@@ -19,6 +19,7 @@ import {
   MissionCutsceneLine,
   MissionDef,
   MissionProgressRecord,
+  RadioStationId,
   RemotePlayerState,
   SavedGarageState,
   ShopDef,
@@ -37,7 +38,9 @@ import {
   HOSPITAL_RESPAWN,
   isMissionUnlocked,
   MISSIONS,
+  PARACHUTE_PRICE,
   POLICE_STATION_RESPAWN,
+  RADIO_STATIONS,
   SAFEHOUSE_GARAGE_ZONE,
   SHOPS,
   SIDE_DISCOVERY_MISSIONS,
@@ -79,11 +82,13 @@ import {
   isIslandLandAt,
   isOnBeachAt,
   isOutOfBoundsSeaAt,
+  isPavedRoadAt,
   isWaterAt,
   PARKING_LOTS,
   RoadSegmentDef,
   TRAFFIC_LOOP_PATHS,
 } from './navigation';
+import { getWeatherLabel, t } from '../i18n/translations';
 
 // Module-scope reusable math helpers & pooled geometries (Zero GC in render loop)
 const _v1 = new THREE.Vector3();
@@ -275,6 +280,7 @@ export interface EngineCallbacks {
   onCharactersChange: (chars: Record<CharacterId, CharacterState>, activeId: CharacterId) => void;
   onStatsChange: (stats: GameStats) => void;
   onMissionComplete: (missionId: string, elapsedSec: number, reward: number) => void;
+  onMissionFailed?: (missionId: string, reason: string) => void;
   onShopInteract: (shop: ShopDef) => void;
   onGarageChange?: (garage: SavedGarageState) => void;
   onCutsceneChange?: (cutscene: ActiveCutsceneState | null) => void;
@@ -375,6 +381,8 @@ export class ViceEngine {
   private playerGrounded = true;
   private playerStamina = 100;
   private isPlayerSprinting = false;
+  private stridePhase = 0;
+  private lastStrideSign = 1;
   private crowdMaintainTimer = 0;
   private currentVehicle: VehicleEntity | null = null;
   private lastLandVehicle: VehicleEntity | null = null;
@@ -447,15 +455,19 @@ export class ViceEngine {
   private savedGarage: SavedGarageState = structuredClone(DEFAULT_SAVED_GARAGE);
   private parkedFacilityNotice: string | null = null;
   private parkedNoticeTimer = 0;
-  private taxiMode: 'none' | 'passenger' | 'driver_waiting' | 'driver_active' = 'none';
+  private taxiMode: 'none' | 'passenger' | 'driver_offer' | 'driver_waiting' | 'driver_active' = 'none';
   private taxiFareCash = 0;
+  private taxiTripDistM = 0;
   private taxiDestinationLabel: string | null = null;
+  private taxiPickupLabel: string | null = null;
   private taxiTargetX = 0;
   private taxiTargetZ = 0;
   private taxiPickupX = 0;
   private taxiPickupZ = 0;
   private taxiAutoPilotTimer = 0;
   private taxiDropBeacon: THREE.Mesh | null = null;
+  private taxiCustomerRig: CharacterRig | null = null;
+  private taxiWaveDropoffTimer = 0;
 
   private activeCutscene: ActiveCutsceneState | null = null;
   private cutsceneLines: MissionCutsceneLine[] = [];
@@ -471,13 +483,18 @@ export class ViceEngine {
   private skillXp = { driving: 0, shooting: 0, flying: 0, stamina: 0 };
   private smokeTimer = 0;
 
-  // Mission state
+  // Mission & GSL Express Courier State
   private activeMission: MissionDef | null = null;
   private activeStageIndex = 0;
   private missionTimerRemaining: number | null = null;
   private missionElapsedSec = 0;
   private missionNotification: { title: string; subtitle: string; reward?: number } | null = null;
   private missionNotifTimer = 0;
+  private gslVehicle: VehicleEntity | null = null;
+  private gslBoarded = false;
+  private gslPackageDamagePct = 0;
+  private gslPrevSpeed = 0;
+  private radioManuallyOff = false;
 
   // Loop & perf
   private frameId = 0;
@@ -533,7 +550,7 @@ export class ViceEngine {
     });
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 0.94;
+    this.renderer.toneMappingExposure = 0.80;
     this.renderer.shadowMap.enabled = !this.isSoftwareGl && this.settings.graphics.shadowQuality !== 'off';
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.shadowMap.autoUpdate = false;
@@ -555,24 +572,29 @@ export class ViceEngine {
     );
     this.scene.add(this.camera);
 
-    // Environment Map (RoomEnvironment)
+    // Environment Map (RoomEnvironment — calibrated intensity so daylight surfaces never wash out)
     const pmrem = new THREE.PMREMGenerator(this.renderer);
     this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    this.scene.environmentIntensity = 0.34;
     pmrem.dispose();
 
-    // Hardware Post-Processing Pipeline (Bloom + ACES Output)
+    // Hardware Post-Processing Pipeline (Crisp MSAA + Subtle Emissive-Only Bloom + ACES Output)
     const initW = container.clientWidth || window.innerWidth;
     const initH = container.clientHeight || window.innerHeight;
     if (!this.isSoftwareGl) {
-      const composer = new EffectComposer(this.renderer);
+      const rt = new THREE.WebGLRenderTarget(initW, initH, {
+        type: THREE.HalfFloatType,
+        samples: this.renderer.capabilities.isWebGL2 ? 2 : 0,
+      });
+      const composer = new EffectComposer(this.renderer, rt);
       composer.setPixelRatio(this.computePixelRatio());
       composer.setSize(initW, initH);
       composer.addPass(new RenderPass(this.scene, this.camera));
       const bloom = new UnrealBloomPass(
         new THREE.Vector2(Math.max(1, Math.floor(initW / 2)), Math.max(1, Math.floor(initH / 2))),
-        0.20,
-        0.38,
-        1.18
+        0.09,
+        0.14,
+        2.25
       );
       composer.addPass(bloom);
       composer.addPass(new OutputPass());
@@ -580,11 +602,11 @@ export class ViceEngine {
       this.bloomPass = bloom;
     }
 
-    // Lighting (Calibrated Sun + Cool Rim Fill for crisp GTA V contrast without distance washout)
-    this.hemiLight = new THREE.HemisphereLight(0x93c5fd, 0x334155, 0.44);
+    // Lighting (Calibrated Sun + Cool Rim Fill for crisp contrast without white overexposure)
+    this.hemiLight = new THREE.HemisphereLight(0x93c5fd, 0x334155, 0.32);
     this.scene.add(this.hemiLight);
 
-    this.sunLight = new THREE.DirectionalLight(0xffedd5, 1.75);
+    this.sunLight = new THREE.DirectionalLight(0xffedd5, 1.28);
     this.sunLight.position.set(80, 95, 60);
     this.sunLight.castShadow = !this.isSoftwareGl;
     this.sunLight.shadow.mapSize.set(1024, 1024);
@@ -600,7 +622,7 @@ export class ViceEngine {
     this.scene.add(this.sunLight);
     this.scene.add(this.sunLight.target);
 
-    this.rimLight = new THREE.DirectionalLight(0x7dd3fc, 0.32);
+    this.rimLight = new THREE.DirectionalLight(0x7dd3fc, 0.20);
     this.rimLight.position.set(-70, 50, -65);
     this.rimLight.castShadow = false;
     this.scene.add(this.rimLight);
@@ -756,6 +778,26 @@ export class ViceEngine {
     this.taxiDropBeacon.visible = false;
     this.scene.add(this.taxiDropBeacon);
 
+    this.taxiCustomerRig = createCharacterRig(
+      {
+        skinTone: '#d49a73',
+        hairStyle: 'fade',
+        hairColor: '#1f1714',
+        facialHair: 'stubble',
+        glasses: 'wayfarer',
+        tattoo: 'none',
+        jacketStyle: 'bomber',
+        jacketColor: '#0284c7',
+        shirtColor: '#facc15',
+        pantsColor: '#1e293b',
+        shoesColor: '#18181b',
+        accessory: 'watch',
+      },
+      this.textures.contactShadow
+    );
+    this.taxiCustomerRig.root.visible = false;
+    this.scene.add(this.taxiCustomerRig.root);
+
     // Floating 3D Beacons for Unlocked Story Missions
     for (const m of MISSIONS) {
       const mGroup = new THREE.Group();
@@ -850,7 +892,7 @@ export class ViceEngine {
 
   private computePixelRatio(): number {
     if (this.isSoftwareGl) return 1;
-    const maxCap = this.settings.graphics.preset === 'balanced' || this.settings.graphics.preset === 'low' ? 1.5 : 2;
+    const maxCap = this.settings.graphics.preset === 'balanced' || this.settings.graphics.preset === 'low' ? 1.0 : 1.5;
     const base = Math.min(window.devicePixelRatio || 1, maxCap);
     return Math.max(0.5, Math.min(maxCap, base * this.settings.graphics.renderScale));
   }
@@ -1143,20 +1185,21 @@ export class ViceEngine {
     this.scene.add(rig.root);
 
     const speedTable: Record<VehicleKind, [number, number]> = {
-      sedan: [28, 14],
-      taxi: [30, 15],
-      suv: [31, 16],
-      muscle: [41, 23],
-      police: [46, 26],
-      ambulance: [36, 18],
-      firetruck: [33, 15],
-      coupe: [47, 26],
-      supercar: [60, 34],
-      motorcycle: [50, 31],
-      boat: [40, 20],
-      plane: [78, 28],
-      helicopter: [52, 24],
-      fighter_jet: [118, 46],
+      sedan: [28, 8.8],
+      taxi: [30, 9.2],
+      suv: [31, 9.6],
+      van: [27, 8.8],
+      muscle: [41, 13.8],
+      police: [46, 15.2],
+      ambulance: [36, 10.8],
+      firetruck: [33, 9.5],
+      coupe: [47, 15.6],
+      supercar: [60, 20.5],
+      motorcycle: [50, 18.0],
+      boat: [40, 14],
+      plane: [78, 24],
+      helicopter: [52, 20],
+      fighter_jet: [118, 38],
     };
     const [maxSpeed, accel] = speedTable[kind];
     const maxHealth =
@@ -1542,7 +1585,9 @@ export class ViceEngine {
     }
     if (this.bloomPass) {
       this.bloomPass.enabled = settings.graphics.preset === 'high' || settings.graphics.preset === 'ultra';
-      this.bloomPass.strength = settings.graphics.preset === 'ultra' ? 0.28 : 0.20;
+      this.bloomPass.strength = settings.graphics.preset === 'ultra' ? 0.10 : 0.08;
+      this.bloomPass.radius = 0.14;
+      this.bloomPass.threshold = 2.25;
     }
     this.camera.fov = settings.graphics.fov;
     this.camera.updateProjectionMatrix();
@@ -1587,6 +1632,23 @@ export class ViceEngine {
     this.updateAtmosphere(0);
   }
 
+  public setRadioStation(stationId: RadioStationId) {
+    this.radioManuallyOff = stationId === 'off';
+    this.audio.setRadioStation(stationId);
+  }
+
+  public cycleRadioStation(dir: 1 | -1 = 1) {
+    const cur = this.audio.getRadioStation();
+    const idx = RADIO_STATIONS.findIndex((s) => s.id === cur);
+    const nextIdx = ((idx < 0 ? 0 : idx) + dir + RADIO_STATIONS.length) % RADIO_STATIONS.length;
+    const next = RADIO_STATIONS[nextIdx];
+    this.setRadioStation(next.id);
+    this.audio.playUiChime('switch');
+    this.stuntMessage =
+      next.id === 'off' ? 'Radio: Off' : `Radio: ${next.freq} ${next.name} (${next.genre})`;
+    this.stuntTimer = 2.4;
+  }
+
   private getGameClockString(): string {
     const totalMinutes = Math.floor(this.gameTimeNormalized * 1440) % 1440;
     const hh = String(Math.floor(totalMinutes / 60)).padStart(2, '0');
@@ -1595,21 +1657,13 @@ export class ViceEngine {
   }
 
   private getWeatherLabelSk(w: WeatherType): string {
-    const labels: Record<WeatherType, string> = {
-      clear: 'Jasno',
-      partly_cloudy: 'Polooblačno',
-      overcast: 'Zamračené',
-      rain: 'Dážď',
-      storm: 'Búrka',
-      foggy: 'Hmlisto',
-    };
-    return labels[w] || 'Jasno';
+    return getWeatherLabel(this.settings.language, w);
   }
 
   private updateAtmosphere(dt: number) {
-    // 1. Day/Night clock (3x faster when auto)
+    // 1. Day/Night clock (20x faster than real time -> 1 in-game minute every 3 real seconds)
     if (dt > 0 && this.settings.gameplayMods.timeOfDay === 'auto') {
-      this.gameTimeNormalized = (this.gameTimeNormalized + (dt * 3) / 1440) % 1;
+      this.gameTimeNormalized = (this.gameTimeNormalized + (dt * 20) / 86400) % 1;
     }
 
     // 2. Smooth Weather State Machine
@@ -1775,15 +1829,15 @@ export class ViceEngine {
     _cSunCol.copy(_cSunLow).lerp(_cSunHigh, dayWeight).lerp(_cSunWarm, sunsetWeight * 0.8);
     this.sunLight.color.copy(_cSunCol);
     const rainDim = 1 - this.rainIntensity * 0.45;
-    this.sunLight.intensity = THREE.MathUtils.lerp(0.45, 1.82, Math.max(dayWeight, sunsetWeight * 0.75)) * rainDim + this.lightningFlash * 2.1;
+    this.sunLight.intensity = THREE.MathUtils.lerp(0.38, 1.30, Math.max(dayWeight, sunsetWeight * 0.75)) * rainDim + this.lightningFlash * 1.35;
     this.rimLight.color.set(dayWeight > 0.5 ? 0xe0f2fe : 0x60a5fa);
-    this.rimLight.intensity = THREE.MathUtils.lerp(0.24, 0.34, dayWeight);
+    this.rimLight.intensity = THREE.MathUtils.lerp(0.16, 0.22, dayWeight);
     this.hemiLight.color.set(dayWeight > 0.45 ? 0xbae6fd : 0x3b82f6);
     this.hemiLight.groundColor.set(dayWeight > 0.45 ? 0x475569 : 0x0f172a);
-    this.hemiLight.intensity = THREE.MathUtils.lerp(0.28, 0.48, dayWeight);
-    this.renderer.toneMappingExposure = THREE.MathUtils.lerp(0.86, 0.94, Math.max(dayWeight, sunsetWeight));
+    this.hemiLight.intensity = THREE.MathUtils.lerp(0.22, 0.34, dayWeight);
+    this.renderer.toneMappingExposure = THREE.MathUtils.lerp(0.74, 0.80, Math.max(dayWeight, sunsetWeight));
 
-    const windowGlow = THREE.MathUtils.lerp(0.65, 0.04, dayWeight * (1 - this.rainIntensity * 0.3));
+    const windowGlow = THREE.MathUtils.lerp(0.52, 0.02, dayWeight * (1 - this.rainIntensity * 0.3));
     for (const wm of this.buildingWindowMaterials) {
       if ('emissiveIntensity' in wm) {
         (wm as THREE.MeshStandardMaterial).emissiveIntensity = windowGlow;
@@ -2049,7 +2103,7 @@ export class ViceEngine {
     const target = this.currentVehicle || this.lastLandVehicle;
     if (!target || target.destroyed) return 0;
     const damageRatio = 1 - THREE.MathUtils.clamp(target.health / Math.max(1, target.maxHealth), 0, 1);
-    return Math.max(40, Math.round(40 + damageRatio * 480));
+    return Math.max(180, Math.round(180 + damageRatio * 1400));
   }
 
   public repairAndRepaintVehicle(colorHex?: string): boolean {
@@ -2080,19 +2134,19 @@ export class ViceEngine {
     let label = '';
     if (type === 'engine') {
       if (target.upgrades.engineLevel >= 3) return { ok: false, cost: 0, message: 'Motor je už na maxime (Úroveň 3).' };
-      cost = 900 + target.upgrades.engineLevel * 650;
+      cost = 2800 + target.upgrades.engineLevel * 2200;
       if (this.cash < cost) return { ok: false, cost, message: `Nedostatok peňazí ($${cost}).` };
       target.upgrades.engineLevel = (target.upgrades.engineLevel + 1) as 0 | 1 | 2 | 3;
       label = `Motor Stage ${target.upgrades.engineLevel}`;
     } else if (type === 'turbo') {
       if (target.upgrades.turbo) return { ok: false, cost: 0, message: 'Twin-Turbo je už nainštalované.' };
-      cost = 2200;
+      cost = 8500;
       if (this.cash < cost) return { ok: false, cost, message: `Nedostatok peňazí ($${cost}).` };
       target.upgrades.turbo = true;
       label = 'Twin-Turbo kit';
     } else if (type === 'armor') {
       if (target.upgrades.armorLevel >= 2) return { ok: false, cost: 0, message: 'Pancier je na maxime.' };
-      cost = 1200 + target.upgrades.armorLevel * 900;
+      cost = 4200 + target.upgrades.armorLevel * 3400;
       if (this.cash < cost) return { ok: false, cost, message: `Nedostatok peňazí ($${cost}).` };
       target.upgrades.armorLevel = (target.upgrades.armorLevel + 1) as 0 | 1 | 2;
       target.maxHealth += 90;
@@ -2100,7 +2154,7 @@ export class ViceEngine {
       label = `Balistický pancier ${target.upgrades.armorLevel}`;
     } else {
       if (target.upgrades.suspensionLevel >= 2) return { ok: false, cost: 0, message: 'Podvozok je na maxime.' };
-      cost = 750 + target.upgrades.suspensionLevel * 600;
+      cost = 2400 + target.upgrades.suspensionLevel * 1800;
       if (this.cash < cost) return { ok: false, cost, message: `Nedostatok peňazí ($${cost}).` };
       target.upgrades.suspensionLevel = (target.upgrades.suspensionLevel + 1) as 0 | 1 | 2;
       label = `Športový podvozok ${target.upgrades.suspensionLevel}`;
@@ -2167,8 +2221,8 @@ export class ViceEngine {
   }
 
   public buyParachute(): boolean {
-    if (this.inventory.hasParachute || this.cash < 450) return false;
-    this.cash -= 450;
+    if (this.inventory.hasParachute || this.cash < PARACHUTE_PRICE) return false;
+    this.cash -= PARACHUTE_PRICE;
     this.inventory.hasParachute = true;
     this.callbacks.onCashChange(this.cash);
     this.callbacks.onInventoryChange(structuredClone(this.inventory));
@@ -2213,7 +2267,7 @@ export class ViceEngine {
     this.taxiTargetZ = destZ;
     this.taxiDestinationLabel = label;
     const dist = Math.hypot(destX - this.currentVehicle.x, destZ - this.currentVehicle.z);
-    this.taxiFareCash = Math.max(45, Math.round(dist * 0.14));
+    this.taxiFareCash = Math.max(85, Math.round(dist * 0.25));
     this.taxiAutoPilotTimer = 0;
     this.setGpsWaypoint(destX, destZ, `Taxík: ${label}`);
     this.stuntMessage = `Vodič Horizon Cab vyráža smer ${label} ($${this.taxiFareCash})`;
@@ -2221,37 +2275,140 @@ export class ViceEngine {
     return true;
   }
 
-  public startTaxiDriverShift(): boolean {
+  public offerTaxiOrder(): boolean {
     if (!this.currentVehicle || this.currentVehicle.kind !== 'taxi') return false;
-    this.taxiMode = 'driver_waiting';
+    const lang = this.settings.language;
+    const safeSpots = [
+      { x: 0, z: -70 },
+      { x: 240, z: -290 },
+      { x: 520, z: -70 },
+      { x: 520, z: 220 },
+      { x: 240, z: 540 },
+      { x: 0, z: 540 },
+      { x: -360, z: 220 },
+      { x: -620, z: 220 },
+      { x: -360, z: -290 },
+      { x: 520, z: -660 },
+      { x: 0, z: -680 },
+    ];
     const px = this.currentVehicle.x;
     const pz = this.currentVehicle.z;
-    const ang = Math.random() * Math.PI * 2;
-    const dist = 90 + Math.random() * 140;
-    this.taxiPickupX = THREE.MathUtils.clamp(px + Math.cos(ang) * dist, -1100, 1100);
-    this.taxiPickupZ = THREE.MathUtils.clamp(pz + Math.sin(ang) * dist, -1000, 1000);
-    if (isWaterAt(this.taxiPickupX, this.taxiPickupZ)) {
-      this.taxiPickupX = 0;
-      this.taxiPickupZ = -70;
+
+    let pickX = safeSpots[0].x;
+    let pickZ = safeSpots[0].z;
+    for (let attempt = 0; attempt < 18; attempt++) {
+      const ang = Math.random() * Math.PI * 2;
+      const dist = 75 + Math.random() * 145;
+      const cx = THREE.MathUtils.clamp(px + Math.cos(ang) * dist, -950, 950);
+      const cz = THREE.MathUtils.clamp(pz + Math.sin(ang) * dist, -900, 900);
+      if (isPavedRoadAt(cx, cz) && (!isWaterAt(cx, cz) || isBridgeAt(cx, cz))) {
+        pickX = cx;
+        pickZ = cz;
+        break;
+      }
+      if (attempt === 17) {
+        const s = safeSpots[Math.floor(Math.random() * safeSpots.length)];
+        pickX = s.x;
+        pickZ = s.z;
+      }
     }
-    const dAng = Math.random() * Math.PI * 2;
-    const dDist = 180 + Math.random() * 340;
-    this.taxiTargetX = THREE.MathUtils.clamp(this.taxiPickupX + Math.cos(dAng) * dDist, -1050, 1050);
-    this.taxiTargetZ = THREE.MathUtils.clamp(this.taxiPickupZ + Math.sin(dAng) * dDist, -950, 950);
-    if (isWaterAt(this.taxiTargetX, this.taxiTargetZ)) {
-      this.taxiTargetX = 460;
-      this.taxiTargetZ = -120;
+
+    let dropX = safeSpots[4].x;
+    let dropZ = safeSpots[4].z;
+    for (let attempt = 0; attempt < 22; attempt++) {
+      const dAng = Math.random() * Math.PI * 2;
+      const dDist = 230 + Math.random() * 460;
+      const dx = THREE.MathUtils.clamp(pickX + Math.cos(dAng) * dDist, -1000, 1000);
+      const dz = THREE.MathUtils.clamp(pickZ + Math.sin(dAng) * dDist, -950, 950);
+      if (isPavedRoadAt(dx, dz) && (!isWaterAt(dx, dz) || isBridgeAt(dx, dz))) {
+        dropX = dx;
+        dropZ = dz;
+        break;
+      }
+      if (attempt === 21) {
+        const farSpots = safeSpots.filter((s) => Math.hypot(s.x - pickX, s.z - pickZ) > 220);
+        const s = farSpots[Math.floor(Math.random() * Math.max(1, farSpots.length))] || safeSpots[0];
+        dropX = s.x;
+        dropZ = s.z;
+      }
     }
-    this.taxiDestinationLabel = getDistrictName(this.taxiTargetX, this.taxiTargetZ);
-    this.taxiFareCash = Math.round(Math.hypot(this.taxiTargetX - this.taxiPickupX, this.taxiTargetZ - this.taxiPickupZ) * 0.45);
+
+    this.taxiPickupX = pickX;
+    this.taxiPickupZ = pickZ;
+    this.taxiTargetX = dropX;
+    this.taxiTargetZ = dropZ;
+    this.taxiPickupLabel = getDistrictName(pickX, pickZ);
+    this.taxiDestinationLabel = getDistrictName(dropX, dropZ);
+    this.taxiTripDistM = Math.max(120, Math.round(Math.hypot(dropX - pickX, dropZ - pickZ)));
+    this.taxiFareCash = Math.max(40, Math.round(this.taxiTripDistM * 0.18));
+    this.taxiMode = 'driver_offer';
+    this.taxiWaveDropoffTimer = 0;
+
+    if (this.taxiCustomerRig) {
+      const py = this.getGroundHeightAt(pickX, pickZ, 0);
+      this.taxiCustomerRig.root.position.set(pickX, py, pickZ);
+      this.taxiCustomerRig.root.rotation.y = Math.atan2(px - pickX, pz - pickZ);
+      this.taxiCustomerRig.root.visible = true;
+    }
     if (this.taxiDropBeacon) {
-      this.taxiDropBeacon.position.set(this.taxiPickupX, 0.25, this.taxiPickupZ);
+      this.taxiDropBeacon.visible = false;
+    }
+    this.stuntMessage = t(lang, 'taxi.offerToast', {
+      dest: this.taxiDestinationLabel,
+      dist: this.taxiTripDistM,
+      fare: this.taxiFareCash,
+    });
+    this.stuntTimer = 4.0;
+    return true;
+  }
+
+  public startTaxiDriverShift(): boolean {
+    return this.offerTaxiOrder();
+  }
+
+  public acceptTaxiFare(): boolean {
+    if (!this.currentVehicle || this.currentVehicle.kind !== 'taxi') return false;
+    if (this.taxiMode !== 'driver_offer') return false;
+    const lang = this.settings.language;
+    this.taxiMode = 'driver_waiting';
+    if (this.taxiDropBeacon) {
+      const by = this.getGroundHeightAt(this.taxiPickupX, this.taxiPickupZ, 0);
+      this.taxiDropBeacon.position.set(this.taxiPickupX, by + 0.25, this.taxiPickupZ);
       this.taxiDropBeacon.visible = true;
     }
-    this.setGpsWaypoint(this.taxiPickupX, this.taxiPickupZ, 'Zákazník Horizon Cab');
-    this.stuntMessage = 'Taxi služba aktívna! Vyzdvihni zákazníka na GPS.';
-    this.stuntTimer = 3.5;
+    if (this.taxiCustomerRig) {
+      this.taxiCustomerRig.root.visible = true;
+    }
+    this.setGpsWaypoint(this.taxiPickupX, this.taxiPickupZ, t(lang, 'taxi.pickupWaypoint'));
+    this.stuntMessage = t(lang, 'taxi.acceptedToast', { pickup: this.taxiPickupLabel || '' });
+    this.stuntTimer = 3.2;
+    this.audio.playUiChime('switch');
     return true;
+  }
+
+  public cancelTaxiFare(): void {
+    const lang = this.settings.language;
+    const wasPassenger = this.taxiMode === 'passenger';
+    this.taxiMode = 'none';
+    this.taxiDestinationLabel = null;
+    this.taxiPickupLabel = null;
+    this.taxiFareCash = 0;
+    this.taxiTripDistM = 0;
+    if (this.taxiDropBeacon) this.taxiDropBeacon.visible = false;
+    if (this.taxiCustomerRig) this.taxiCustomerRig.root.visible = false;
+    this.clearGpsWaypoint();
+    if (wasPassenger && this.currentVehicle) {
+      this.exitCurrentVehicle();
+    }
+    this.stuntMessage = t(lang, 'taxi.cancelledToast');
+    this.stuntTimer = 2.6;
+    this.audio.playUiChime('click');
+  }
+
+  public skipTaxiOffer(): void {
+    if (!this.currentVehicle || this.currentVehicle.kind !== 'taxi') return;
+    this.audio.playUiChime('click');
+    this.offerTaxiOrder();
   }
 
   public startCutscene(title: string, lines: MissionCutsceneLine[], targetPos?: { x: number; z: number }, onFinish?: () => void) {
@@ -2360,10 +2517,10 @@ export class ViceEngine {
   }
 
   public applyCheatCode(rawCode: string): { ok: boolean; message: string } {
-    const clean = rawCode.trim().replace(/\s+/g, '').toUpperCase();
+    const clean = rawCode.trim().replace(/[\s-]+/g, '').toUpperCase();
     const ch = this.characters[this.activeCharId];
 
-    if (clean === '3324' || clean === '1999-463-663' || clean === 'GODMODE') {
+    if (clean === '3324' || clean === '1999463663' || clean === 'GODMODE') {
       this.activateCheatSession();
       this.godModeActive = !this.godModeActive;
       this.audio.playUiChime('mission');
@@ -2374,7 +2531,7 @@ export class ViceEngine {
           : 'God Mode vypnutý. Pre misie reštartuj reláciu bez cheatov.',
       };
     }
-    if (clean === '5342' || clean === '1999-435-426' || clean === 'HELI') {
+    if (clean === '5342' || clean === '1999435426' || clean === 'HELI') {
       this.activateCheatSession();
       const px = this.playerRig.root.position.x + Math.sin(this.camYaw) * 12;
       const pz = this.playerRig.root.position.z + Math.cos(this.camYaw) * 12;
@@ -2383,7 +2540,7 @@ export class ViceEngine {
       this.audio.playUiChime('mission');
       return { ok: true, message: 'Cheat 5342: Pristavený vrtuľník Pelican Helistar! (Misie dočasne zamknuté)' };
     }
-    if (clean === '7645') {
+    if (clean === '7645' || clean === 'TAXI') {
       this.activateCheatSession();
       const px = this.playerRig.root.position.x + Math.sin(this.camYaw) * 9;
       const pz = this.playerRig.root.position.z + Math.cos(this.camYaw) * 9;
@@ -2392,7 +2549,7 @@ export class ViceEngine {
       this.audio.playUiChime('mission');
       return { ok: true, message: 'Cheat 7645: Pristavený taxík Horizon Cab! (Misie dočasne zamknuté)' };
     }
-    if (clean === '7726' || clean === '1999-787-372' || clean === 'SUPERCAR') {
+    if (clean === '7726' || clean === '1999787372' || clean === 'SUPERCAR') {
       this.activateCheatSession();
       const px = this.playerRig.root.position.x + Math.sin(this.camYaw) * 9;
       const pz = this.playerRig.root.position.z + Math.cos(this.camYaw) * 9;
@@ -2401,7 +2558,7 @@ export class ViceEngine {
       this.audio.playUiChime('mission');
       return { ok: true, message: 'Cheat 7726: Pristavený superšport Valkyra Aether RS! (Misie dočasne zamknuté)' };
     }
-    if (clean === '8654') {
+    if (clean === '8654' || clean === 'PLANE') {
       this.activateCheatSession();
       const px = this.playerRig.root.position.x + Math.sin(this.camYaw) * 15;
       const pz = this.playerRig.root.position.z + Math.cos(this.camYaw) * 15;
@@ -2410,7 +2567,7 @@ export class ViceEngine {
       this.audio.playUiChime('mission');
       return { ok: true, message: 'Cheat 8654: Pristavené lietadlo Pelican Skylark! (Misie dočasne zamknuté)' };
     }
-    if (clean === '9975' || clean === '1999-727-438' || clean === 'JET') {
+    if (clean === '9975' || clean === '1999727438' || clean === 'JET') {
       this.activateCheatSession();
       const px = this.playerRig.root.position.x + Math.sin(this.camYaw) * 15;
       const pz = this.playerRig.root.position.z + Math.cos(this.camYaw) * 15;
@@ -2419,14 +2576,7 @@ export class ViceEngine {
       this.audio.playUiChime('mission');
       return { ok: true, message: 'Cheat 9975: Pristavená ozbrojená stíhačka Zeta F-22! (Misie dočasne zamknuté)' };
     }
-    if (clean === '1999-227-468' || clean === 'CASH50K') {
-      this.activateCheatSession();
-      this.cash += 50000;
-      this.callbacks.onCashChange(this.cash);
-      this.audio.playUiChime('mission');
-      return { ok: true, message: '+$50,000 pripísaných! (Misie dočasne zamknuté až do reštartu relácie)' };
-    }
-    if (clean === '1999-887-853' || clean === 'TURTLE') {
+    if (clean === '1999887853' || clean === 'TURTLE') {
       this.activateCheatSession();
       ch.health = ch.maxHealth;
       ch.armor = ch.maxArmor;
@@ -2435,20 +2585,20 @@ export class ViceEngine {
       this.audio.playUiChime('mission');
       return { ok: true, message: 'Zdravie a vesta doplnené na 100%!' };
     }
-    if (clean === '1999-529-937' || clean === 'LAWYERUP') {
+    if (clean === '1999529937' || clean === 'LAWYERUP') {
       this.activateCheatSession();
       this.clearPolicePursuit();
       this.audio.playUiChime('mission');
       return { ok: true, message: 'Policajné pátranie úplne vymazané!' };
     }
-    if (clean === '1999-759-348' || clean === 'SKYDIVE') {
+    if (clean === '1999759348' || clean === 'SKYDIVE') {
       this.activateCheatSession();
       this.inventory.hasParachute = true;
       this.callbacks.onInventoryChange(structuredClone(this.inventory));
       this.audio.playUiChime('mission');
       return { ok: true, message: 'Získaný taktický padák do výbavy!' };
     }
-    if (clean === '1999-866-587' || clean === 'TOOLUP') {
+    if (clean === '1999866587' || clean === 'TOOLUP') {
       this.activateCheatSession();
       this.inventory.weapons = this.inventory.weapons.map((w) => {
         const def = WEAPON_CATALOG[w.id];
@@ -2459,7 +2609,7 @@ export class ViceEngine {
       this.audio.playUiChime('mission');
       return { ok: true, message: 'Všetky zbrane a plná munícia odomknuté!' };
     }
-    return { ok: false, message: 'Neznámy cheat kód. Skús 3324, 5342, 7645, 7726, 8654 alebo 9975.' };
+    return { ok: false, message: 'Neznáme číslo / cheat kód.' };
   }
 
   public teleportTo(x: number, z: number, label?: string) {
@@ -2550,8 +2700,9 @@ export class ViceEngine {
   }
 
   public startMission(missionId: string) {
+    const lang = this.settings.language;
     if (this.cheatSessionActive) {
-      this.stuntMessage = 'Cheaty sú aktívne! Reštartuj reláciu bez cheatov pre spustenie misií.';
+      this.stuntMessage = t(lang, 'toast.cheatsActiveMission');
       this.stuntTimer = 3.8;
       this.audio.playUiChime('click');
       return;
@@ -2559,10 +2710,49 @@ export class ViceEngine {
     const def = ALL_MISSIONS.find((m) => m.id === missionId);
     if (!def) return;
     const launch = () => {
+      if (this.gslVehicle) {
+        if (this.currentVehicle === this.gslVehicle) this.exitCurrentVehicle();
+        this.scene.remove(this.gslVehicle.rig.root);
+        this.vehicles = this.vehicles.filter((v) => v !== this.gslVehicle);
+        this.gslVehicle = null;
+      }
+      this.gslBoarded = false;
+      this.gslPackageDamagePct = 0;
+      this.gslPrevSpeed = 0;
+
       this.activeMission = def;
       this.activeStageIndex = 0;
       this.missionElapsedSec = 0;
       this.missionTimerRemaining = def.timeLimitSec ?? null;
+      if (def.requiresGslCourier) {
+        if (this.currentVehicle) {
+          this.exitCurrentVehicle();
+        }
+        const vanX = def.startX;
+        const vanZ = def.startZ;
+        const van = this.addVehicle(
+          `gsl_van_${Date.now()}`,
+          'GSL Express',
+          'GSL Delivery Van',
+          'van',
+          '#f8fafc',
+          vanX,
+          vanZ,
+          0,
+          false,
+          false
+        );
+        van.health = van.maxHealth;
+        this.gslVehicle = van;
+        const px = this.playerRig.root.position.x;
+        const pz = this.playerRig.root.position.z;
+        if (Math.hypot(px - vanX, pz - vanZ) > 35) {
+          this.playerRig.root.position.set(vanX - 3.6, this.getGroundHeightAt(vanX - 3.6, vanZ, 0), vanZ);
+          this.playerVelX = 0;
+          this.playerVelY = 0;
+          this.playerVelZ = 0;
+        }
+      }
       if (def.wantedOnStart && !this.settings.gameplayMods.noPolice) {
         this.addCrimeHeat(def.wantedOnStart * 35);
       }
@@ -2587,6 +2777,17 @@ export class ViceEngine {
     this.activeMission = null;
     this.pickupBriefcase.visible = false;
     this.missionTimerRemaining = null;
+    if (this.gslVehicle) {
+      if (this.currentVehicle === this.gslVehicle) {
+        this.exitCurrentVehicle();
+      }
+      this.scene.remove(this.gslVehicle.rig.root);
+      this.vehicles = this.vehicles.filter((v) => v !== this.gslVehicle);
+      this.gslVehicle = null;
+    }
+    this.gslBoarded = false;
+    this.gslPackageDamagePct = 0;
+    this.gslPrevSpeed = 0;
     this.refreshMissionBeaconVisibility();
     if (this.gpsWaypoint) {
       this.waypointGroup.position.set(this.gpsWaypoint.x, 0, this.gpsWaypoint.z);
@@ -2596,6 +2797,23 @@ export class ViceEngine {
     } else {
       this.waypointGroup.visible = false;
     }
+  }
+
+  private failGslCourier(reason: string) {
+    if (!this.activeMission?.requiresGslCourier) return;
+    const lang = this.settings.language;
+    const mId = this.activeMission.id;
+    this.audio.playImpact(0.75);
+    this.input.triggerVibration(240, 0.7, 0.8);
+    this.cancelMission();
+    this.missionNotification = {
+      title: t(lang, 'gsl.failedTitle'),
+      subtitle: reason,
+    };
+    this.missionNotifTimer = 5.0;
+    this.stuntMessage = `${t(lang, 'gsl.failedTitle')}: ${reason}`;
+    this.stuntTimer = 4.5;
+    this.callbacks.onMissionFailed?.(mId, reason);
   }
 
   private setupCurrentMissionStage() {
@@ -2650,13 +2868,17 @@ export class ViceEngine {
         reward
       );
       this.missionNotification = {
-        title: `Misia splnená: ${completedMission.title}`,
-        subtitle: `Odmena pripísaná na účet`,
+        title: `${t(this.settings.language, 'toast.missionDone')}: ${completedMission.title}`,
+        subtitle: t(this.settings.language, 'toast.rewardCredited'),
         reward,
       };
       this.missionNotifTimer = 5.5;
       this.audio.playUiChime('mission');
       this.activeMission = null;
+      this.gslVehicle = null;
+      this.gslBoarded = false;
+      this.gslPackageDamagePct = 0;
+      this.gslPrevSpeed = 0;
       this.pickupBriefcase.visible = false;
       this.missionTimerRemaining = null;
       this.refreshMissionBeaconVisibility();
@@ -2684,32 +2906,7 @@ export class ViceEngine {
 
   private scheduleNextTick() {
     if (this.disposed) return;
-    if (this.isSoftwareGl) {
-      this.afterDraw(() => this.tick());
-    } else {
-      this.frameId = requestAnimationFrame(() => this.tick());
-    }
-  }
-
-  private afterDraw(cb: () => void) {
-    const gl = this.renderer.getContext() as WebGL2RenderingContext;
-    if (!gl || !gl.fenceSync) {
-      this.frameId = window.setTimeout(cb, 80);
-      return;
-    }
-    const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
-    gl.flush();
-    const poll = () => {
-      if (this.disposed) return;
-      const state = sync ? gl.getSyncParameter(sync, gl.SYNC_STATUS) : gl.SIGNALED;
-      if (state === gl.UNSIGNALED) {
-        this.frameId = window.setTimeout(poll, 5);
-      } else {
-        if (sync) gl.deleteSync(sync);
-        this.frameId = window.setTimeout(cb, 80);
-      }
-    };
-    this.frameId = window.setTimeout(poll, 5);
+    this.frameId = requestAnimationFrame(() => this.tick());
   }
 
   private tick() {
@@ -2756,8 +2953,8 @@ export class ViceEngine {
     const snapZ = Math.round(pz / shadowTexel) * shadowTexel;
     if (
       this.sunLight.castShadow &&
-      (Math.abs(snapX - this.lastShadowX) > 0.65 ||
-        Math.abs(snapZ - this.lastShadowZ) > 0.65 ||
+      (Math.abs(snapX - this.lastShadowX) > 1.5 ||
+        Math.abs(snapZ - this.lastShadowZ) > 1.5 ||
         this.shadowCooldown <= 0 ||
         this.lightningFlash > 0.05)
     ) {
@@ -2767,7 +2964,7 @@ export class ViceEngine {
       this.renderer.shadowMap.needsUpdate = true;
       this.lastShadowX = snapX;
       this.lastShadowZ = snapZ;
-      this.shadowCooldown = 0.022;
+      this.shadowCooldown = 0.25;
     }
 
     const useBloom =
@@ -3071,11 +3268,22 @@ export class ViceEngine {
         this.playerRig.root.position.x - el.x,
         this.playerRig.root.position.z - el.z
       );
-      if (!this.currentVehicle && distToEl <= el.radius) {
+      if (el.targetFloorIndex > 0 && distToEl > el.radius + 7 && Math.abs(diff) <= 0.02) {
+        el.idleTimer = (el.idleTimer ?? 0) + dt;
+        if (el.idleTimer > 10) {
+          el.targetFloorIndex = 0;
+          el.direction = -1;
+          el.idleTimer = 0;
+        }
+      } else {
+        el.idleTimer = 0;
+      }
+      if (!this.currentVehicle && distToEl <= el.radius + 0.8) {
         if (Math.abs(this.playerRig.root.position.y - prevY) < 1.8) {
           this.playerRig.root.position.y += el.currentY - prevY;
         }
-        if (Math.abs(this.playerRig.root.position.y - el.currentY) <= 2.6 && !nearbyElevator) {
+        const playerOnAFloor = el.floors.some((f) => Math.abs(this.playerRig.root.position.y - f.y) <= 2.8);
+        if (playerOnAFloor && !nearbyElevator) {
           nearbyElevator = el;
         }
       }
@@ -3087,6 +3295,21 @@ export class ViceEngine {
     }
     if (this.taxiDropBeacon && this.taxiDropBeacon.visible) {
       this.taxiDropBeacon.rotation.z += dt * 2.4;
+    }
+    if (this.taxiWaveDropoffTimer > 0) {
+      this.taxiWaveDropoffTimer -= dt;
+      if (this.taxiWaveDropoffTimer <= 0 && this.taxiCustomerRig && this.taxiMode === 'none') {
+        this.taxiCustomerRig.root.visible = false;
+      }
+    }
+    if (this.taxiCustomerRig && this.taxiCustomerRig.root.visible) {
+      const wave = Math.sin(this.elapsedSec * 7.5);
+      this.taxiCustomerRig.leftArmPivot.rotation.x = -2.2 + wave * 0.45;
+      this.taxiCustomerRig.rightArmPivot.rotation.x = -2.2 - wave * 0.45;
+      this.taxiCustomerRig.root.rotation.y = Math.atan2(
+        this.playerRig.root.position.x - this.taxiCustomerRig.root.position.x,
+        this.playerRig.root.position.z - this.taxiCustomerRig.root.position.z
+      );
     }
 
     // Animate Malibu Neon Lounge stage show, disco ball, EQ bars & choreographed club performers (only when near club)
@@ -3271,9 +3494,37 @@ export class ViceEngine {
       } else if (this.nearbySideMission) {
         this.startMission(this.nearbySideMission.id);
       } else if (nearbyElevator) {
-        nearbyElevator.targetFloorIndex = (nearbyElevator.targetFloorIndex + 1) % nearbyElevator.floors.length;
-        const nextFloor = nearbyElevator.floors[nearbyElevator.targetFloorIndex];
-        this.stuntMessage = `Výťah (${nearbyElevator.label}): ${nextFloor.name}`;
+        const pyNow = this.playerRig.root.position.y;
+        let playerFloorIdx = 0;
+        let bestFloorDiff = Infinity;
+        for (let fi = 0; fi < nearbyElevator.floors.length; fi++) {
+          const d = Math.abs(pyNow - nearbyElevator.floors[fi].y);
+          if (d < bestFloorDiff) {
+            bestFloorDiff = d;
+            playerFloorIdx = fi;
+          }
+        }
+        const cabOnPlayerFloor = Math.abs(nearbyElevator.currentY - nearbyElevator.floors[playerFloorIdx].y) <= 1.25;
+        if (!cabOnPlayerFloor) {
+          nearbyElevator.targetFloorIndex = playerFloorIdx;
+          const fl = nearbyElevator.floors[playerFloorIdx];
+          this.stuntMessage = t(this.settings.language, 'toast.elevatorCall', {
+            label: nearbyElevator.label,
+            floor: fl.name,
+          });
+        } else {
+          let dir: 1 | -1 = nearbyElevator.direction ?? 1;
+          if (playerFloorIdx <= 0) dir = 1;
+          else if (playerFloorIdx >= nearbyElevator.floors.length - 1) dir = -1;
+          nearbyElevator.direction = dir;
+          const nextIdx = THREE.MathUtils.clamp(playerFloorIdx + dir, 0, nearbyElevator.floors.length - 1);
+          nearbyElevator.targetFloorIndex = nextIdx;
+          const nextFloor = nearbyElevator.floors[nextIdx];
+          this.stuntMessage = t(this.settings.language, 'toast.elevator', {
+            label: nearbyElevator.label,
+            floor: nextFloor.name,
+          });
+        }
         this.stuntTimer = 2.6;
         this.audio.playUiChime('click');
       }
@@ -3326,6 +3577,14 @@ export class ViceEngine {
     this.currentDriftIntensity = 0;
     if (this.currentVehicle) {
       this.isPlayerSprinting = false;
+      if (this.currentVehicle.kind === 'taxi') {
+        if (inp.taxiAcceptPressed && this.taxiMode === 'driver_offer') {
+          this.acceptTaxiFare();
+        } else if (inp.taxiCancelPressed) {
+          if (this.taxiMode === 'driver_offer') this.skipTaxiOffer();
+          else if (this.taxiMode !== 'none') this.cancelTaxiFare();
+        }
+      }
       this.stepPlayerDriving(dt, inp, this.currentVehicle);
       if (inp.hornHeld) {
         if (Math.floor(this.elapsedSec * 4) % 2 === 0) this.audio.playHorn();
@@ -3402,15 +3661,19 @@ export class ViceEngine {
     // Update Camera smoothly
     this.updateActiveCamera(dt, inp.aimHeld);
 
-    // Update Audio Engine (including dynamic rain ambience)
+    // Update Audio Engine (multi-gear transmission + dynamic rain ambience)
     const speedKmh = this.currentVehicle ? Math.abs(this.currentVehicle.speed) * 3.6 : 0;
+    const maxSpeedKmh = this.currentVehicle ? this.currentVehicle.maxSpeed * 3.6 : 120;
     this.audio.updateContinuous(
       Boolean(this.currentVehicle),
       speedKmh,
       this.wantedStars,
       this.elapsedSec,
       this.currentDriftIntensity,
-      this.rainIntensity
+      this.rainIntensity,
+      maxSpeedKmh,
+      inp.throttle,
+      inp.brake
     );
 
     // Sync active character coordinates
@@ -3423,45 +3686,69 @@ export class ViceEngine {
     this.telemetryTimer += dt;
     if (this.telemetryTimer >= 0.055) {
       this.telemetryTimer = 0;
+      const lang = this.settings.language;
       let prompt: string | null = null;
       if (this.currentVehicle && nearbyShop?.category === 'garage') {
-        prompt = `Vstúpiť do servisu ${nearbyShop.name}`;
+        prompt = `${t(lang, 'prompt.enterShop')}: ${nearbyShop.name}`;
       } else if (!this.currentVehicle) {
         if (nearClubStage && (!nearbyShop || nearbyShop.category === 'lounge')) {
-          prompt = 'Spustiť VIP Encore Show v Malibu Lounge (-$100)';
+          prompt = t(lang, 'prompt.vipShow');
         } else if (nearbyShop && (!nearbyVehicle || bestShopDist <= bestVehDist)) {
-          prompt = `Vstúpiť: ${nearbyShop.name}`;
+          prompt = `${t(lang, 'prompt.enterShop')}: ${nearbyShop.name}`;
         } else if (nearbyVehicle) {
           const isEmerg =
             nearbyVehicle.kind === 'police' ||
             nearbyVehicle.kind === 'ambulance' ||
             nearbyVehicle.kind === 'firetruck';
-          const emergTag = isEmerg ? ' (! Zásah polície)' : '';
+          const emergTag = isEmerg ? t(lang, 'prompt.emergencyTag') : '';
           if (nearbyVehicle.kind === 'taxi' && nearbyVehicle.hasDriver) {
-            prompt = 'Nastúpiť do Horizon Cab (Pasažier) · [G / Shift+F] Vyhodiť vodiča';
+            prompt = t(lang, 'prompt.taxiPassenger');
           } else if (nearbyVehicle.hasDriver) {
-            prompt = `Vyhodiť vodiča a ukradnúť ${nearbyVehicle.name}${emergTag}`;
+            prompt = `${t(lang, 'prompt.carjack', { name: nearbyVehicle.name })}${emergTag}`;
           } else {
             const verb =
               nearbyVehicle.kind === 'plane' || nearbyVehicle.kind === 'fighter_jet'
-                ? 'Nastúpiť do lietadla'
+                ? t(lang, 'prompt.enterPlane')
                 : nearbyVehicle.kind === 'helicopter'
-                  ? 'Nastúpiť do vrtuľníka'
+                  ? t(lang, 'prompt.enterHeli')
                   : nearbyVehicle.kind === 'boat'
-                    ? 'Nastúpiť na loď'
+                    ? t(lang, 'prompt.enterBoat')
                     : nearbyVehicle.kind === 'motorcycle'
-                      ? 'Nasadať na motorku'
-                      : 'Nastúpiť do';
-            prompt = `${verb} ${nearbyVehicle.name}${emergTag}`;
+                      ? t(lang, 'prompt.enterMoto')
+                      : t(lang, 'prompt.enterCar');
+            prompt = `${verb} · ${nearbyVehicle.name}${emergTag}`;
           }
         } else if (nearbyMission) {
-          prompt = `Spustiť príbeh: ${nearbyMission.title}`;
+          prompt = `${t(lang, 'prompt.startMission')}: ${nearbyMission.title}`;
         } else if (this.nearbySideMission) {
-          prompt = `Spustiť tajnú misiu: ${this.nearbySideMission.title}`;
+          prompt = `${t(lang, 'prompt.startSideMission')}: ${this.nearbySideMission.title}`;
         } else if (nearbyElevator) {
-          const nextIdx = (nearbyElevator.targetFloorIndex + 1) % nearbyElevator.floors.length;
-          const nextFloor = nearbyElevator.floors[nextIdx];
-          prompt = `Použiť výťah (${nearbyElevator.label} -> ${nextFloor.name})`;
+          const pyNow = this.playerRig.root.position.y;
+          let pIdx = 0;
+          let bDiff = Infinity;
+          for (let fi = 0; fi < nearbyElevator.floors.length; fi++) {
+            const d = Math.abs(pyNow - nearbyElevator.floors[fi].y);
+            if (d < bDiff) {
+              bDiff = d;
+              pIdx = fi;
+            }
+          }
+          const cabHere = Math.abs(nearbyElevator.currentY - nearbyElevator.floors[pIdx].y) <= 1.25;
+          if (!cabHere) {
+            prompt = t(lang, 'prompt.elevatorCall', {
+              label: nearbyElevator.label,
+              floor: nearbyElevator.floors[pIdx].name,
+            });
+          } else {
+            let dir: 1 | -1 = nearbyElevator.direction ?? 1;
+            if (pIdx <= 0) dir = 1;
+            else if (pIdx >= nearbyElevator.floors.length - 1) dir = -1;
+            const nIdx = THREE.MathUtils.clamp(pIdx + dir, 0, nearbyElevator.floors.length - 1);
+            prompt = t(lang, 'prompt.elevator', {
+              label: nearbyElevator.label,
+              floor: nearbyElevator.floors[nIdx].name,
+            });
+          }
         }
       }
       this.pushTelemetry(inp, prompt);
@@ -3556,6 +3843,7 @@ export class ViceEngine {
         district,
         timeOfDay: this.getGameClockString(),
         playerSpeedKmh: speedKmh,
+        language: this.settings.language,
       }),
     })
       .then((r) => (r.ok ? r.json() : null))
@@ -3717,9 +4005,17 @@ export class ViceEngine {
     // Decay weapon recoil smoothly
     this.weaponRecoilKick *= Math.exp(-16 * dt);
 
-    // Procedural limb walk / swim / realistic 1H & 2H weapon holding stance
+    // Procedural limb walk / swim / footsteps & realistic 1H & 2H weapon holding stance
     const horizSpeed = Math.hypot(this.playerVelX, this.playerVelZ);
-    const swing = horizSpeed > 0.3 ? Math.sin(this.elapsedSec * (isSprinting ? 13 : 8.5)) * 0.65 : 0;
+    if (horizSpeed > 0.45 && this.playerGrounded && !(waterHere && ny < -0.3)) {
+      this.stridePhase += dt * (isSprinting ? 13.0 : 8.5);
+      const curSign = Math.sin(this.stridePhase) >= 0 ? 1 : -1;
+      if (curSign !== this.lastStrideSign) {
+        this.lastStrideSign = curSign;
+        this.audio.playFootstep(isSprinting, waterHere);
+      }
+    }
+    const swing = horizSpeed > 0.3 ? Math.sin(this.stridePhase) * 0.65 : 0;
     const wId = this.inventory.equippedWeapon;
     if (waterHere && ny < -0.3) {
       const stroke = Math.sin(this.elapsedSec * 5.5) * 0.85;
@@ -3825,6 +4121,9 @@ export class ViceEngine {
       this.taxiDestinationLabel = null;
       this.taxiFareCash = 0;
       this.audio.playUiChime('click');
+      if (this.audio.getRadioStation() === 'off' && !this.radioManuallyOff) {
+        this.audio.setRadioStation('vice_synth');
+      }
       this.stuntMessage = 'Horizon Cab: Vyber destináciu na mape!';
       this.stuntTimer = 3.2;
       this.callbacks.onTaxiMenuRequested?.();
@@ -3865,6 +4164,9 @@ export class ViceEngine {
     this.parachuteDeployed = false;
     this.parachuteRig.visible = false;
     this.audio.playUiChime('click');
+    if (this.audio.getRadioStation() === 'off' && !this.radioManuallyOff) {
+      this.audio.setRadioStation('vice_synth');
+    }
 
     if (v.kind === 'taxi') {
       this.startTaxiDriverShift();
@@ -3884,8 +4186,11 @@ export class ViceEngine {
     if (this.taxiMode !== 'none') {
       this.taxiMode = 'none';
       this.taxiDestinationLabel = null;
+      this.taxiPickupLabel = null;
       this.taxiFareCash = 0;
+      this.taxiTripDistM = 0;
       if (this.taxiDropBeacon) this.taxiDropBeacon.visible = false;
+      if (this.taxiCustomerRig) this.taxiCustomerRig.root.visible = false;
       this.clearGpsWaypoint();
     }
     const sideOffset =
@@ -3984,29 +4289,49 @@ export class ViceEngine {
       return;
     }
 
-    // 0b. TAXI DRIVER SHIFT PROGRESS
+    // 0b. TAXI DRIVER SHIFT PROGRESS (Waiting customer pickup + distance dropoff)
     if (v.kind === 'taxi' && (this.taxiMode === 'driver_waiting' || this.taxiMode === 'driver_active')) {
+      const lang = this.settings.language;
       if (this.taxiMode === 'driver_waiting') {
-        if (Math.hypot(v.x - this.taxiPickupX, v.z - this.taxiPickupZ) < 12) {
+        if (Math.hypot(v.x - this.taxiPickupX, v.z - this.taxiPickupZ) < 12 && Math.abs(v.speed) < 11) {
           this.taxiMode = 'driver_active';
+          if (this.taxiCustomerRig) this.taxiCustomerRig.root.visible = false;
           if (this.taxiDropBeacon) {
-            this.taxiDropBeacon.position.set(this.taxiTargetX, 0.25, this.taxiTargetZ);
+            const by = this.getGroundHeightAt(this.taxiTargetX, this.taxiTargetZ, 0);
+            this.taxiDropBeacon.position.set(this.taxiTargetX, by + 0.25, this.taxiTargetZ);
+            this.taxiDropBeacon.visible = true;
           }
-          this.setGpsWaypoint(this.taxiTargetX, this.taxiTargetZ, `Vyložiť zákazníka: ${this.taxiDestinationLabel || 'Cieľ'}`);
-          this.stuntMessage = `Zákazník nastúpil! Odvez ho do ${this.taxiDestinationLabel}`;
+          this.setGpsWaypoint(
+            this.taxiTargetX,
+            this.taxiTargetZ,
+            t(lang, 'taxi.dropoffWaypoint', { dest: this.taxiDestinationLabel || '' })
+          );
+          this.stuntMessage = t(lang, 'taxi.boardedToast', { dest: this.taxiDestinationLabel || '' });
           this.stuntTimer = 3.2;
           this.audio.playUiChime('switch');
         }
       } else if (this.taxiMode === 'driver_active') {
-        if (Math.hypot(v.x - this.taxiTargetX, v.z - this.taxiTargetZ) < 14) {
+        if (Math.hypot(v.x - this.taxiTargetX, v.z - this.taxiTargetZ) < 14 && Math.abs(v.speed) < 12) {
           this.cash += this.taxiFareCash;
           this.callbacks.onCashChange(this.cash);
-          this.stuntMessage = `Zákazník vyložený! Zárobok +$${this.taxiFareCash}`;
-          this.stuntTimer = 3.5;
+          this.stuntMessage = t(lang, 'taxi.completedToast', {
+            cash: this.taxiFareCash,
+            dist: this.taxiTripDistM,
+            fare: this.taxiFareCash,
+          });
+          this.stuntTimer = 3.6;
           this.audio.playUiChime('mission');
+          if (this.taxiCustomerRig) {
+            const dy = this.getGroundHeightAt(this.taxiTargetX + 2.5, this.taxiTargetZ + 2.5, 0);
+            this.taxiCustomerRig.root.position.set(this.taxiTargetX + 2.5, dy, this.taxiTargetZ + 2.5);
+            this.taxiCustomerRig.root.visible = true;
+            this.taxiWaveDropoffTimer = 4.0;
+          }
           this.taxiMode = 'none';
           this.taxiDestinationLabel = null;
+          this.taxiPickupLabel = null;
           this.taxiFareCash = 0;
+          this.taxiTripDistM = 0;
           if (this.taxiDropBeacon) this.taxiDropBeacon.visible = false;
           this.clearGpsWaypoint();
         }
@@ -4436,12 +4761,14 @@ export class ViceEngine {
     let vForward = v.vx * forwardX + v.vz * forwardZ;
     let vLateral = v.vx * rightX + v.vz * rightZ;
 
+    const speedRatio = Math.min(1, Math.max(0, Math.abs(vForward) / Math.max(1, maxSpd)));
+    const torqueFactor = Math.max(0.45, 1.0 - 0.55 * Math.pow(speedRatio, 1.35));
     if (inp.throttle > 0.05) {
-      vForward += accel * inp.throttle * dt;
+      vForward += accel * torqueFactor * inp.throttle * dt;
     }
     if (inp.brake > 0.05) {
       if (vForward > 1.0) {
-        vForward -= accel * 1.8 * inp.brake * dt;
+        vForward -= accel * 1.95 * inp.brake * dt;
       } else {
         vForward -= accel * 0.65 * inp.brake * dt;
       }
@@ -4450,7 +4777,7 @@ export class ViceEngine {
     const handbrake = inp.handbrakeHeld;
     v.rig.brakeLightsMat.emissiveIntensity = inp.brake > 0.1 || handbrake ? 2.4 : 0.6;
 
-    const drag = handbrake ? 2.05 : 0.52;
+    const drag = handbrake ? 2.15 : inp.throttle > 0.05 ? 0.12 : 0.42;
     vForward *= Math.exp(-drag * dt);
     vForward = THREE.MathUtils.clamp(vForward, -maxSpd * 0.4, maxSpd);
 
@@ -4499,6 +4826,11 @@ export class ViceEngine {
       return;
     }
 
+    const isGslVan = Boolean(this.activeMission?.requiresGslCourier && this.gslVehicle === v);
+    if (isGslVan) {
+      this.gslBoarded = true;
+    }
+
     const col = this.resolveBuildingCollision(
       nx,
       nz,
@@ -4509,6 +4841,11 @@ export class ViceEngine {
     );
     if (col.collided) {
       const impactSpeed = Math.hypot(v.vx, v.vz);
+      if (isGslVan && impactSpeed > 1.2) {
+        v.health = Math.max(0, v.health - Math.max(3, impactSpeed));
+        this.failGslCourier(t(this.settings.language, 'gsl.failTap'));
+        return;
+      }
       if (impactSpeed > 6) {
         this.audio.playImpact(Math.min(1, impactSpeed / 30));
         this.input.triggerVibration(160, 0.4, Math.min(1, impactSpeed / 28));
@@ -4531,6 +4868,33 @@ export class ViceEngine {
       nz = col.z;
     }
 
+    if (isGslVan) {
+      if (!isPavedRoadAt(nx, nz)) {
+        this.failGslCourier(t(this.settings.language, 'gsl.failOffRoad'));
+        return;
+      }
+      const speedDelta = vForward - this.gslPrevSpeed;
+      this.gslPrevSpeed = vForward;
+      let jolt = 0;
+      if (speedDelta < -12 * dt) {
+        jolt += Math.min(0.42, Math.abs(speedDelta) * 0.14);
+      }
+      if (Math.abs(v.steerAngle) > 0.32 && Math.abs(vForward) > 13.5) {
+        jolt += dt * Math.abs(v.steerAngle) * Math.abs(vForward) * 0.042;
+      }
+      if (Math.abs(vLateral) > 2.3) {
+        jolt += dt * (Math.abs(vLateral) - 2.1) * 0.18;
+      }
+      if (v.vy < -5.5 && ny <= this.getGroundHeightAt(nx, nz, v.y) + 0.05) {
+        jolt += 0.35;
+      }
+      this.gslPackageDamagePct = Math.min(12.0, this.gslPackageDamagePct + jolt);
+      if (this.gslPackageDamagePct > 10.0) {
+        this.failGslCourier(t(this.settings.language, 'gsl.failPkgDmg'));
+        return;
+      }
+    }
+
     const waterUnder = isWaterAt(nx, nz);
     const groundH = waterUnder ? -0.45 : this.getGroundHeightAt(nx, nz, v.y);
     if (waterUnder && ny <= 0.05) {
@@ -4545,9 +4909,10 @@ export class ViceEngine {
       if (this.wasAirborneInCar) {
         const airDuration = this.elapsedSec - this.airStartTime;
         if (airDuration > 0.75 && Math.abs(v.speed) > 12) {
+          const reward = Math.min(25, Math.max(8, Math.round(airDuration * 12)));
           this.stats.stuntJumps += 1;
-          this.cash += 500;
-          this.stuntMessage = `Kaskadérsky skok! +$500`;
+          this.cash += reward;
+          this.stuntMessage = `Kaskadérsky skok! +$${reward}`;
           this.stuntTimer = 3.0;
           this.callbacks.onCashChange(this.cash);
           this.callbacks.onStatsChange({ ...this.stats });
@@ -4943,6 +5308,15 @@ export class ViceEngine {
           v.x -= nx * push;
           v.z -= nz * push;
           const relSpeed = Math.hypot(this.currentVehicle.vx - v.vx, this.currentVehicle.vz - v.vz);
+          if (
+            this.activeMission?.requiresGslCourier &&
+            this.gslVehicle &&
+            (this.currentVehicle === this.gslVehicle || v === this.gslVehicle)
+          ) {
+            this.gslVehicle.health = Math.max(0, this.gslVehicle.health - Math.max(5, relSpeed));
+            this.failGslCourier(t(this.settings.language, 'gsl.failTap'));
+            return;
+          }
           if (relSpeed > 7) {
             this.audio.playImpact(0.6);
             this.input.triggerVibration(140, 0.5, 0.7);
@@ -5701,10 +6075,10 @@ export class ViceEngine {
         this.hitMarkerTimer = 0.16;
         this.audio.playHitMarker();
         this.spawnParticleBurst(hitPoint, 0x38bdf8, 5);
-        this.cash += 120;
+        this.cash += 8;
         this.stats.shootingRangeScore = (this.stats.shootingRangeScore || 0) + 100;
         this.addSkillXp('shooting', 10);
-        this.stuntMessage = 'Zásah terča! +$120 · +100 bodov strelnice';
+        this.stuntMessage = 'Zásah terča! +$8 · +100 bodov strelnice';
         this.stuntTimer = 2.0;
         this.callbacks.onCashChange(this.cash);
         this.callbacks.onStatsChange({ ...this.stats });
@@ -5747,7 +6121,7 @@ export class ViceEngine {
       this.scene.remove(npc.rig.root);
       this.stats.totalEliminations += 1;
       const bounty =
-        npc.kind === 'enemy' ? 220 : npc.kind === 'bouncer' ? 160 : npc.kind === 'police' ? 150 : fromTackle ? 85 : 40;
+        npc.kind === 'enemy' ? 35 : npc.kind === 'bouncer' ? 25 : npc.kind === 'police' ? 20 : fromTackle ? 12 : 6;
       this.cash += bounty;
       this.callbacks.onCashChange(this.cash);
       this.callbacks.onStatsChange({ ...this.stats });
@@ -6021,12 +6395,27 @@ export class ViceEngine {
     if (!this.activeMission) return;
     this.missionElapsedSec += dt;
 
+    if (this.activeMission.requiresGslCourier) {
+      if (
+        !this.gslVehicle ||
+        this.gslVehicle.destroyed ||
+        this.gslVehicle.health < this.gslVehicle.maxHealth - 0.05
+      ) {
+        this.failGslCourier(t(this.settings.language, 'gsl.failVehDmg'));
+        return;
+      }
+      if (this.gslPackageDamagePct > 10.0) {
+        this.failGslCourier(t(this.settings.language, 'gsl.failPkgDmg'));
+        return;
+      }
+    }
+
     if (this.missionTimerRemaining !== null) {
       this.missionTimerRemaining -= dt;
       if (this.missionTimerRemaining <= 0) {
         this.missionNotification = {
-          title: 'Misia zlyhala',
-          subtitle: 'Vypršal časový limit!',
+          title: t(this.settings.language, 'gsl.failedTitle'),
+          subtitle: 'Time limit expired!',
         };
         this.missionNotifTimer = 4.0;
         this.cancelMission();
@@ -6049,7 +6438,17 @@ export class ViceEngine {
 
     if (stage.type === 'goto' || stage.type === 'collect') {
       const dist = Math.hypot(px - stage.targetX, pz - stage.targetZ);
-      if (dist <= stage.radius && (!stage.vehicleRequired || this.currentVehicle)) {
+      if (this.activeMission.requiresGslCourier) {
+        const drivingGsl = this.currentVehicle !== null && this.currentVehicle === this.gslVehicle;
+        const intact =
+          this.gslVehicle !== null &&
+          this.gslVehicle.health >= this.gslVehicle.maxHealth - 0.05 &&
+          this.gslPackageDamagePct <= 10.0 &&
+          isPavedRoadAt(this.gslVehicle.x, this.gslVehicle.z);
+        if (dist <= stage.radius && drivingGsl && intact) {
+          this.advanceMissionStage();
+        }
+      } else if (dist <= stage.radius && (!stage.vehicleRequired || this.currentVehicle)) {
         this.advanceMissionStage();
       }
     } else if (stage.type === 'eliminate') {
@@ -6628,6 +7027,9 @@ export class ViceEngine {
       (s) => s.category === 'garage' && Math.hypot(s.doorX - px, s.doorZ - pz) < 9.5
     );
 
+    const curRadioId = this.audio.getRadioStation();
+    const curRadioDef = RADIO_STATIONS.find((s) => s.id === curRadioId) || RADIO_STATIONS[0];
+
     this.callbacks.onTelemetry({
       fps: this.currentFps,
       health: Math.round(ch.health),
@@ -6658,7 +7060,20 @@ export class ViceEngine {
       isDrifting: Boolean(this.currentVehicle?.isDrifting),
       taxiMode: this.taxiMode,
       taxiFareCash: this.taxiFareCash,
+      taxiTripDistM: this.taxiTripDistM,
       taxiDestinationLabel: this.taxiDestinationLabel,
+      taxiPickupLabel: this.taxiPickupLabel,
+      courierStatus: this.activeMission?.requiresGslCourier
+        ? {
+            active: true,
+            boarded: this.gslBoarded && this.currentVehicle === this.gslVehicle,
+            onRoad: this.gslVehicle ? isPavedRoadAt(this.gslVehicle.x, this.gslVehicle.z) : true,
+            packageDamagePct: Number(this.gslPackageDamagePct.toFixed(2)),
+            vehicleDamagePct: this.gslVehicle
+              ? Math.max(0, Math.round(100 - (this.gslVehicle.health / Math.max(1, this.gslVehicle.maxHealth)) * 100))
+              : 0,
+          }
+        : null,
       hangarCount: this.savedGarage.hangarVehicles.length,
       garageCount: this.savedGarage.safehouseVehicles.length,
       parkedFacilityNotice: this.parkedFacilityNotice,
@@ -6675,6 +7090,10 @@ export class ViceEngine {
       ambientTempC: Math.round(
         26 + Math.sin((this.gameTimeNormalized - 0.25) * Math.PI * 2) * 5 - this.rainIntensity * 6
       ),
+      radioStation: curRadioDef.id,
+      radioStationName: curRadioDef.name,
+      radioGenre: curRadioDef.genre,
+      radioTrack: curRadioId === 'off' ? '---' : this.audio.getCurrentRadioTrack(),
       nearestNpcDialogue: this.nearestNpcDialogue,
       controlCategory: this.getControlCategoryForVehicle(this.currentVehicle),
       equippedWeapon: this.inventory.equippedWeapon,

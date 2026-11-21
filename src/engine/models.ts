@@ -1,5 +1,6 @@
 import * as THREE from 'three';
-import { CharacterAppearance, VehicleKind, WeaponId } from '../types/game';
+import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { CharacterAppearance, EmergencyRole, VehicleKind, WeaponId } from '../types/game';
 
 export interface CharacterRig {
   root: THREE.Group;
@@ -1034,9 +1035,143 @@ type CarBodyKind =
   | 'muscle'
   | 'suv'
   | 'taxi'
+  | 'van'
   | 'police'
   | 'ambulance'
   | 'firetruck';
+
+let _sharedCarMats: {
+  trim: THREE.MeshStandardMaterial;
+  chrome: THREE.MeshStandardMaterial;
+  headlight: THREE.MeshStandardMaterial;
+  whiteDoor: THREE.MeshPhysicalMaterial;
+  glass: THREE.MeshPhysicalMaterial;
+  tire: THREE.MeshStandardMaterial;
+  rim: THREE.MeshStandardMaterial;
+  rotor: THREE.MeshStandardMaterial;
+  dash: THREE.MeshStandardMaterial;
+  seatDark: THREE.MeshStandardMaterial;
+  seatRed: THREE.MeshStandardMaterial;
+  gauge: THREE.MeshStandardMaterial;
+  driverSkin: THREE.MeshStandardMaterial;
+  driverSuitDark: THREE.MeshStandardMaterial;
+  driverSuitAmber: THREE.MeshStandardMaterial;
+} | null = null;
+
+function getSharedCarMats() {
+  if (_sharedCarMats) return _sharedCarMats;
+  _sharedCarMats = {
+    trim: new THREE.MeshStandardMaterial({
+      color: 0x18181b,
+      metalness: 0.35,
+      roughness: 0.56,
+      envMapIntensity: 0.55,
+    }),
+    chrome: new THREE.MeshStandardMaterial({
+      color: 0xe2e8f0,
+      metalness: 0.92,
+      roughness: 0.14,
+      envMapIntensity: 0.85,
+    }),
+    headlight: new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      emissive: 0xfef3c7,
+      emissiveIntensity: 1.35,
+    }),
+    whiteDoor: new THREE.MeshPhysicalMaterial({
+      color: '#f8fafc',
+      metalness: 0.2,
+      roughness: 0.28,
+      clearcoat: 0.85,
+      envMapIntensity: 0.55,
+    }),
+    glass: new THREE.MeshPhysicalMaterial({
+      color: 0x0f172a,
+      metalness: 0.1,
+      roughness: 0.05,
+      clearcoat: 0.9,
+      envMapIntensity: 0.75,
+      transparent: true,
+      opacity: 0.34,
+      depthWrite: false,
+    }),
+    tire: new THREE.MeshStandardMaterial({ color: 0x111827, roughness: 0.85, metalness: 0.08 }),
+    rim: new THREE.MeshStandardMaterial({ color: 0xdbeafe, roughness: 0.16, metalness: 0.92 }),
+    rotor: new THREE.MeshStandardMaterial({ color: 0x64748b, roughness: 0.35, metalness: 0.85 }),
+    dash: new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.58 }),
+    seatDark: new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.72 }),
+    seatRed: new THREE.MeshStandardMaterial({ color: 0x7f1d1d, roughness: 0.72 }),
+    gauge: new THREE.MeshStandardMaterial({
+      color: 0x38bdf8,
+      emissive: 0x0ea5e9,
+      emissiveIntensity: 1.4,
+    }),
+    driverSkin: new THREE.MeshStandardMaterial({ color: 0xc68b67, roughness: 0.55 }),
+    driverSuitDark: new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.8 }),
+    driverSuitAmber: new THREE.MeshStandardMaterial({ color: 0xd97706, roughness: 0.8 }),
+  };
+  return _sharedCarMats;
+}
+
+let _gslLogoTexture: THREE.CanvasTexture | null = null;
+function getGslLogoTexture(): THREE.CanvasTexture {
+  if (_gslLogoTexture) return _gslLogoTexture;
+  const c = document.createElement('canvas');
+  c.width = 512;
+  c.height = 256;
+  const ctx = c.getContext('2d')!;
+  ctx.fillStyle = '#f8fafc';
+  ctx.fillRect(0, 0, 512, 256);
+
+  // Bold orange & navy speed stripes
+  ctx.fillStyle = '#0f172a';
+  ctx.fillRect(0, 186, 512, 70);
+  ctx.fillStyle = '#f97316';
+  ctx.fillRect(0, 168, 512, 18);
+  ctx.fillRect(0, 0, 512, 22);
+
+  // GSL monogram box + bold typography
+  ctx.fillStyle = '#f97316';
+  ctx.fillRect(36, 44, 150, 98);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '900 72px system-ui, sans-serif';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('GSL', 46, 96);
+
+  ctx.fillStyle = '#0f172a';
+  ctx.font = '900 52px system-ui, sans-serif';
+  ctx.fillText('EXPRESS', 206, 82);
+  ctx.fillStyle = '#475569';
+  ctx.font = '700 22px system-ui, sans-serif';
+  ctx.fillText('PRIORITY COURIER', 208, 128);
+
+  ctx.fillStyle = '#f8fafc';
+  ctx.font = '800 22px system-ui, sans-serif';
+  ctx.fillText('LEONIDA LOGISTICS · FRAGILE CARE', 46, 222);
+
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  _gslLogoTexture = tex;
+  return tex;
+}
+
+function mergeNormalizedGeometries(geos: THREE.BufferGeometry[]): THREE.BufferGeometry {
+  const prepared = geos.map((g) => {
+    const ni = g.index ? g.toNonIndexed() : g;
+    if (!ni.attributes.normal) ni.computeVertexNormals();
+    if (!ni.attributes.uv) {
+      const count = ni.attributes.position.count;
+      ni.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(count * 2), 2));
+    }
+    for (const key of Object.keys(ni.attributes)) {
+      if (key !== 'position' && key !== 'normal' && key !== 'uv') {
+        ni.deleteAttribute(key);
+      }
+    }
+    return ni;
+  });
+  return BufferGeometryUtils.mergeGeometries(prepared, false) || prepared[0];
+}
 
 // Create 100% Original Fictional Automotive Emblem Mesh (No Real-World Trademarks)
 function createFictionalBrandBadge(
@@ -1097,15 +1232,38 @@ function createSculptedCarBodyGeometry(kind: CarBodyKind): {
   bodyW: number;
 } {
   const isSuv = kind === 'suv';
+  const isVan = kind === 'van';
   const isAmbulance = kind === 'ambulance';
   const isFiretruck = kind === 'firetruck';
-  const isHeavy = isSuv || isAmbulance || isFiretruck;
+  const isHeavy = isSuv || isAmbulance || isFiretruck || isVan;
   const isCoupe = kind === 'coupe' || kind === 'supercar';
   const isSuper = kind === 'supercar';
   const isMuscle = kind === 'muscle';
   const isSedan = kind === 'sedan' || kind === 'taxi';
-  const bodyLen = isFiretruck ? 6.1 : isAmbulance ? 5.05 : isSuv ? 4.65 : isSuper ? 4.65 : isMuscle ? 4.5 : isSedan ? 4.35 : 4.4;
-  const bodyW = isFiretruck ? 2.26 : isAmbulance ? 2.12 : isSuv ? 2.04 : isSuper ? 2.08 : isMuscle ? 2.0 : 1.94;
+  const bodyLen = isFiretruck
+    ? 6.1
+    : isAmbulance || isVan
+      ? 5.05
+      : isSuv
+        ? 4.65
+        : isSuper
+          ? 4.65
+          : isMuscle
+            ? 4.5
+            : isSedan
+              ? 4.35
+              : 4.4;
+  const bodyW = isFiretruck
+    ? 2.26
+    : isAmbulance || isVan
+      ? 2.12
+      : isSuv
+        ? 2.04
+        : isSuper
+          ? 2.08
+          : isMuscle
+            ? 2.0
+            : 1.94;
   const halfL = bodyLen * 0.5;
 
   const lowerShape = new THREE.Shape();
@@ -1125,7 +1283,7 @@ function createSculptedCarBodyGeometry(kind: CarBodyKind): {
   );
   lowerShape.lineTo(
     -halfL + 0.12,
-    isFiretruck ? 1.24 : isAmbulance ? 1.18 : isSuv ? 1.06 : isSuper ? 0.94 : isMuscle ? 1.0 : 0.96
+    isFiretruck ? 1.24 : isAmbulance || isVan ? 1.18 : isSuv ? 1.06 : isSuper ? 0.94 : isMuscle ? 1.0 : 0.96
   );
   lowerShape.quadraticCurveTo(-halfL - 0.05, 0.76, -halfL, 0.32);
 
@@ -1141,10 +1299,10 @@ function createSculptedCarBodyGeometry(kind: CarBodyKind): {
   bodyGeo.rotateY(-Math.PI / 2);
 
   const cabinShape = new THREE.Shape();
-  if (isFiretruck || isAmbulance) {
-    const rearZ = isFiretruck ? -2.7 : -2.25;
-    const frontZ = isFiretruck ? 1.85 : 1.25;
-    const cabH = isFiretruck ? 1.18 : 1.05;
+  if (isFiretruck || isAmbulance || isVan) {
+    const rearZ = isFiretruck ? -2.7 : -2.28;
+    const frontZ = isFiretruck ? 1.85 : 1.28;
+    const cabH = isFiretruck ? 1.18 : 1.08;
     cabinShape.moveTo(rearZ, 0.0);
     cabinShape.lineTo(frontZ, 0.0);
     cabinShape.quadraticCurveTo(frontZ - 0.18, cabH * 0.88, frontZ - 0.45, cabH);
@@ -1181,7 +1339,7 @@ function createSculptedCarBodyGeometry(kind: CarBodyKind): {
   }
 
   const cabinGeo = new THREE.ExtrudeGeometry(cabinShape, {
-    depth: isFiretruck || isAmbulance ? bodyW - 0.28 : bodyW - 0.46,
+    depth: isFiretruck || isAmbulance || isVan ? bodyW - 0.28 : bodyW - 0.46,
     bevelEnabled: true,
     bevelThickness: 0.1,
     bevelSize: 0.08,
@@ -1565,7 +1723,8 @@ function createHelicopterRig(
   trimMat: THREE.MeshStandardMaterial,
   chromeMat: THREE.MeshStandardMaterial,
   brakeLightsMat: THREE.MeshStandardMaterial,
-  contactShadowTexture?: THREE.Texture
+  contactShadowTexture?: THREE.Texture,
+  emergencyRole?: EmergencyRole
 ): VehicleRig {
   const root = new THREE.Group();
   const bodyGroup = new THREE.Group();
@@ -1713,6 +1872,61 @@ function createHelicopterRig(
   driverGroup.add(pilotHead);
   driverGroup.visible = false;
 
+  let redBeacon: THREE.Mesh | undefined;
+  let blueBeacon: THREE.Mesh | undefined;
+  if (emergencyRole) {
+    const redMat = new THREE.MeshStandardMaterial({
+      color: 0xef4444,
+      emissive: 0xef4444,
+      emissiveIntensity: 1.8,
+    });
+    const blueMat = new THREE.MeshStandardMaterial({
+      color: emergencyRole === 'police_heli' ? 0x3b82f6 : emergencyRole === 'fire_heli' ? 0xfacc15 : 0xf8fafc,
+      emissive: emergencyRole === 'police_heli' ? 0x3b82f6 : emergencyRole === 'fire_heli' ? 0xfacc15 : 0xef4444,
+      emissiveIntensity: 1.8,
+    });
+    redBeacon = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.14, 0.24), redMat);
+    redBeacon.position.set(-0.22, 2.26, -1.65);
+    blueBeacon = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.14, 0.24), blueMat);
+    blueBeacon.position.set(0.22, 2.26, -1.65);
+    bodyGroup.add(redBeacon, blueBeacon);
+
+    if (emergencyRole === 'police_heli') {
+      const whiteDoorMat = new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.35 });
+      const stripe = new THREE.Mesh(new THREE.BoxGeometry(1.78, 0.22, 1.3), whiteDoorMat);
+      stripe.position.set(0, 1.06, 0.22);
+      const searchlightPod = new THREE.Mesh(new THREE.SphereGeometry(0.2, 10, 8), trimMat);
+      searchlightPod.position.set(0, 0.56, 1.55);
+      const searchLens = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.14, 0.14, 0.08, 10),
+        new THREE.MeshStandardMaterial({ color: 0xe0f2fe, emissive: 0xe0f2fe, emissiveIntensity: 2.2 })
+      );
+      searchLens.rotation.x = Math.PI / 2 - 0.35;
+      searchLens.position.set(0, 0.48, 1.72);
+      bodyGroup.add(stripe, searchlightPod, searchLens);
+    } else if (emergencyRole === 'rescue_heli') {
+      const crossMat = new THREE.MeshStandardMaterial({ color: 0xef4444, emissive: 0xdc2626, emissiveIntensity: 0.55 });
+      [-0.88, 0.88].forEach((sx) => {
+        const vCross = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.55, 0.16), crossMat);
+        vCross.position.set(sx, 1.15, 0.05);
+        const hCross = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.16, 0.55), crossMat);
+        hCross.position.set(sx, 1.15, 0.05);
+        bodyGroup.add(vCross, hCross);
+      });
+    } else if (emergencyRole === 'fire_heli') {
+      const goldMat = new THREE.MeshStandardMaterial({ color: 0xfacc15, emissive: 0xca8a04, emissiveIntensity: 0.35 });
+      const stripe = new THREE.Mesh(new THREE.BoxGeometry(1.78, 0.16, 1.85), goldMat);
+      stripe.position.set(0, 1.04, 0.1);
+      const waterTankPod = new THREE.Mesh(
+        new THREE.CapsuleGeometry(0.36, 1.35, 6, 12),
+        new THREE.MeshStandardMaterial({ color: 0x0ea5e9, metalness: 0.35, roughness: 0.3 })
+      );
+      waterTankPod.rotation.x = Math.PI / 2;
+      waterTankPod.position.set(0, 0.32, 0.15);
+      bodyGroup.add(stripe, waterTankPod);
+    }
+  }
+
   bodyGroup.add(
     lowerTub,
     upperDeck,
@@ -1736,6 +1950,8 @@ function createHelicopterRig(
     propeller: mainRotor,
     tailRotor,
     paintMat,
+    redBeacon,
+    blueBeacon,
     brakeLightsMat,
   };
 }
@@ -1923,51 +2139,43 @@ function createFighterJetRig(
 export function createVehicleRig(
   kind: VehicleKind,
   colorHex: string,
-  contactShadowTexture?: THREE.Texture
+  contactShadowTexture?: THREE.Texture,
+  emergencyRole?: EmergencyRole
 ): VehicleRig {
+  const shared = getSharedCarMats();
   const resolvedPaint =
     kind === 'police'
       ? '#0f172a'
       : kind === 'taxi'
         ? '#facc15'
-        : kind === 'ambulance'
+        : kind === 'ambulance' || kind === 'van'
           ? '#f8fafc'
           : kind === 'firetruck'
             ? '#dc2626'
             : kind === 'fighter_jet'
               ? '#475569'
               : kind === 'helicopter'
-                ? '#1e293b'
+                ? emergencyRole === 'police_heli'
+                  ? '#0f172a'
+                  : emergencyRole === 'rescue_heli'
+                    ? '#f8fafc'
+                    : emergencyRole === 'fire_heli'
+                      ? '#dc2626'
+                      : colorHex || '#1e293b'
                 : colorHex;
 
   const paintMat = new THREE.MeshPhysicalMaterial({
     color: resolvedPaint,
-    metalness: kind === 'ambulance' ? 0.16 : kind === 'taxi' ? 0.24 : 0.42,
-    roughness: kind === 'ambulance' || kind === 'taxi' ? 0.28 : 0.24,
+    metalness: kind === 'ambulance' || kind === 'van' || emergencyRole === 'rescue_heli' ? 0.16 : kind === 'taxi' ? 0.24 : 0.42,
+    roughness: kind === 'ambulance' || kind === 'taxi' || kind === 'van' || emergencyRole === 'rescue_heli' ? 0.28 : 0.24,
     clearcoat: 0.92,
     clearcoatRoughness: 0.08,
     envMapIntensity: 0.65,
   });
 
-  const trimMat = new THREE.MeshStandardMaterial({
-    color: 0x18181b,
-    metalness: 0.35,
-    roughness: 0.56,
-    envMapIntensity: 0.55,
-  });
-
-  const chromeMat = new THREE.MeshStandardMaterial({
-    color: 0xe2e8f0,
-    metalness: 0.92,
-    roughness: 0.14,
-    envMapIntensity: 0.85,
-  });
-
-  const headlightMat = new THREE.MeshStandardMaterial({
-    color: 0xffffff,
-    emissive: 0xfef3c7,
-    emissiveIntensity: 1.35,
-  });
+  const trimMat = shared.trim;
+  const chromeMat = shared.chrome;
+  const headlightMat = shared.headlight;
 
   const brakeLightsMat = new THREE.MeshStandardMaterial({
     color: 0xef4444,
@@ -1993,7 +2201,7 @@ export function createVehicleRig(
     return createPlaneRig(paintMat, trimMat, chromeMat, brakeLightsMat, contactShadowTexture);
   }
   if (kind === 'helicopter') {
-    return createHelicopterRig(paintMat, trimMat, chromeMat, brakeLightsMat, contactShadowTexture);
+    return createHelicopterRig(paintMat, trimMat, chromeMat, brakeLightsMat, contactShadowTexture, emergencyRole);
   }
   if (kind === 'fighter_jet') {
     return createFighterJetRig(paintMat, trimMat, chromeMat, brakeLightsMat, contactShadowTexture);
@@ -2005,6 +2213,7 @@ export function createVehicleRig(
 
   const isSuv = kind === 'suv';
   const isTaxi = kind === 'taxi';
+  const isVan = kind === 'van';
   const isPolice = kind === 'police';
   const isAmbulance = kind === 'ambulance';
   const isFiretruck = kind === 'firetruck';
@@ -2029,27 +2238,11 @@ export function createVehicleRig(
     root.add(shadow);
   }
 
-  const whiteDoorMat = new THREE.MeshPhysicalMaterial({
-    color: '#f8fafc',
-    metalness: 0.2,
-    roughness: 0.28,
-    clearcoat: 0.85,
-    envMapIntensity: 0.55,
-  });
-
-  const glassMat = new THREE.MeshPhysicalMaterial({
-    color: 0x0f172a,
-    metalness: 0.1,
-    roughness: 0.05,
-    clearcoat: 0.9,
-    envMapIntensity: 0.75,
-    transparent: true,
-    opacity: 0.34,
-    depthWrite: false,
-  });
+  const whiteDoorMat = shared.whiteDoor;
+  const glassMat = shared.glass;
 
   const chassis = new THREE.Mesh(bodyGeo, paintMat);
-  chassis.position.y = isSuper ? 0.54 : isAmbulance || isFiretruck ? 0.78 : 0.62;
+  chassis.position.y = isSuper ? 0.54 : isAmbulance || isFiretruck || isVan ? 0.78 : 0.62;
   chassis.castShadow = true;
   chassis.receiveShadow = true;
   chassis.userData.deformable = true;
@@ -2057,19 +2250,22 @@ export function createVehicleRig(
 
   // Real-Inspired Distinct Exterior Styling Details per Fictional Brand
   if (isSuper) {
-    const splitter = new THREE.Mesh(new THREE.BoxGeometry(bodyW * 0.98, 0.07, 0.32), trimMat);
-    splitter.position.set(0, 0.24, bodyLen * 0.49);
-    const diffuser = new THREE.Mesh(new THREE.BoxGeometry(bodyW * 0.92, 0.16, 0.22), trimMat);
-    diffuser.position.set(0, 0.26, -bodyLen * 0.49);
-    const engineLouvers = new THREE.Mesh(new THREE.BoxGeometry(0.92, 0.06, 0.85), trimMat);
-    engineLouvers.position.set(0, 0.94, -1.05);
-    bodyGroup.add(splitter, diffuser, engineLouvers);
-
+    const trimGeos: THREE.BufferGeometry[] = [];
+    const s1 = new THREE.BoxGeometry(bodyW * 0.98, 0.07, 0.32);
+    s1.translate(0, 0.24, bodyLen * 0.49);
+    trimGeos.push(s1);
+    const s2 = new THREE.BoxGeometry(bodyW * 0.92, 0.16, 0.22);
+    s2.translate(0, 0.26, -bodyLen * 0.49);
+    trimGeos.push(s2);
+    const s3 = new THREE.BoxGeometry(0.92, 0.06, 0.85);
+    s3.translate(0, 0.94, -1.05);
+    trimGeos.push(s3);
     [-bodyW * 0.49, bodyW * 0.49].forEach((sx) => {
-      const scoop = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.34, 0.75), trimMat);
-      scoop.position.set(sx, 0.6, -0.45);
-      bodyGroup.add(scoop);
+      const sc = new THREE.BoxGeometry(0.14, 0.34, 0.75);
+      sc.translate(sx, 0.6, -0.45);
+      trimGeos.push(sc);
     });
+    bodyGroup.add(new THREE.Mesh(mergeNormalizedGeometries(trimGeos), trimMat));
   } else if (isMuscle) {
     const scoop = new THREE.Mesh(new THREE.BoxGeometry(0.68, 0.14, 0.88), trimMat);
     scoop.position.set(0, 0.97, 1.05);
@@ -2078,51 +2274,57 @@ export function createVehicleRig(
     ducktail.position.set(0, 1.02, -bodyLen * 0.46);
     bodyGroup.add(scoop, ducktail);
   } else if (isCoupe) {
-    const skirtL = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.1, 2.3), trimMat);
-    skirtL.position.set(-bodyW * 0.51, 0.3, 0);
-    const skirtR = skirtL.clone();
-    skirtR.position.x = bodyW * 0.51;
-    bodyGroup.add(skirtL, skirtR);
-  } else if (isSuv) {
-    [-0.65, 0.65].forEach((rx) => {
-      const rail = new THREE.Mesh(new THREE.CapsuleGeometry(0.032, 1.85, 4, 8), chromeMat);
-      rail.rotation.x = Math.PI / 2;
-      rail.position.set(rx, 1.56, -0.4);
-      bodyGroup.add(rail);
+    const skirtGeos: THREE.BufferGeometry[] = [];
+    [-bodyW * 0.51, bodyW * 0.51].forEach((sx) => {
+      const sg = new THREE.BoxGeometry(0.1, 0.1, 2.3);
+      sg.translate(sx, 0.3, 0);
+      skirtGeos.push(sg);
     });
-    const sparePod = new THREE.Mesh(new THREE.CylinderGeometry(0.38, 0.38, 0.22, 18), paintMat);
+    bodyGroup.add(new THREE.Mesh(mergeNormalizedGeometries(skirtGeos), trimMat));
+  } else if (isSuv) {
+    const railGeos: THREE.BufferGeometry[] = [];
+    [-0.65, 0.65].forEach((rx) => {
+      const railG = new THREE.CapsuleGeometry(0.032, 1.85, 4, 8);
+      railG.rotateX(Math.PI / 2);
+      railG.translate(rx, 1.56, -0.4);
+      railGeos.push(railG);
+    });
+    bodyGroup.add(new THREE.Mesh(mergeNormalizedGeometries(railGeos), chromeMat));
+    const sparePod = new THREE.Mesh(new THREE.CylinderGeometry(0.38, 0.38, 0.22, 16), paintMat);
     sparePod.rotation.x = Math.PI / 2;
     sparePod.position.set(0, 0.86, -bodyLen * 0.51);
     bodyGroup.add(sparePod);
   } else if (kind === 'sedan' || isTaxi) {
+    const podGeos: THREE.BufferGeometry[] = [];
     [-0.22, 0.22].forEach((gx) => {
-      const pod = new THREE.Mesh(new THREE.OctahedronGeometry(0.16, 0), chromeMat);
-      pod.scale.set(1.2, 0.85, 0.35);
-      pod.position.set(gx, 0.52, bodyLen * 0.5);
-      bodyGroup.add(pod);
+      const pG = new THREE.OctahedronGeometry(0.16, 0);
+      pG.scale(1.2, 0.85, 0.35);
+      pG.translate(gx, 0.52, bodyLen * 0.5);
+      podGeos.push(pG);
     });
+    bodyGroup.add(new THREE.Mesh(mergeNormalizedGeometries(podGeos), chromeMat));
   }
 
   if (isTaxi) {
-    // Checkered Vice Cab side stripe + Glowing Roof Taxi Sign
     const checkerDark = new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.4 });
     const checkerWhite = new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.35 });
+    const darkGeos: THREE.BufferGeometry[] = [];
+    const whiteGeos: THREE.BufferGeometry[] = [];
     for (let i = 0; i < 8; i++) {
       const cz = -0.85 + i * 0.24;
       [-bodyW * 0.485, bodyW * 0.485].forEach((cx) => {
-        const sqTop = new THREE.Mesh(
-          new THREE.BoxGeometry(0.03, 0.08, 0.22),
-          i % 2 === 0 ? checkerDark : checkerWhite
-        );
-        sqTop.position.set(cx, 0.66, cz);
-        const sqBot = new THREE.Mesh(
-          new THREE.BoxGeometry(0.03, 0.08, 0.22),
-          i % 2 === 1 ? checkerDark : checkerWhite
-        );
-        sqBot.position.set(cx, 0.58, cz);
-        bodyGroup.add(sqTop, sqBot);
+        const gTop = new THREE.BoxGeometry(0.03, 0.08, 0.22);
+        gTop.translate(cx, 0.66, cz);
+        (i % 2 === 0 ? darkGeos : whiteGeos).push(gTop);
+        const gBot = new THREE.BoxGeometry(0.03, 0.08, 0.22);
+        gBot.translate(cx, 0.58, cz);
+        (i % 2 === 1 ? darkGeos : whiteGeos).push(gBot);
       });
     }
+    bodyGroup.add(
+      new THREE.Mesh(mergeNormalizedGeometries(darkGeos), checkerDark),
+      new THREE.Mesh(mergeNormalizedGeometries(whiteGeos), checkerWhite)
+    );
     const signBase = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.04, 0.24), trimMat);
     signBase.position.set(0, 1.4, -0.15);
     const signGlow = new THREE.Mesh(
@@ -2135,6 +2337,28 @@ export function createVehicleRig(
     );
     signGlow.position.set(0, 1.48, -0.15);
     bodyGroup.add(signBase, signGlow);
+  }
+
+  if (isVan) {
+    const gslTex = getGslLogoTexture();
+    const gslSideMat = new THREE.MeshStandardMaterial({ map: gslTex, roughness: 0.35, metalness: 0.1 });
+    [-bodyW * 0.445, bodyW * 0.445].forEach((sx) => {
+      const sidePanel = new THREE.Mesh(new THREE.PlaneGeometry(2.85, 0.92), gslSideMat);
+      sidePanel.position.set(sx, 1.62, -0.62);
+      sidePanel.rotation.y = sx > 0 ? Math.PI / 2 : -Math.PI / 2;
+      bodyGroup.add(sidePanel);
+    });
+    const rearLogo = new THREE.Mesh(new THREE.PlaneGeometry(1.38, 0.68), gslSideMat);
+    rearLogo.position.set(0, 1.64, -bodyLen * 0.465);
+    rearLogo.rotation.y = Math.PI;
+    const hoodLogo = new THREE.Mesh(new THREE.PlaneGeometry(1.15, 0.55), gslSideMat);
+    hoodLogo.position.set(0, 1.12, 1.75);
+    hoodLogo.rotation.x = -Math.PI / 2 + 0.18;
+    const rearSeam = new THREE.Mesh(new THREE.BoxGeometry(0.05, 1.25, 0.06), trimMat);
+    rearSeam.position.set(0, 1.38, -bodyLen * 0.47);
+    const stepBumper = new THREE.Mesh(new THREE.BoxGeometry(bodyW * 0.84, 0.12, 0.24), trimMat);
+    stepBumper.position.set(0, 0.42, -bodyLen * 0.52);
+    bodyGroup.add(rearLogo, hoodLogo, rearSeam, stepBumper);
   }
 
   if (isPolice) {
@@ -2152,20 +2376,21 @@ export function createVehicleRig(
     bodyGroup.add(stripe);
 
     const crossMat = new THREE.MeshStandardMaterial({ color: 0xe11d48, emissive: 0xbe123c, emissiveIntensity: 0.5 });
-    const c1 = new THREE.Mesh(new THREE.BoxGeometry(0.95, 0.08, 0.3), crossMat);
-    const c2 = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.08, 0.95), crossMat);
-    c1.position.set(0, 2.24, -0.6);
-    c2.position.set(0, 2.24, -0.6);
-    bodyGroup.add(c1, c2);
-
-    // Side & Rear EMS Medical Crosses
+    const crossGeos: THREE.BufferGeometry[] = [];
+    const c1 = new THREE.BoxGeometry(0.95, 0.08, 0.3);
+    c1.translate(0, 2.24, -0.6);
+    const c2 = new THREE.BoxGeometry(0.3, 0.08, 0.95);
+    c2.translate(0, 2.24, -0.6);
+    crossGeos.push(c1, c2);
     [-bodyW * 0.45, bodyW * 0.45].forEach((sx) => {
-      const sc1 = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.54, 0.18), crossMat);
-      const sc2 = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.18, 0.54), crossMat);
-      sc1.position.set(sx, 1.56, -0.68);
-      sc2.position.set(sx, 1.56, -0.68);
-      bodyGroup.add(sc1, sc2);
+      const sc1 = new THREE.BoxGeometry(0.06, 0.54, 0.18);
+      sc1.translate(sx, 1.56, -0.68);
+      const sc2 = new THREE.BoxGeometry(0.06, 0.18, 0.54);
+      sc2.translate(sx, 1.56, -0.68);
+      crossGeos.push(sc1, sc2);
     });
+    bodyGroup.add(new THREE.Mesh(mergeNormalizedGeometries(crossGeos), crossMat));
+
     const rearSeam = new THREE.Mesh(new THREE.BoxGeometry(0.05, 1.25, 0.06), trimMat);
     rearSeam.position.set(0, 1.38, -bodyLen * 0.48);
     const stepBumper = new THREE.Mesh(new THREE.BoxGeometry(bodyW * 0.82, 0.12, 0.24), chromeMat);
@@ -2189,20 +2414,21 @@ export function createVehicleRig(
       reel.position.set(sx, 1.15, -2.55);
       bodyGroup.add(bay, reel);
     });
+    const ladderChromeGeos: THREE.BufferGeometry[] = [];
     [-0.28, 0.28].forEach((lx) => {
-      const rail = new THREE.Mesh(new THREE.CapsuleGeometry(0.045, 3.8, 4, 8), chromeMat);
-      rail.rotation.x = Math.PI / 2;
-      rail.position.set(lx, 2.46, -0.85);
-      bodyGroup.add(rail);
+      const rail = new THREE.CapsuleGeometry(0.045, 3.8, 4, 8);
+      rail.rotateX(Math.PI / 2);
+      rail.translate(lx, 2.46, -0.85);
+      ladderChromeGeos.push(rail);
     });
     for (let rz = -2.4; rz <= 0.8; rz += 0.45) {
-      const rung = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 0.56, 8), chromeMat);
-      rung.rotation.z = Math.PI / 2;
-      rung.position.set(0, 2.46, rz);
-      bodyGroup.add(rung);
+      const rung = new THREE.CylinderGeometry(0.025, 0.025, 0.56, 8);
+      rung.rotateZ(Math.PI / 2);
+      rung.translate(0, 2.46, rz);
+      ladderChromeGeos.push(rung);
     }
+    bodyGroup.add(new THREE.Mesh(mergeNormalizedGeometries(ladderChromeGeos), chromeMat));
 
-    // Functional Roof Water Cannon Monitor Turret
     waterTurret = new THREE.Group();
     waterTurret.position.set(0, 2.46, 1.85);
     const turretBase = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.26, 0.18, 12), chromeMat);
@@ -2216,8 +2442,8 @@ export function createVehicleRig(
     bodyGroup.add(waterTurret);
   }
 
-  // Hollow Transparent-Glass Cabin + Detailed Interior for All Passenger Cars
-  if (isAmbulance || isFiretruck) {
+  // Hollow Transparent-Glass Cabin + Detailed Interior (Merged static geometry = massive draw-call savings!)
+  if (isAmbulance || isFiretruck || isVan) {
     const cabin = new THREE.Mesh(cabinGeo, paintMat);
     cabin.position.set(0, isFiretruck ? 1.78 : 1.68, isFiretruck ? -0.42 : -0.52);
     cabin.castShadow = true;
@@ -2225,7 +2451,7 @@ export function createVehicleRig(
     bodyGroup.add(cabin);
 
     const windshield = new THREE.Mesh(new THREE.BoxGeometry(bodyW * 0.78, 0.55, 0.08), glassMat);
-    windshield.position.set(0, isFiretruck ? 1.72 : 1.6, isFiretruck ? 1.52 : 0.92);
+    windshield.position.set(0, isFiretruck ? 1.72 : 1.62, isFiretruck ? 1.52 : 0.94);
     windshield.rotation.x = -0.22;
     windshield.renderOrder = 2;
     bodyGroup.add(windshield);
@@ -2239,64 +2465,68 @@ export function createVehicleRig(
     const roofFrontZ = isSuper ? 0.06 : isSuv ? 0.25 : 0.14;
     const roofRearZ = isSuv ? -1.35 : -0.92;
 
-    // Interior Tub, Sculpted Seats, Dashboard, Glowing Gauges & Steering Wheel
-    const seatMat = new THREE.MeshStandardMaterial({ color: isSuper ? 0x7f1d1d : 0x1e293b, roughness: 0.72 });
-    const dashMat = new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.58 });
-    const gaugeMat = new THREE.MeshStandardMaterial({
-      color: 0x38bdf8,
-      emissive: 0x0ea5e9,
-      emissiveIntensity: 1.4,
-    });
+    const seatMat = isSuper ? shared.seatRed : shared.seatDark;
+    const dashMat = shared.dash;
+    const gaugeMat = shared.gauge;
 
-    const interiorFloor = new THREE.Mesh(new THREE.BoxGeometry(cabinW * 0.88, 0.08, 1.85), dashMat);
-    interiorFloor.position.set(0, baseGlassY - 0.24, -0.25);
-    bodyGroup.add(interiorFloor);
+    // Merged interior dashMat group (floor + dash + shifter console)
+    const dashGeos: THREE.BufferGeometry[] = [];
+    const fl = new THREE.BoxGeometry(cabinW * 0.88, 0.08, 1.85);
+    fl.translate(0, baseGlassY - 0.24, -0.25);
+    const dsh = new THREE.BoxGeometry(cabinW * 0.86, 0.24, 0.38);
+    dsh.translate(0, baseGlassY - 0.04, 0.42);
+    const cns = new THREE.BoxGeometry(0.18, 0.14, 0.56);
+    cns.translate(0, baseGlassY - 0.1, 0.1);
+    dashGeos.push(fl, dsh, cns);
+    bodyGroup.add(new THREE.Mesh(mergeNormalizedGeometries(dashGeos), dashMat));
 
-    // Front Bucket Seats + Rear Bench
+    // Merged seats group (2 front bucket seats + headrests + rear bench)
+    const seatGeos: THREE.BufferGeometry[] = [];
     [-0.36, 0.36].forEach((sx) => {
-      const seatBase = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.12, 0.44), seatMat);
-      seatBase.position.set(sx, baseGlassY - 0.14, -0.05);
-      const seatBack = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.48, 0.11), seatMat);
-      seatBack.rotation.x = -0.18;
-      seatBack.position.set(sx, baseGlassY + 0.08, -0.24);
-      const headrest = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.16, 0.09), seatMat);
-      headrest.position.set(sx, baseGlassY + 0.35, -0.28);
-      bodyGroup.add(seatBase, seatBack, headrest);
+      const sBase = new THREE.BoxGeometry(0.42, 0.12, 0.44);
+      sBase.translate(sx, baseGlassY - 0.14, -0.05);
+      const sBack = new THREE.BoxGeometry(0.4, 0.48, 0.11);
+      sBack.rotateX(-0.18);
+      sBack.translate(sx, baseGlassY + 0.08, -0.24);
+      const hRest = new THREE.BoxGeometry(0.22, 0.16, 0.09);
+      hRest.translate(sx, baseGlassY + 0.35, -0.28);
+      seatGeos.push(sBase, sBack, hRest);
     });
-    const rearBench = new THREE.Mesh(new THREE.BoxGeometry(cabinW * 0.76, 0.36, 0.42), seatMat);
-    rearBench.position.set(0, baseGlassY - 0.04, -0.82);
-    bodyGroup.add(rearBench);
+    const rBench = new THREE.BoxGeometry(cabinW * 0.76, 0.36, 0.42);
+    rBench.translate(0, baseGlassY - 0.04, -0.82);
+    seatGeos.push(rBench);
+    bodyGroup.add(new THREE.Mesh(mergeNormalizedGeometries(seatGeos), seatMat));
 
-    // Dashboard + Glowing Instrument Cluster + Steering Wheel
-    const dash = new THREE.Mesh(new THREE.BoxGeometry(cabinW * 0.86, 0.24, 0.38), dashMat);
-    dash.position.set(0, baseGlassY - 0.04, 0.42);
     const gaugeCluster = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.09, 0.04), gaugeMat);
     gaugeCluster.position.set(-0.36, baseGlassY + 0.04, 0.24);
-    const wheelRim = new THREE.Mesh(new THREE.TorusGeometry(0.145, 0.018, 8, 16), trimMat);
+    const wheelRim = new THREE.Mesh(new THREE.TorusGeometry(0.145, 0.018, 8, 14), trimMat);
     wheelRim.rotation.x = 0.42;
     wheelRim.position.set(-0.36, baseGlassY + 0.04, 0.14);
-    const consoleShifter = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.14, 0.56), dashMat);
-    consoleShifter.position.set(0, baseGlassY - 0.1, 0.1);
-    bodyGroup.add(dash, gaugeCluster, wheelRim, consoleShifter);
+    bodyGroup.add(gaugeCluster, wheelRim);
 
-    // A / B / C Structural Pillars
-    const pillarMat = isSuper || isCoupe ? trimMat : paintMat;
+    // Merged structural pillars + roof cap
+    const pillarIsTrim = isSuper || isCoupe;
+    const pillarPaintGeos: THREE.BufferGeometry[] = [];
+    const pillarTrimGeos: THREE.BufferGeometry[] = [];
     [-cabinW * 0.47, cabinW * 0.47].forEach((px) => {
-      // A-pillar
-      const aPillar = new THREE.Mesh(new THREE.BoxGeometry(0.065, glassH * 1.18, 0.075), pillarMat);
-      aPillar.rotation.x = -0.68;
-      aPillar.position.set(px, baseGlassY + glassH * 0.5, (cabinFrontZ + roofFrontZ) * 0.5);
-      // B-pillar
-      const bPillar = new THREE.Mesh(new THREE.BoxGeometry(0.065, glassH, 0.08), trimMat);
-      bPillar.position.set(px, baseGlassY + glassH * 0.5, -0.35);
-      // C-pillar
-      const cPillar = new THREE.Mesh(new THREE.BoxGeometry(0.075, glassH * 1.12, 0.14), pillarMat);
-      cPillar.rotation.x = 0.58;
-      cPillar.position.set(px, baseGlassY + glassH * 0.5, (cabinRearZ + roofRearZ) * 0.5);
-      bodyGroup.add(aPillar, bPillar, cPillar);
+      const aP = new THREE.BoxGeometry(0.065, glassH * 1.18, 0.075);
+      aP.rotateX(-0.68);
+      aP.translate(px, baseGlassY + glassH * 0.5, (cabinFrontZ + roofFrontZ) * 0.5);
+      const bP = new THREE.BoxGeometry(0.065, glassH, 0.08);
+      bP.translate(px, baseGlassY + glassH * 0.5, -0.35);
+      const cP = new THREE.BoxGeometry(0.075, glassH * 1.12, 0.14);
+      cP.rotateX(0.58);
+      cP.translate(px, baseGlassY + glassH * 0.5, (cabinRearZ + roofRearZ) * 0.5);
+      (pillarIsTrim ? pillarTrimGeos : pillarPaintGeos).push(aP, cP);
+      pillarTrimGeos.push(bP);
     });
+    if (pillarPaintGeos.length > 0) {
+      bodyGroup.add(new THREE.Mesh(mergeNormalizedGeometries(pillarPaintGeos), paintMat));
+    }
+    if (pillarTrimGeos.length > 0) {
+      bodyGroup.add(new THREE.Mesh(mergeNormalizedGeometries(pillarTrimGeos), trimMat));
+    }
 
-    // Roof Cap
     const roofShell = new THREE.Mesh(
       new THREE.CapsuleGeometry(0.45, isSuv ? 1.35 : 0.85, 6, 14),
       isPolice ? whiteDoorMat : paintMat
@@ -2307,123 +2537,123 @@ export function createVehicleRig(
     roofShell.castShadow = true;
     bodyGroup.add(roofShell);
 
-    // Clear Transparent Glass Panes (Windshield, Rear Glass, Side Windows)
-    const windshieldPane = new THREE.Mesh(
-      new THREE.PlaneGeometry(cabinW * 0.88, glassH * 1.25),
-      glassMat
-    );
-    windshieldPane.position.set(0, baseGlassY + glassH * 0.5, (cabinFrontZ + roofFrontZ) * 0.5);
-    windshieldPane.rotation.x = -Math.PI / 2 + 0.68;
-    windshieldPane.renderOrder = 2;
-
-    const rearPane = new THREE.Mesh(
-      new THREE.PlaneGeometry(cabinW * 0.84, glassH * 1.16),
-      glassMat
-    );
-    rearPane.position.set(0, baseGlassY + glassH * 0.5, (cabinRearZ + roofRearZ) * 0.5);
-    rearPane.rotation.x = Math.PI / 2 - 0.58;
-    rearPane.renderOrder = 2;
-
+    // Merged transparent glass panes (1 draw call instead of 4!)
+    const glassGeos: THREE.BufferGeometry[] = [];
+    const wG = new THREE.PlaneGeometry(cabinW * 0.88, glassH * 1.25);
+    wG.rotateX(-Math.PI / 2 + 0.68);
+    wG.translate(0, baseGlassY + glassH * 0.5, (cabinFrontZ + roofFrontZ) * 0.5);
+    const rG = new THREE.PlaneGeometry(cabinW * 0.84, glassH * 1.16);
+    rG.rotateX(Math.PI / 2 - 0.58);
+    rG.translate(0, baseGlassY + glassH * 0.5, (cabinRearZ + roofRearZ) * 0.5);
+    glassGeos.push(wG, rG);
     [-cabinW * 0.465, cabinW * 0.465].forEach((gx) => {
-      const sidePane = new THREE.Mesh(
-        new THREE.PlaneGeometry(Math.abs(roofFrontZ - roofRearZ) + 0.35, glassH * 0.92),
-        glassMat
-      );
-      sidePane.rotation.y = gx > 0 ? Math.PI / 2 : -Math.PI / 2;
-      sidePane.position.set(gx, baseGlassY + glassH * 0.48, (roofFrontZ + roofRearZ) * 0.5);
-      sidePane.renderOrder = 2;
-      bodyGroup.add(sidePane);
+      const sG = new THREE.PlaneGeometry(Math.abs(roofFrontZ - roofRearZ) + 0.35, glassH * 0.92);
+      sG.rotateY(gx > 0 ? Math.PI / 2 : -Math.PI / 2);
+      sG.translate(gx, baseGlassY + glassH * 0.48, (roofFrontZ + roofRearZ) * 0.5);
+      glassGeos.push(sG);
     });
-    bodyGroup.add(windshieldPane, rearPane);
+    const mergedGlass = new THREE.Mesh(mergeNormalizedGeometries(glassGeos), glassMat);
+    mergedGlass.renderOrder = 2;
+    bodyGroup.add(mergedGlass);
   }
 
   const driverGroup = new THREE.Group();
   const drvTorso = new THREE.Mesh(
     new THREE.CapsuleGeometry(0.15, 0.24, 4, 8),
-    new THREE.MeshStandardMaterial({ color: isFiretruck ? 0xd97706 : 0x1e293b, roughness: 0.8 })
+    isFiretruck ? shared.driverSuitAmber : shared.driverSuitDark
   );
   drvTorso.position.set(
     -0.36,
-    isFiretruck ? 1.55 : isAmbulance ? 1.45 : isSuv ? 1.05 : isSuper ? 0.82 : 0.94,
-    isFiretruck ? 1.1 : isAmbulance ? 0.5 : -0.1
+    isFiretruck ? 1.55 : isAmbulance || isVan ? 1.45 : isSuv ? 1.05 : isSuper ? 0.82 : 0.94,
+    isFiretruck ? 1.1 : isAmbulance || isVan ? 0.5 : -0.1
   );
-  const drvHead = new THREE.Mesh(
-    new THREE.SphereGeometry(0.125, 12, 10),
-    new THREE.MeshStandardMaterial({ color: 0xc68b67, roughness: 0.55 })
-  );
+  const drvHead = new THREE.Mesh(new THREE.SphereGeometry(0.125, 10, 8), shared.driverSkin);
   drvHead.position.set(
     -0.36,
-    isFiretruck ? 1.82 : isAmbulance ? 1.72 : isSuv ? 1.32 : isSuper ? 1.04 : 1.17,
-    isFiretruck ? 1.1 : isAmbulance ? 0.5 : -0.1
+    isFiretruck ? 1.82 : isAmbulance || isVan ? 1.72 : isSuv ? 1.32 : isSuper ? 1.04 : 1.17,
+    isFiretruck ? 1.1 : isAmbulance || isVan ? 0.5 : -0.1
   );
   driverGroup.add(drvTorso, drvHead);
   driverGroup.visible = false;
   bodyGroup.add(driverGroup);
 
-  // Side Mirrors + Door Handles
+  // Side Mirrors
+  const mirrorGeos: THREE.BufferGeometry[] = [];
   [-bodyW * 0.53, bodyW * 0.53].forEach((mx) => {
-    const mirror = new THREE.Mesh(new THREE.CapsuleGeometry(0.045, 0.1, 4, 8), paintMat);
-    mirror.rotation.z = Math.PI / 2;
-    mirror.position.set(mx, isFiretruck || isAmbulance ? 1.35 : 0.94, isFiretruck ? 1.45 : 0.48);
-    bodyGroup.add(mirror);
+    const mG = new THREE.CapsuleGeometry(0.045, 0.1, 4, 8);
+    mG.rotateZ(Math.PI / 2);
+    mG.translate(mx, isFiretruck || isAmbulance || isVan ? 1.35 : 0.94, isFiretruck ? 1.45 : 0.48);
+    mirrorGeos.push(mG);
   });
+  bodyGroup.add(new THREE.Mesh(mergeNormalizedGeometries(mirrorGeos), paintMat));
 
-  // Front Grille + Fictional Brand Emblem (Front & Rear!)
+  // Front Grille + Fictional Brand Emblem (Front & Rear)
   const grille = new THREE.Mesh(
     new THREE.CapsuleGeometry(0.11, isMuscle ? 1.05 : 0.85, 4, 10),
     isFiretruck ? chromeMat : trimMat
   );
   grille.rotation.z = Math.PI / 2;
-  grille.position.set(0, isFiretruck || isAmbulance ? 0.72 : 0.48, bodyLen * 0.49);
+  grille.position.set(0, isFiretruck || isAmbulance || isVan ? 0.72 : 0.48, bodyLen * 0.49);
   bodyGroup.add(grille);
 
   const frontBadge = createFictionalBrandBadge(kind, chromeMat);
-  frontBadge.position.set(0, isSuper ? 0.54 : isFiretruck || isAmbulance ? 0.84 : 0.68, bodyLen * 0.495);
+  frontBadge.position.set(0, isSuper ? 0.54 : isFiretruck || isAmbulance || isVan ? 0.84 : 0.68, bodyLen * 0.495);
   frontBadge.rotation.x = -0.35;
   const rearBadge = createFictionalBrandBadge(kind, chromeMat);
   rearBadge.position.set(0, isSuper ? 0.72 : 0.76, -bodyLen * 0.5);
   rearBadge.rotation.y = Math.PI;
   bodyGroup.add(frontBadge, rearBadge);
 
-  // Exhausts
+  // Merged Exhausts + Headlights + Taillights
   const exhaustXs = isSuper ? [-0.22, -0.08, 0.08, 0.22] : [-0.55, 0.55];
+  const exGeos: THREE.BufferGeometry[] = [];
   exhaustXs.forEach((ex) => {
-    const pipe = new THREE.Mesh(new THREE.CylinderGeometry(0.046, 0.046, 0.18, 12), chromeMat);
-    pipe.rotation.x = Math.PI / 2;
-    pipe.position.set(ex, 0.34, -bodyLen * 0.5);
-    bodyGroup.add(pipe);
+    const pG = new THREE.CylinderGeometry(0.046, 0.046, 0.18, 10);
+    pG.rotateX(Math.PI / 2);
+    pG.translate(ex, 0.34, -bodyLen * 0.5);
+    exGeos.push(pG);
   });
+  bodyGroup.add(new THREE.Mesh(mergeNormalizedGeometries(exGeos), chromeMat));
 
-  // LED Headlights & Full/Split Taillights
+  const hlGeos: THREE.BufferGeometry[] = [];
+  const tlGeos: THREE.BufferGeometry[] = [];
   [-0.68, 0.68].forEach((lx) => {
-    const hl = new THREE.Mesh(new THREE.CapsuleGeometry(0.042, 0.26, 4, 10), headlightMat);
-    hl.rotation.z = Math.PI / 2;
-    hl.rotation.y = lx > 0 ? -0.18 : 0.18;
-    hl.position.set(lx, isSuper ? 0.54 : isFiretruck || isAmbulance ? 0.82 : 0.64, bodyLen * 0.485);
-    const tl = new THREE.Mesh(new THREE.CapsuleGeometry(0.044, 0.28, 4, 10), brakeLightsMat);
-    tl.rotation.z = Math.PI / 2;
-    tl.position.set(lx, isSuper ? 0.68 : isFiretruck || isAmbulance ? 0.86 : 0.72, -bodyLen * 0.485);
-    bodyGroup.add(hl, tl);
+    const hlG = new THREE.CapsuleGeometry(0.042, 0.26, 4, 8);
+    hlG.rotateZ(Math.PI / 2);
+    hlG.rotateY(lx > 0 ? -0.18 : 0.18);
+    hlG.translate(lx, isSuper ? 0.54 : isFiretruck || isAmbulance || isVan ? 0.82 : 0.64, bodyLen * 0.485);
+    hlGeos.push(hlG);
+
+    const tlG = new THREE.CapsuleGeometry(0.044, 0.28, 4, 8);
+    tlG.rotateZ(Math.PI / 2);
+    tlG.translate(lx, isSuper ? 0.68 : isFiretruck || isAmbulance || isVan ? 0.86 : 0.72, -bodyLen * 0.485);
+    tlGeos.push(tlG);
   });
+  if (isSuper || isCoupe) {
+    const barG = new THREE.CapsuleGeometry(0.018, 1.15, 4, 8);
+    barG.rotateZ(Math.PI / 2);
+    barG.translate(0, isSuper ? 0.68 : 0.72, -bodyLen * 0.49);
+    tlGeos.push(barG);
+  }
+  bodyGroup.add(
+    new THREE.Mesh(mergeNormalizedGeometries(hlGeos), headlightMat),
+    new THREE.Mesh(mergeNormalizedGeometries(tlGeos), brakeLightsMat)
+  );
 
   if (isSuper || isCoupe) {
-    const lightBar = new THREE.Mesh(new THREE.CapsuleGeometry(0.018, 1.15, 4, 8), brakeLightsMat);
-    lightBar.rotation.z = Math.PI / 2;
-    lightBar.position.set(0, isSuper ? 0.68 : 0.72, -bodyLen * 0.49);
-    bodyGroup.add(lightBar);
-
     const wing = new THREE.Mesh(
       new THREE.CapsuleGeometry(0.036, isSuper ? 1.72 : 1.5, 4, 10),
       trimMat
     );
     wing.rotation.z = Math.PI / 2;
     wing.position.set(0, isSuper ? 1.1 : 1.07, -bodyLen * 0.46);
+    const strutGeos: THREE.BufferGeometry[] = [];
     [-0.55, 0.55].forEach((sx) => {
-      const strut = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.2, 0.14), trimMat);
-      strut.position.set(sx, isSuper ? 0.99 : 0.97, -bodyLen * 0.46);
-      bodyGroup.add(strut);
+      const sG = new THREE.BoxGeometry(0.04, 0.2, 0.14);
+      sG.translate(sx, isSuper ? 0.99 : 0.97, -bodyLen * 0.46);
+      strutGeos.push(sG);
     });
-    bodyGroup.add(wing);
+    bodyGroup.add(wing, new THREE.Mesh(mergeNormalizedGeometries(strutGeos), trimMat));
   }
 
   let redBeacon: THREE.Mesh | undefined;
@@ -2449,19 +2679,18 @@ export function createVehicleRig(
     bodyGroup.add(barBase, redBeacon, blueBeacon);
   }
 
-  // 4 Multi-Spoke Wheels with Visible Brake Rotor + Red/Amber Caliper inside Steer Pivot
+  // 4 Multi-Spoke Wheels (Merged tire+sidewall & merged rim+spokes+rotor = 2 draw calls/wheel instead of 9!)
   const wheels: THREE.Group[] = [];
   const frontSteerPivots: THREE.Group[] = [];
-  const tireMat = new THREE.MeshStandardMaterial({ color: 0x111827, roughness: 0.85, metalness: 0.08 });
-  const rimMat = new THREE.MeshStandardMaterial({ color: 0xdbeafe, roughness: 0.16, metalness: 0.92 });
-  const rotorMat = new THREE.MeshStandardMaterial({ color: 0x64748b, roughness: 0.35, metalness: 0.85 });
+  const tireMat = shared.tire;
+  const rimMat = shared.rim;
   const caliperMat = new THREE.MeshStandardMaterial({
-    color: isSuper ? 0xef4444 : isMuscle ? 0xf59e0b : 0x38bdf8,
+    color: isSuper ? 0xef4444 : isMuscle || isVan ? 0xf59e0b : 0x38bdf8,
     roughness: 0.3,
     metalness: 0.4,
   });
 
-  const wheelRadius = isFiretruck ? 0.48 : isAmbulance || isSuv ? 0.42 : 0.37;
+  const wheelRadius = isFiretruck ? 0.48 : isAmbulance || isSuv || isVan ? 0.42 : 0.37;
   const wheelZ = bodyLen * 0.31;
   const wheelX = bodyW * 0.5 - 0.04;
 
@@ -2472,38 +2701,50 @@ export function createVehicleRig(
     [wheelX, -wheelZ, false],
   ];
 
+  // Build shared wheel geometry per side (left vs right) once!
+  const buildMergedWheelGeos = (isLeft: boolean) => {
+    const tireG = new THREE.CylinderGeometry(wheelRadius, wheelRadius, 0.25, 20);
+    tireG.rotateZ(Math.PI / 2);
+    const sideG = new THREE.TorusGeometry(wheelRadius * 0.82, 0.055, 8, 18);
+    sideG.rotateY(Math.PI / 2);
+    sideG.translate(isLeft ? -0.1 : 0.1, 0, 0);
+
+    const rimG = new THREE.CylinderGeometry(wheelRadius * 0.62, wheelRadius * 0.62, 0.26, 14);
+    rimG.rotateZ(Math.PI / 2);
+    const rotG = new THREE.CylinderGeometry(wheelRadius * 0.46, wheelRadius * 0.46, 0.06, 12);
+    rotG.rotateZ(Math.PI / 2);
+    rotG.translate(isLeft ? -0.05 : 0.05, 0, 0);
+    const alloyParts: THREE.BufferGeometry[] = [rimG, rotG];
+    for (let s = 0; s < 5; s++) {
+      const spG = new THREE.CapsuleGeometry(0.018, wheelRadius * 0.95, 4, 6);
+      spG.rotateX((s * Math.PI) / 5);
+      spG.translate(isLeft ? -0.12 : 0.12, 0, 0);
+      alloyParts.push(spG);
+    }
+    return {
+      tireMerged: mergeNormalizedGeometries([tireG, sideG]),
+      alloyMerged: mergeNormalizedGeometries(alloyParts),
+    };
+  };
+
+  const leftWheelGeos = buildMergedWheelGeos(true);
+  const rightWheelGeos = buildMergedWheelGeos(false);
+
   for (const [wx, wz, isFront] of wheelPositions) {
+    const isLeft = wx < 0;
+    const geos = isLeft ? leftWheelGeos : rightWheelGeos;
     const steerPivot = new THREE.Group();
     steerPivot.position.set(wx, wheelRadius, wz);
     const wheelSpinGroup = new THREE.Group();
 
-    const tire = new THREE.Mesh(new THREE.CylinderGeometry(wheelRadius, wheelRadius, 0.25, 22), tireMat);
-    tire.rotation.z = Math.PI / 2;
-    tire.castShadow = true;
+    const tireMesh = new THREE.Mesh(geos.tireMerged, tireMat);
+    tireMesh.castShadow = true;
+    const alloyMesh = new THREE.Mesh(geos.alloyMerged, rimMat);
 
-    const sidewall = new THREE.Mesh(new THREE.TorusGeometry(wheelRadius * 0.82, 0.055, 8, 20), tireMat);
-    sidewall.rotation.y = Math.PI / 2;
-    sidewall.position.x = wx < 0 ? -0.1 : 0.1;
-
-    const rim = new THREE.Mesh(new THREE.CylinderGeometry(wheelRadius * 0.62, wheelRadius * 0.62, 0.26, 16), rimMat);
-    rim.rotation.z = Math.PI / 2;
-
-    const rotor = new THREE.Mesh(new THREE.CylinderGeometry(wheelRadius * 0.46, wheelRadius * 0.46, 0.06, 14), rotorMat);
-    rotor.rotation.z = Math.PI / 2;
-    rotor.position.x = wx < 0 ? -0.05 : 0.05;
-
-    for (let s = 0; s < 5; s++) {
-      const spoke = new THREE.Mesh(new THREE.CapsuleGeometry(0.018, wheelRadius * 0.95, 4, 6), rimMat);
-      spoke.rotation.x = (s * Math.PI) / 5;
-      spoke.position.x = wx < 0 ? -0.12 : 0.12;
-      wheelSpinGroup.add(spoke);
-    }
-
-    // Brake Caliper mounted to steerPivot (stays upright when wheel spins!)
     const caliper = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.14, 0.11), caliperMat);
-    caliper.position.set(wx < 0 ? -0.05 : 0.05, 0.07, isFront ? -0.14 : 0.14);
+    caliper.position.set(isLeft ? -0.05 : 0.05, 0.07, isFront ? -0.14 : 0.14);
 
-    wheelSpinGroup.add(tire, sidewall, rim, rotor);
+    wheelSpinGroup.add(tireMesh, alloyMesh);
     steerPivot.add(wheelSpinGroup, caliper);
     root.add(steerPivot);
     wheels.push(wheelSpinGroup);

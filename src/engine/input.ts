@@ -39,6 +39,8 @@ export interface InputFrameState {
   l3Pressed: boolean;
   pitchUpHeld: boolean;
   pitchDownHeld: boolean;
+  taxiAcceptPressed: boolean;
+  taxiCancelPressed: boolean;
   stickConfig: StickControlConfig;
   controllerConnected: boolean;
   controllerType: 'playstation' | 'xbox' | 'none';
@@ -148,6 +150,7 @@ export class InputManager {
       | 'toggleDock'
       | 'phone'
       | 'talkNpc'
+      | 'radioNext'
   ) => void;
 
   private boundKeyDown: (e: KeyboardEvent) => void;
@@ -191,6 +194,8 @@ export class InputManager {
         this.onActionTriggered?.('phone');
       } else if (e.code === 'KeyT') {
         this.onActionTriggered?.('talkNpc');
+      } else if (e.code === 'KeyX') {
+        this.onActionTriggered?.('radioNext');
       } else if (e.code === 'Digit1') {
         this.onActionTriggered?.('quickHeal');
       } else if (e.code === 'Digit2') {
@@ -460,6 +465,8 @@ export class InputManager {
         l3Pressed: false,
         pitchUpHeld: false,
         pitchDownHeld: false,
+        taxiAcceptPressed: false,
+        taxiCancelPressed: false,
         stickConfig,
         controllerConnected,
         controllerType,
@@ -585,6 +592,9 @@ export class InputManager {
     const carjackPressed =
       (enterVehiclePressed && carjackModifier) || edge('carjack_key', dedicatedCarjackDown);
 
+    const taxiAcceptPressed = edge('taxi_accept', this.keysDown.has('KeyY'));
+    const taxiCancelPressed = edge('taxi_cancel', this.keysDown.has('KeyN') || this.keysDown.has('Backspace'));
+
     return {
       moveX: Math.max(-1, Math.min(1, moveX)),
       moveY: Math.max(-1, Math.min(1, moveY)),
@@ -617,6 +627,8 @@ export class InputManager {
       l3Pressed: edge('l3', l3Down),
       pitchUpHeld,
       pitchDownHeld,
+      taxiAcceptPressed,
+      taxiCancelPressed,
       stickConfig,
       controllerConnected,
       controllerType,

@@ -11,10 +11,13 @@ import {
   MapPin,
   Navigation,
   Package,
+  Radio,
   RotateCcw,
   Settings,
   Shield,
   Shirt,
+  SkipBack,
+  SkipForward,
   Smartphone,
   Star,
   Sun,
@@ -29,9 +32,11 @@ import {
   GraphicsSettings,
   HudModSettings,
   HudTelemetry,
+  LanguageCode,
 } from '../types/game';
 import { WEAPON_CATALOG } from '../data/defaults';
 import { formatKeyCode, PLAYSTATION_GLYPHS, XBOX_GLYPHS } from '../engine/input';
+import { getCameraLabel, t } from '../i18n/translations';
 import {
   BRIDGE_SPANS,
   getIslandOutlinePoints,
@@ -42,6 +47,7 @@ import {
 import { drawShopMapIcon } from '../engine/mapIcons';
 
 interface GameHUDProps {
+  lang: LanguageCode;
   telemetry: HudTelemetry;
   activeCharacter: CharacterState;
   characters: Record<CharacterId, CharacterState>;
@@ -59,17 +65,16 @@ interface GameHUDProps {
   onOpenCloud: () => void;
   onRequestLock: () => void;
   onRestartCleanSession?: () => void;
+  onAcceptTaxi?: () => void;
+  onCancelTaxi?: () => void;
+  onSkipTaxiOffer?: () => void;
+  onCycleRadio?: (dir: 1 | -1) => void;
 }
-
-const CAMERA_LABELS: Record<CameraMode, string> = {
-  first_person: '1. osoba',
-  third_person: '3. osoba',
-  third_person_far: '3. osoba (ďaleká)',
-};
 
 const ISLAND_MINIMAP_COAST = getIslandOutlinePoints(96);
 
 export const GameHUD: React.FC<GameHUDProps> = ({
+  lang,
   telemetry,
   activeCharacter,
   hudMod,
@@ -86,6 +91,10 @@ export const GameHUD: React.FC<GameHUDProps> = ({
   onOpenCloud,
   onRequestLock,
   onRestartCleanSession,
+  onAcceptTaxi,
+  onCancelTaxi,
+  onSkipTaxiOffer,
+  onCycleRadio,
 }) => {
   const radarCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
@@ -403,10 +412,10 @@ export const GameHUD: React.FC<GameHUDProps> = ({
         <div className="fixed inset-0 flex items-center justify-center bg-slate-950/75">
           <div className="text-center space-y-2 px-4">
             <div className="font-display text-6xl font-bold tracking-wider text-rose-500">
-              VYRADENÝ
+              {t(lang, 'hud.wasted')}
             </div>
             <div className="text-sm text-slate-300">
-              {telemetry.wastedReason || 'Ošetrenie v nemocnici (-$350) · Prevoz pred nemocnicu...'}
+              {telemetry.wastedReason || t(lang, 'hud.wastedSub')}
             </div>
           </div>
         </div>
@@ -417,22 +426,22 @@ export const GameHUD: React.FC<GameHUDProps> = ({
         <div className="fixed inset-0 flex items-center justify-center bg-slate-950/75">
           <div className="text-center space-y-2">
             <div className="font-display text-6xl font-bold tracking-wider text-sky-400">
-              ZATKNUTÝ
+              {t(lang, 'hud.busted')}
             </div>
             <div className="text-sm text-slate-300">
-              Zásah polície (-$250) · Prevoz pred policajnú stanicu...
+              {t(lang, 'hud.bustedSub')}
             </div>
           </div>
         </div>
       )}
 
-      {/* TOP-LEFT: Active Mission + Clock + FPS + Controller + Delayed Police Warning */}
+      {/* TOP-LEFT: Active Mission + Clock + FPS + Taxi Offer + GSL Courier */}
       <div className="absolute top-4 left-4 flex flex-col gap-2 max-w-xs pointer-events-auto">
         <div className="inline-flex flex-wrap items-center gap-2 px-3 py-1.5 rounded-lg bg-[#0b101b]/90 border border-white/10 text-xs text-slate-300 w-fit">
           {graphics.showFps && (
             <>
               <span className="font-mono-tabular font-semibold text-emerald-400">
-                {telemetry.fps} FPS
+                {telemetry.fps} {t(lang, 'hud.fps')}
               </span>
               <span className="text-slate-600">·</span>
             </>
@@ -456,20 +465,20 @@ export const GameHUD: React.FC<GameHUDProps> = ({
             <>
               <span className="text-slate-600">·</span>
               <span className="text-emerald-400 font-semibold">
-                {telemetry.remotePlayersCount} {telemetry.remotePlayersCount === 1 ? 'kamarát' : 'kamaráti'}
+                {telemetry.remotePlayersCount} {telemetry.remotePlayersCount === 1 ? t(lang, 'hud.friend1') : t(lang, 'hud.friendN')}
               </span>
             </>
           )}
           {telemetry.godModeActive && (
             <>
               <span className="text-slate-600">·</span>
-              <span className="text-rose-400 font-bold">GOD</span>
+              <span className="text-rose-400 font-bold">{t(lang, 'hud.godMode')}</span>
             </>
           )}
           {telemetry.inWater && !telemetry.inVehicle && (
             <>
               <span className="text-slate-600">·</span>
-              <span className="text-sky-400 font-medium">Plávanie</span>
+              <span className="text-sky-400 font-medium">{t(lang, 'hud.swimming')}</span>
             </>
           )}
           {telemetry.controllerConnected && (
@@ -485,14 +494,14 @@ export const GameHUD: React.FC<GameHUDProps> = ({
 
         {telemetry.cheatSessionActive && (
           <div className="px-3 py-1.5 rounded-lg bg-rose-500/20 border border-rose-400/40 text-xs text-rose-100 flex items-center justify-between gap-2">
-            <span className="font-semibold">Cheaty aktívne · Misie zamknuté</span>
+            <span className="font-semibold">{t(lang, 'hud.cheatSession')}</span>
             {onRestartCleanSession && (
               <button
                 onClick={onRestartCleanSession}
                 className="px-2 py-0.5 rounded bg-rose-500 hover:bg-rose-400 text-[11px] font-bold text-white inline-flex items-center gap-1 shrink-0"
               >
                 <RotateCcw className="w-3 h-3" />
-                Reštart bez cheatov
+                {t(lang, 'hud.restartClean')}
               </button>
             )}
           </div>
@@ -500,8 +509,10 @@ export const GameHUD: React.FC<GameHUDProps> = ({
 
         {telemetry.policeDispatchTimer > 0 && telemetry.wantedStars === 0 && (
           <div className="px-3 py-1.5 rounded-lg bg-amber-500/20 border border-amber-400/40 text-xs text-amber-200 font-medium">
-            Hlásenie VCPD ({telemetry.policeDispatchReason || 'Incident'}) · Hliadka o{' '}
-            <span className="font-mono-tabular font-bold">{telemetry.policeDispatchTimer}s</span> — uteč!
+            {t(lang, 'hud.dispatchIn', {
+              reason: telemetry.policeDispatchReason || 'Incident',
+              sec: telemetry.policeDispatchTimer,
+            })}
           </div>
         )}
 
@@ -511,13 +522,120 @@ export const GameHUD: React.FC<GameHUDProps> = ({
           </div>
         )}
 
-        {telemetry.taxiMode !== 'none' && (
-          <div className="px-3 py-1.5 rounded-lg bg-amber-400/15 border border-amber-400/35 text-xs text-amber-200">
-            {telemetry.taxiMode === 'passenger'
-              ? `Horizon Cab -> ${telemetry.taxiDestinationLabel || 'Cieľ'} ($${telemetry.taxiFareCash}) · [G] Vyhodiť vodiča`
-              : telemetry.taxiMode === 'driver_waiting'
-                ? 'Taxikár: Vyzdvihni zákazníka na žltom bode GPS'
-                : `Taxikár: Odvez zákazníka (${telemetry.taxiDestinationLabel}) · Zárobok $${telemetry.taxiFareCash}`}
+        {/* Interactive Taxi Driver Dispatch & Passenger Status */}
+        {telemetry.taxiMode === 'driver_offer' && (
+          <div className="p-3 rounded-xl bg-[#0b101b]/95 border border-amber-400/50 space-y-2 shadow-xl">
+            <div className="text-[11px] font-bold uppercase tracking-wider text-amber-300">
+              {t(lang, 'taxi.offerTitle')}
+            </div>
+            <div className="text-xs text-slate-200 space-y-0.5">
+              <div>
+                <span className="text-slate-400">{t(lang, 'taxi.pickup')}: </span>
+                <span className="font-semibold text-white">{telemetry.taxiPickupLabel || '—'}</span>
+              </div>
+              <div>
+                <span className="text-slate-400">{t(lang, 'taxi.dropoff')}: </span>
+                <span className="font-semibold text-white">{telemetry.taxiDestinationLabel || '—'}</span>
+              </div>
+              <div className="flex items-center justify-between pt-0.5 font-mono-tabular">
+                <span className="text-sky-300">{t(lang, 'taxi.distance')}: {telemetry.taxiTripDistM || 0} m</span>
+                <span className="text-emerald-400 font-bold">{t(lang, 'taxi.fare')}: ${telemetry.taxiFareCash}</span>
+              </div>
+            </div>
+            <div className="flex gap-1.5 pt-0.5">
+              {onAcceptTaxi && (
+                <button
+                  onClick={onAcceptTaxi}
+                  className="flex-1 py-1.5 px-2.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-bold"
+                >
+                  {t(lang, 'taxi.acceptBtn')}
+                </button>
+              )}
+              {onSkipTaxiOffer && (
+                <button
+                  onClick={onSkipTaxiOffer}
+                  className="py-1.5 px-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold"
+                >
+                  {t(lang, 'taxi.declineBtn')}
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {(telemetry.taxiMode === 'driver_waiting' ||
+          telemetry.taxiMode === 'driver_active' ||
+          telemetry.taxiMode === 'passenger') && (
+          <div className="px-3 py-2 rounded-lg bg-amber-400/15 border border-amber-400/35 text-xs text-amber-200 flex items-center justify-between gap-2">
+            <span>
+              {telemetry.taxiMode === 'passenger'
+                ? t(lang, 'taxi.passengerBanner', {
+                    dest: telemetry.taxiDestinationLabel || '—',
+                    cash: telemetry.taxiFareCash,
+                  })
+                : telemetry.taxiMode === 'driver_waiting'
+                  ? t(lang, 'taxi.driverWaitingMsg')
+                  : t(lang, 'taxi.driverActiveMsg', {
+                      dest: telemetry.taxiDestinationLabel || '—',
+                      cash: telemetry.taxiFareCash,
+                    })}
+            </span>
+            {telemetry.taxiMode !== 'passenger' && onCancelTaxi && (
+              <button
+                onClick={onCancelTaxi}
+                className="px-2 py-1 rounded bg-rose-500/80 hover:bg-rose-400 text-white text-[10px] font-bold shrink-0"
+              >
+                {t(lang, 'taxi.cancelBtn')}
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* GSL Express Courier Live Telemetry Card */}
+        {telemetry.courierStatus?.active && (
+          <div className="p-3 rounded-xl bg-[#0b101b]/95 border border-amber-400/45 space-y-2 shadow-xl">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-amber-300">
+                {t(lang, 'gsl.title')}
+              </span>
+              <span
+                className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                  telemetry.courierStatus.onRoad
+                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/35'
+                    : 'bg-rose-500/25 text-rose-200 border border-rose-500/45'
+                }`}
+              >
+                {telemetry.courierStatus.onRoad ? t(lang, 'gsl.onRoad') : t(lang, 'gsl.offRoad')}
+              </span>
+            </div>
+            {!telemetry.courierStatus.boarded ? (
+              <div className="text-xs text-sky-300 font-medium">{t(lang, 'gsl.boardPrompt')}</div>
+            ) : (
+              <div className="space-y-1.5 text-[11px] font-mono-tabular">
+                <div className="flex justify-between">
+                  <span className="text-slate-300">{t(lang, 'gsl.vehDmg')}</span>
+                  <span className={telemetry.courierStatus.vehicleDamagePct > 0 ? 'text-rose-400 font-bold' : 'text-emerald-400 font-bold'}>
+                    {telemetry.courierStatus.vehicleDamagePct}%
+                  </span>
+                </div>
+                <div className="space-y-0.5">
+                  <div className="flex justify-between">
+                    <span className="text-slate-300">{t(lang, 'gsl.pkgDmg')}</span>
+                    <span className={telemetry.courierStatus.packageDamagePct > 7.0 ? 'text-rose-400 font-bold' : 'text-amber-300 font-bold'}>
+                      {telemetry.courierStatus.packageDamagePct.toFixed(2)}% / 10.00%
+                    </span>
+                  </div>
+                  <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                    <div
+                      className={`h-full transition-all ${
+                        telemetry.courierStatus.packageDamagePct > 7.0 ? 'bg-rose-500' : 'bg-amber-400'
+                      }`}
+                      style={{ width: `${Math.min(100, (telemetry.courierStatus.packageDamagePct / 10.0) * 100)}%` }}
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -577,10 +695,10 @@ export const GameHUD: React.FC<GameHUDProps> = ({
         <div className="flex items-center gap-3 px-3.5 py-2 rounded-xl bg-[#0b101b]/90 border border-white/10">
           <div className="text-right">
             <div className="text-xs text-slate-400">
-              {activeCharacter.name} · {CAMERA_LABELS[telemetry.cameraMode]}
+              {activeCharacter.name} · {getCameraLabel(lang, telemetry.cameraMode)}
             </div>
             <div className="font-mono-tabular text-lg font-bold text-emerald-400">
-              ${telemetry.cash.toLocaleString('sk-SK')}
+              ${telemetry.cash.toLocaleString()}
             </div>
           </div>
           <img
@@ -634,7 +752,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
               {gameplayMods.infiniteAmmo ? (
                 '∞ / ∞'
               ) : telemetry.isReloading ? (
-                <span className="text-amber-400">Prebíjam...</span>
+                <span className="text-amber-400">{t(lang, 'hud.reloading')}</span>
               ) : (
                 <>
                   <span>{telemetry.ammoInClip}</span>
@@ -709,7 +827,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
             onClick={onRequestLock}
             className="px-3.5 py-1.5 rounded-lg bg-[#0b101b]/90 border border-white/15 text-xs text-slate-200 hover:border-white/30 transition-colors"
           >
-            Klikni do 3D scény pre voľné mierenie myšou · Esc pre kurzor
+            {t(lang, 'hud.lockMouseHint')}
           </button>
         </div>
       )}
@@ -718,7 +836,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
       {!telemetry.inVehicle && telemetry.altitudeM >= 7 && telemetry.hasParachute && !telemetry.parachuteDeployed && (
         <div className="fixed bottom-40 left-1/2 -translate-x-1/2">
           <div className="px-3.5 py-1.5 rounded-lg bg-sky-500/20 border border-sky-400/40 text-xs font-semibold text-sky-200">
-            [Medzerník] Otvoriť padák ({telemetry.altitudeM} m)
+            {t(lang, 'hud.parachuteHint', { m: telemetry.altitudeM })}
           </div>
         </div>
       )}
@@ -773,7 +891,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
               className="rounded-lg block"
             />
             <span className="absolute bottom-2 right-2 px-1.5 py-0.5 rounded bg-[#0b101b]/90 border border-white/15 text-[10px] font-mono-tabular text-slate-200 group-hover:text-white">
-              [{getGlyph(controls.keyBindings.openMap, controls.gamepadBindings.openMap)}] Mapa
+              [{getGlyph(controls.keyBindings.openMap, controls.gamepadBindings.openMap)}] {t(lang, 'dock.map')}
             </span>
           </button>
         )}
@@ -782,7 +900,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
           {/* Health */}
           <div className="space-y-0.5">
             <div className="flex justify-between text-[11px] font-mono-tabular text-slate-300">
-              <span>Zdravie</span>
+              <span>{t(lang, 'hud.health')}</span>
               <span>{telemetry.health}</span>
             </div>
             <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden">
@@ -796,7 +914,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
           {/* Armor */}
           <div className="space-y-0.5">
             <div className="flex justify-between text-[11px] font-mono-tabular text-slate-300">
-              <span>Vesta</span>
+              <span>{t(lang, 'hud.armor')}</span>
               <span>{telemetry.armor}</span>
             </div>
             <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden">
@@ -817,60 +935,103 @@ export const GameHUD: React.FC<GameHUDProps> = ({
 
           {/* Character RPG Skills mini row */}
           <div className="grid grid-cols-4 gap-1 pt-0.5 text-[9px] font-mono-tabular text-slate-400 text-center">
-            <span title="Šoférovanie">Šof {Math.round(telemetry.skills.driving)}</span>
-            <span title="Streľba">Str {Math.round(telemetry.skills.shooting)}</span>
-            <span title="Lietanie">Let {Math.round(telemetry.skills.flying)}</span>
-            <span title="Kondícia">Kon {Math.round(telemetry.skills.stamina)}</span>
+            <span>{t(lang, 'hud.skillDrive')} {Math.round(telemetry.skills.driving)}</span>
+            <span>{t(lang, 'hud.skillShoot')} {Math.round(telemetry.skills.shooting)}</span>
+            <span>{t(lang, 'hud.skillFly')} {Math.round(telemetry.skills.flying)}</span>
+            <span>{t(lang, 'hud.skillStam')} {Math.round(telemetry.skills.stamina)}</span>
           </div>
         </div>
       </div>
 
-      {/* BOTTOM-RIGHT: Speedometer when driving / flying / sailing */}
-      {hudMod.showSpeedometer && telemetry.inVehicle && (
-        <div className="absolute bottom-4 right-4 px-4 py-3 rounded-xl bg-[#0b101b]/90 border border-white/12 text-right min-w-[196px]">
-          {telemetry.vehicleBrand && (
-            <div className="text-[10px] font-bold uppercase tracking-widest" style={{ color: accent }}>
-              {telemetry.vehicleBrand}
+      {/* BOTTOM-RIGHT: Radio Switcher + Speedometer when driving / flying / sailing */}
+      {(telemetry.inVehicle || telemetry.radioStation !== 'off') && (
+        <div className="absolute bottom-4 right-4 flex flex-col items-end gap-2">
+          <div className="pointer-events-auto flex items-center gap-2 px-3 py-1.5 rounded-xl bg-[#0b101b]/92 border border-white/12 shadow-lg min-w-[196px] justify-between">
+            <div className="flex items-center gap-2 min-w-0">
+              <Radio className="w-3.5 h-3.5 shrink-0" style={{ color: accent }} />
+              <div className="min-w-0">
+                <div className="text-[11px] font-bold text-white truncate">
+                  {telemetry.radioStationName}
+                  {telemetry.radioStation !== 'off' && (
+                    <span className="ml-1 font-normal text-slate-400">· {telemetry.radioGenre}</span>
+                  )}
+                </div>
+                {telemetry.radioStation !== 'off' && (
+                  <div className="text-[10px] text-amber-300/90 truncate">♪ {telemetry.radioTrack}</div>
+                )}
+              </div>
             </div>
-          )}
-          <div className="text-xs font-medium text-slate-300">{telemetry.vehicleName}</div>
-          <div className="flex items-baseline justify-end gap-1.5">
-            <span className="font-display text-4xl font-bold font-mono-tabular text-white">
-              {telemetry.speedKmh}
-            </span>
-            <span className="text-xs font-medium text-slate-400">km/h</span>
-          </div>
-          <div className="mt-1 flex items-center justify-end gap-2 text-[10px] font-mono-tabular">
-            <span className={telemetry.vehicleBurning ? 'text-rose-400 font-bold' : 'text-slate-400'}>
-              {telemetry.vehicleBurning ? 'POŽIAR MOTORA!' : `Stav ${telemetry.vehicleHealthPct}%`}
-            </span>
-          </div>
-          {(telemetry.vehicleKind === 'plane' ||
-            telemetry.vehicleKind === 'fighter_jet' ||
-            telemetry.vehicleKind === 'helicopter') && (
-            <div className="text-[11px] font-mono-tabular text-sky-400 mt-0.5">
-              Výška {telemetry.altitudeM} m · [Shift/Medz] Stúpať · [S/Ctrl] Klesať
-              {telemetry.vehicleKind === 'fighter_jet' ? ' · [LMB] Rakety' : ''}
-            </div>
-          )}
-          {telemetry.vehicleKind !== 'plane' &&
-            telemetry.vehicleKind !== 'fighter_jet' &&
-            telemetry.vehicleKind !== 'helicopter' &&
-            (telemetry.isDrifting || telemetry.handbrake) && (
-              <div className="text-[11px] font-bold tracking-wide text-amber-400 mt-0.5">
-                ŠMYK / DRIFT
+            {onCycleRadio && (
+              <div className="flex items-center gap-1 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => onCycleRadio(-1)}
+                  className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200"
+                  title="Predošlá stanica"
+                >
+                  <SkipBack className="w-3 h-3" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onCycleRadio(1)}
+                  className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200"
+                  title="Ďalšia stanica [X]"
+                >
+                  <SkipForward className="w-3 h-3" />
+                </button>
+                <span className="text-[9px] font-mono-tabular text-slate-400 pl-0.5">[X]</span>
               </div>
             )}
+          </div>
+
+          {hudMod.showSpeedometer && telemetry.inVehicle && (
+            <div className="px-4 py-3 rounded-xl bg-[#0b101b]/90 border border-white/12 text-right min-w-[196px]">
+              {telemetry.vehicleBrand && (
+                <div className="text-[10px] font-bold uppercase tracking-widest" style={{ color: accent }}>
+                  {telemetry.vehicleBrand}
+                </div>
+              )}
+              <div className="text-xs font-medium text-slate-300">{telemetry.vehicleName}</div>
+              <div className="flex items-baseline justify-end gap-1.5">
+                <span className="font-display text-4xl font-bold font-mono-tabular text-white">
+                  {telemetry.speedKmh}
+                </span>
+                <span className="text-xs font-medium text-slate-400">{t(lang, 'hud.speed')}</span>
+              </div>
+              <div className="mt-1 flex items-center justify-end gap-2 text-[10px] font-mono-tabular">
+                <span className={telemetry.vehicleBurning ? 'text-rose-400 font-bold' : 'text-slate-400'}>
+                  {telemetry.vehicleBurning
+                    ? t(lang, 'hud.fireEngine')
+                    : t(lang, 'hud.healthPct', { pct: telemetry.vehicleHealthPct })}
+                </span>
+              </div>
+              {(telemetry.vehicleKind === 'plane' ||
+                telemetry.vehicleKind === 'fighter_jet' ||
+                telemetry.vehicleKind === 'helicopter') && (
+                <div className="text-[11px] font-mono-tabular text-sky-400 mt-0.5">
+                  {t(lang, 'hud.flightControls', { m: telemetry.altitudeM })}
+                  {telemetry.vehicleKind === 'fighter_jet' ? t(lang, 'hud.jetMissiles') : ''}
+                </div>
+              )}
+              {telemetry.vehicleKind !== 'plane' &&
+                telemetry.vehicleKind !== 'fighter_jet' &&
+                telemetry.vehicleKind !== 'helicopter' &&
+                (telemetry.isDrifting || telemetry.handbrake) && (
+                  <div className="text-[11px] font-bold tracking-wide text-amber-400 mt-0.5">
+                    {t(lang, 'hud.drift')}
+                  </div>
+                )}
+            </div>
+          )}
         </div>
       )}
 
-      {/* BOTTOM-CENTER: Mappable Action Dock (opens/closes via mapped key/button) */}
+      {/* BOTTOM-CENTER: Mappable Action Dock */}
       <div className="fixed bottom-4 left-1/2 -translate-x-1/2 flex flex-col items-center pointer-events-auto">
         {!dockOpen ? (
           <button
             onClick={onToggleDock}
             className="px-3.5 py-1.5 rounded-xl bg-[#0b101b]/90 border border-white/12 text-xs text-slate-200 hover:text-white hover:border-white/25 flex items-center gap-2 transition-colors shadow-lg"
-            title="Otvoriť spodnú lištu"
           >
             <span
               className="px-1.5 py-0.5 rounded font-mono-tabular text-[11px] font-bold text-slate-950"
@@ -878,7 +1039,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
             >
               {getGlyph(controls.keyBindings.toggleDock, controls.gamepadBindings.toggleDock)}
             </span>
-            <span>Menu lišta</span>
+            <span>{t(lang, 'dock.openMenu')}</span>
           </button>
         ) : (
           <div className="flex flex-col items-center">
@@ -887,7 +1048,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
               className="px-3 py-1 rounded-t-lg bg-[#0b101b]/90 border border-b-0 border-white/10 text-[11px] text-slate-300 hover:text-white flex items-center gap-1.5 transition-colors"
             >
               <ChevronDown className="w-3.5 h-3.5" />
-              <span>Zavrieť lištu</span>
+              <span>{t(lang, 'dock.closeMenu')}</span>
               <span className="font-mono-tabular text-[10px] text-slate-400">
                 [{getGlyph(controls.keyBindings.toggleDock, controls.gamepadBindings.toggleDock)}]
               </span>
@@ -897,10 +1058,9 @@ export const GameHUD: React.FC<GameHUDProps> = ({
               <button
                 onClick={() => onOpenModal('character')}
                 className="px-3 py-2 rounded-lg text-xs font-medium text-slate-200 hover:bg-white/10 flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
-                title="Zmeniť postavu"
               >
                 <Users className="w-4 h-4" style={{ color: accent }} />
-                <span>Postavy</span>
+                <span>{t(lang, 'dock.characters')}</span>
                 {hudMod.showControlsHint && (
                   <span className="text-[10px] font-mono-tabular text-slate-400">
                     [{getGlyph(controls.keyBindings.characterWheel, controls.gamepadBindings.characterWheel)}]
@@ -911,10 +1071,9 @@ export const GameHUD: React.FC<GameHUDProps> = ({
               <button
                 onClick={() => onOpenModal('inventory')}
                 className="px-3 py-2 rounded-lg text-xs font-medium text-slate-200 hover:bg-white/10 flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
-                title="Inventár a obchod"
               >
                 <Package className="w-4 h-4" style={{ color: accent }} />
-                <span>Inventár</span>
+                <span>{t(lang, 'dock.inventory')}</span>
                 {hudMod.showControlsHint && (
                   <span className="text-[10px] font-mono-tabular text-slate-400">
                     [{getGlyph(controls.keyBindings.inventory, controls.gamepadBindings.inventory)}]
@@ -925,10 +1084,9 @@ export const GameHUD: React.FC<GameHUDProps> = ({
               <button
                 onClick={() => onOpenModal('wardrobe')}
                 className="px-3 py-2 rounded-lg text-xs font-medium text-slate-200 hover:bg-white/10 flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
-                title="Úprava vzhľadu a kostýmov"
               >
                 <Shirt className="w-4 h-4" style={{ color: accent }} />
-                <span>Kostýmy</span>
+                <span>{t(lang, 'dock.wardrobe')}</span>
                 {hudMod.showControlsHint && (
                   <span className="text-[10px] font-mono-tabular text-slate-400">
                     [{formatKeyCode(controls.keyBindings.wardrobe)}]
@@ -939,10 +1097,9 @@ export const GameHUD: React.FC<GameHUDProps> = ({
               <button
                 onClick={() => onOpenModal('missions')}
                 className="px-3 py-2 rounded-lg text-xs font-medium text-slate-200 hover:bg-white/10 flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
-                title="Príbehové misie"
               >
                 <MapPin className="w-4 h-4" style={{ color: accent }} />
-                <span>Misie</span>
+                <span>{t(lang, 'dock.missions')}</span>
                 {hudMod.showControlsHint && (
                   <span className="text-[10px] font-mono-tabular text-slate-400">
                     [{formatKeyCode(controls.keyBindings.missions)}]
@@ -953,10 +1110,9 @@ export const GameHUD: React.FC<GameHUDProps> = ({
               <button
                 onClick={() => onOpenModal('map')}
                 className="px-3 py-2 rounded-lg text-xs font-medium text-slate-200 hover:bg-white/10 flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
-                title="Mapa mesta, obchody a GPS navigácia"
               >
                 <MapIcon className="w-4 h-4" style={{ color: accent }} />
-                <span>Mapa</span>
+                <span>{t(lang, 'dock.map')}</span>
                 {hudMod.showControlsHint && (
                   <span className="text-[10px] font-mono-tabular text-slate-400">
                     [{getGlyph(controls.keyBindings.openMap, controls.gamepadBindings.openMap)}]
@@ -967,10 +1123,9 @@ export const GameHUD: React.FC<GameHUDProps> = ({
               <button
                 onClick={onCycleCamera}
                 className="px-3 py-2 rounded-lg text-xs font-medium text-slate-200 hover:bg-white/10 flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
-                title="Prepnúť pohľad kamery"
               >
                 <Camera className="w-4 h-4" style={{ color: accent }} />
-                <span>Pohľad</span>
+                <span>{t(lang, 'dock.camera')}</span>
                 {hudMod.showControlsHint && (
                   <span className="text-[10px] font-mono-tabular text-slate-400">
                     [{getGlyph(controls.keyBindings.switchCamera, controls.gamepadBindings.switchCamera)}]
@@ -981,10 +1136,9 @@ export const GameHUD: React.FC<GameHUDProps> = ({
               <button
                 onClick={onTogglePhone}
                 className="px-3 py-2 rounded-lg text-xs font-medium text-slate-200 hover:bg-white/10 flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
-                title="Otvoriť telefón iVice (Priatelia, Taxík, Garáž, Cheaty)"
               >
                 <Smartphone className="w-4 h-4" style={{ color: accent }} />
-                <span>Telefón</span>
+                <span>{t(lang, 'dock.phone')}</span>
                 {hudMod.showControlsHint && (
                   <span className="text-[10px] font-mono-tabular text-slate-400">
                     [{getGlyph(controls.keyBindings.phone, controls.gamepadBindings.phone)}]
@@ -995,20 +1149,18 @@ export const GameHUD: React.FC<GameHUDProps> = ({
               <button
                 onClick={onOpenCloud}
                 className="px-3 py-2 rounded-lg text-xs font-medium text-sky-300 hover:bg-sky-500/15 border border-sky-400/25 flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
-                title="Uložiť alebo načítať hru na Cloud zadarmo"
               >
                 <Cloud className="w-4 h-4 text-sky-400" />
-                <span>Cloud</span>
+                <span>{t(lang, 'dock.cloud')}</span>
               </button>
 
               <button
                 onClick={() => onOpenModal('settings')}
                 className="px-3 py-2 rounded-lg text-xs font-semibold text-slate-950 flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
                 style={{ backgroundColor: accent }}
-                title="Nastavenia, Modifikácie a Cloud"
               >
                 <Settings className="w-4 h-4" />
-                <span>Nastavenia · Mody</span>
+                <span>{t(lang, 'dock.settings')}</span>
               </button>
             </div>
           </div>
@@ -1018,7 +1170,10 @@ export const GameHUD: React.FC<GameHUDProps> = ({
       {/* Quick Consumables & AI NPC talk hint bottom-left */}
       <div className="fixed bottom-4 left-[204px] hidden xl:flex items-center gap-2 text-[11px] text-slate-400 pointer-events-none">
         <span className="inline-flex items-center gap-1 px-2 py-1 rounded bg-[#0b101b]/80 border border-white/10">
-          <Shield className="w-3 h-3 text-emerald-400" /> [1] Lekárnička · [2] Vesta · [T] Rozhovor s NPC · [Q] Zbraň · [{getGlyph(controls.keyBindings.phone, controls.gamepadBindings.phone)}] Telefón
+          <Shield className="w-3 h-3 text-emerald-400" />{' '}
+          {t(lang, 'hud.quickHints', {
+            phone: getGlyph(controls.keyBindings.phone, controls.gamepadBindings.phone),
+          })}
         </span>
       </div>
     </div>
